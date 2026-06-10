@@ -1,0 +1,7 @@
+desc: "Web 爬虫"
+command: "{bin} -u {targets_file} -jc -kf all"
+use_on:
+  Endpoint:
+    desc: "爬取 Endpoint 链接和 JS"
+    params:
+      targets_file: "{url}"

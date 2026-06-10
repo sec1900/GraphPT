@@ -1,0 +1,7 @@
+desc: "企业 ICP/备案/分支域名收集"
+command: "{bin} -f {targets_file} -field icp -invest 51 -branch -deep 2 -delay 5 -json -out-type json"
+use_on:
+  Asset:
+    desc: "从企业名发现根域名"
+    params:
+      targets_file: "{name}"

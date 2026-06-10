@@ -1,0 +1,15 @@
+desc: "服务识别"
+command: "{bin} -sT -sV -Pn -T4 -p {ports} {ip} -oX -"
+use_on:
+  IP:
+    desc: "对 IP 的已知端口做服务识别"
+    params:
+      ip: "{value}"
+      ports: "{ports}"
+      scan_target: "{value}|{ports}"
+  standalone_ip:
+    desc: "对独立 IP 的已知端口做服务识别"
+    params:
+      ip: "{value}"
+      ports: "{ports}"
+      scan_target: "{value}|{ports}"

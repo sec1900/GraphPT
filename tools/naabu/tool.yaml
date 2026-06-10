@@ -1,0 +1,11 @@
+desc: "快速端口发现"
+command: "{bin} -host {ip} -p - -silent -json"
+use_on:
+  IP:
+    desc: "扫描 IP 全端口"
+    params:
+      ip: "{value}"
+  standalone_ip:
+    desc: "扫描独立 IP 全端口"
+    params:
+      ip: "{value}"

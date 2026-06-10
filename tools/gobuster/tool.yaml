@@ -1,0 +1,18 @@
+desc: "目录/DNS/虚拟主机多模式扫描"
+command: "{bin} dir -u {url} -w res/wordlists/common.txt"
+use_on:
+  Endpoint:
+    desc: "目录/路径发现"
+    command: "{bin} dir -u {url} -w res/wordlists/common.txt -t 50"
+    params:
+      url: "{url}"
+  RootDomain:
+    desc: "子域名爆破"
+    command: "{bin} dns -d {domain} -w res/wordlists/common.txt -t 50"
+    params:
+      domain: "{value}"
+  IP:
+    desc: "虚拟主机发现"
+    command: "{bin} vhost -u http://{ip} -w res/wordlists/common.txt -t 50"
+    params:
+      ip: "{value}"

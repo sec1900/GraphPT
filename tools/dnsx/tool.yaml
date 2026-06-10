@@ -1,0 +1,7 @@
+desc: "DNS 解析"
+command: "{bin} -l {targets_file} -json -silent"
+use_on:
+  Subdomain:
+    desc: "解析子域名到 IP"
+    params:
+      targets_file: "{value}"
