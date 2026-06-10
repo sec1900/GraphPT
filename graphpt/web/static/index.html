@@ -1333,7 +1333,11 @@ document.getElementById('explorer-table').addEventListener('contextmenu', functi
   if (!_ctxMenuNode || _ctxMenuNode.type === '_load_more' || _ctxMenuNode.type === 'ScanRun') return;
 
   const menu = document.getElementById('ctx-menu');
-  _ctxMenuTools = (_cfgTools.length ? _cfgTools : PL_TOOLS).filter(t => toolUseRule(t, _ctxMenuNode));
+  const allTools = _cfgTools.length ? _cfgTools : PL_TOOLS;
+  // Show all tools; matched ones first
+  const matched = allTools.filter(t => toolUseRule(t, _ctxMenuNode));
+  const unmatched = allTools.filter(t => !toolUseRule(t, _ctxMenuNode));
+  _ctxMenuTools = [...matched, ...unmatched];
   renderToolContextMenu('');
   menu.style.display = 'block';
   menu.style.left = Math.min(e.clientX, window.innerWidth - 200) + 'px';
@@ -1381,6 +1385,7 @@ function renderToolContextMenu(filter) {
     <div class="item" style="color:var(--muted);cursor:default;font-size:10px">${esc(_ctxMenuNode.type)}: ${esc(targetVal.substring(0, 40))}</div>
     <input class="ctx-search" id="ctx-tool-search" placeholder="Search tool/desc/command..." value="${esc(filter || '')}" onclick="event.stopPropagation()" oninput="renderToolContextMenu(this.value)" />
     <div class="sep"></div>
+    ${_ctxMenuNode.type === 'Asset' ? '<div class="item" onclick="scanAllPreview()"><span style="color:var(--accent)">Scan All Unscanned</span><span class="hint">batch</span></div><div class="sep"></div>' : ''}
     ${tools.map(t => `<div class="item" onclick="runToolOnNode('${esc(t.name)}')">
       <span>${esc(t.name)}</span><span class="hint">${esc((toolUseRule(t, _ctxMenuNode)?.desc || t.desc || '').substring(0, 42))}</span>
     </div>`).join('') || '<div class="item" style="color:var(--muted);cursor:default">No tools</div>'}
