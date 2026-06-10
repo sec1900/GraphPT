@@ -6,8 +6,10 @@
 - 跑完自动刷新攻击面树，新节点自动出现
 - Pipeline 保留做定时任务（cron），日常操作走右键
 
-## Asset 级别 Scan All Unscanned
+## Asset 级别 Scan All Unscanned ✅
 - 对 Asset 下所有未扫节点批量跑对应 category 的工具
+- 队列式串行执行，内存安全，支持中止
+- Dashboard 按钮 + 预览弹窗 + 进度条
 - 遍历 RootDomain → subfinder/crt
 - 遍历 IP → nmap/masscan
 - 遍历 HTTPEndpoint → katana/dirbuster/ffuf/nuclei
@@ -41,6 +43,8 @@
 - API Docs 入口：Header 增加 /docs 链接 ✅
 - Config 页改为完整 YAML 编辑器：保存时保留 category/input_query/input_mapping，并显示工具摘要状态 ✅
 - 右键 Ad-hoc 工具执行闭环：支持工具搜索、命令预览、单工具直接执行 ✅
+- LLM Agent 图分析模块：graph_tools + 两阶段门控 + CLI/Web 入口 ✅
+- Scan All Unscanned：按资产串行批量扫描，Dashboard 一键触发 ✅
 
 ## 待做
 - 攻击面批量操作（勾选父子联动 + 批量删除/导出）← 已回退
@@ -93,10 +97,11 @@
 - nuclei 结果已可写入 Vulnerability 节点，并已补 Web 列表入口。
 - 仍缺完整工作流：验证 → 评级 → 修复 → 复测。
 
-### Agent 决策层
-- 原设计第三层：Agent 读图 → 分析 → 决定下一步动作 → 调用工具 → 写入结果
-- 当前手动版：右键菜单跑工具
-- 缺少：LLM 集成、动作空间定义、决策历史记录
+### Agent 决策层 ✅
+- Agent 读图 → 分析 → 决定下一步动作 → 调用工具 → 写入结果
+- 已实现：graph_tools（graph_query/graph_summary/graph_attack_paths/trigger_scan）
+- 两阶段门控：分析阶段只读，拓展阶段解锁 trigger_scan
+- CLI + Web 双入口，ReAct agent loop 驱动
 
 ### 报告生成
 - Neo4j 里有全部数据，但没法导出成客户要的 PDF/Word 报告
