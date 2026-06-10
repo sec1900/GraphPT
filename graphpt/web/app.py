@@ -1840,6 +1840,53 @@ async def check_tools():
 
 
 # ============================================================
+# Scan All Unscanned API
+# ============================================================
+
+@web_app.get("/api/scan-all/preview")
+async def api_scan_all_preview(asset_id: str = "default"):
+    """返回每个工具的未扫描目标数量。"""
+    try:
+        from graphpt.collector.scan_all import get_unscanned_summary
+        summary = get_unscanned_summary(asset_id)
+        return {"ok": True, "asset_id": asset_id, "tools": summary}
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
+@web_app.post("/api/scan-all")
+async def api_scan_all_start(body: dict | None = None):
+    """启动批量扫描。body: {asset_id, tools?}"""
+    body = body or {}
+    asset_id = body.get("asset_id", "default")
+    tools = body.get("tools")
+    try:
+        from graphpt.collector.scan_all import scan_all_unscanned
+        result = scan_all_unscanned(asset_id, tools=tools)
+        return result
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
+@web_app.get("/api/scan-all/status")
+async def api_scan_all_status(job_id: str | None = None):
+    """获取批量扫描进度。"""
+    from graphpt.collector.scan_all import get_job_status
+    return get_job_status(job_id)
+
+
+@web_app.post("/api/scan-all/stop")
+async def api_scan_all_stop(body: dict | None = None):
+    """中止批量扫描。"""
+    body = body or {}
+    job_id = body.get("job_id", "")
+    if not job_id:
+        return JSONResponse({"ok": False, "error": "job_id required"}, status_code=400)
+    from graphpt.collector.scan_all import stop_job
+    return stop_job(job_id)
+
+
+# ============================================================
 # Graph Agent API
 # ============================================================
 

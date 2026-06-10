@@ -234,6 +234,7 @@
         <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
       </div>
       <span class="spacer"></span>
+      <button class="btn outline small" onclick="scanAllPreview()" id="btn-scan-all">Scan All Unscanned</button>
       <span style="font-size:11px;color:var(--muted)" id="dash-asset-name"></span>
     </div>
     <div class="card-grid" id="dash-cards"></div>
@@ -530,6 +531,25 @@
     <div class="actions">
       <button class="btn outline" onclick="document.getElementById('asset-modal-overlay').style.display='none'">Cancel</button>
       <button class="btn" onclick="createAsset()">Create</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="scan-all-overlay" style="display:none">
+  <div class="modal" style="max-width:500px">
+    <h3>Scan All Unscanned</h3>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Queue all tools sequentially for unscanned targets under this asset.</p>
+    <div id="scan-all-preview" style="font-size:13px;margin-bottom:16px"></div>
+    <div id="scan-all-progress" style="display:none;margin-bottom:12px">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:4px" id="scan-all-status-text"></div>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:4px;height:20px;overflow:hidden">
+        <div id="scan-all-bar" style="height:100%;background:var(--accent);transition:width .3s;width:0%"></div>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn outline" onclick="document.getElementById('scan-all-overlay').style.display='none'" id="scan-all-close">Close</button>
+      <button class="btn" onclick="scanAllStart()" id="scan-all-go">Start</button>
+      <button class="btn danger" onclick="scanAllStop()" id="scan-all-stop" style="display:none">Stop</button>
     </div>
   </div>
 </div>
@@ -2093,6 +2113,75 @@ function tutOpen() {
   _tutIdx = 0;
   tutRender();
   document.getElementById('tut-overlay').style.display = 'flex';
+}
+
+// ============================================================
+// Scan All Unscanned
+// ============================================================
+let _scanAllJobId = null;
+let _scanAllPoll = null;
+
+function scanAllPreview() {
+  const assetId = document.getElementById('dash-asset-sel').value || 'default';
+  const box = document.getElementById('scan-all-preview');
+  box.innerHTML = '<span class="loading">Loading...</span>';
+  document.getElementById('scan-all-progress').style.display = 'none';
+  document.getElementById('scan-all-go').style.display = '';
+  document.getElementById('scan-all-stop').style.display = 'none';
+  document.getElementById('scan-all-overlay').style.display = 'flex';
+
+  fetch(`/api/scan-all/preview?asset_id=${assetId}`).then(r=>r.json()).then(d=>{
+    if (!d.ok) { box.textContent = d.error || 'failed'; return; }
+    const tools = d.tools || {};
+    const keys = Object.keys(tools);
+    if (!keys.length) { box.textContent = 'All targets already scanned!'; document.getElementById('scan-all-go').style.display='none'; return; }
+    const total = Object.values(tools).reduce((a,b)=>a+b,0);
+    box.innerHTML = `<div style="margin-bottom:8px;font-weight:600">${total} unscanned targets across ${keys.length} tools:</div>` +
+      keys.map(k=>`<div style="display:flex;justify-content:space-between;padding:2px 0"><span>${k}</span><span style="color:var(--accent)">${tools[k]}</span></div>`).join('');
+  });
+}
+
+function scanAllStart() {
+  const assetId = document.getElementById('dash-asset-sel').value || 'default';
+  document.getElementById('scan-all-go').style.display = 'none';
+  document.getElementById('scan-all-stop').style.display = '';
+  document.getElementById('scan-all-progress').style.display = 'block';
+  document.getElementById('scan-all-status-text').textContent = 'Starting...';
+
+  fetch('/api/scan-all',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId})})
+    .then(r=>r.json()).then(d=>{
+      if(!d.ok){ document.getElementById('scan-all-status-text').textContent = d.error||'failed'; return; }
+      _scanAllJobId = d.job_id;
+      pollScanAll();
+    });
+}
+
+function pollScanAll() {
+  if(_scanAllPoll) clearInterval(_scanAllPoll);
+  _scanAllPoll = setInterval(()=>{
+    if(!_scanAllJobId) return;
+    fetch(`/api/scan-all/status?job_id=${_scanAllJobId}`).then(r=>r.json()).then(d=>{
+      const txt = document.getElementById('scan-all-status-text');
+      const bar = document.getElementById('scan-all-bar');
+      if(d.error==='not found'){ clearInterval(_scanAllPoll); return; }
+      const [done,total] = (d.progress||'0/0').split('/').map(Number);
+      const pct = total ? Math.round(done/total*100) : 0;
+      bar.style.width = pct+'%';
+      txt.textContent = d.current_tool ? `${d.progress} — running ${d.current_tool}...` : `${d.progress} — ${d.status}`;
+      if(d.status==='done'||d.status==='stopped'||d.status==='error'){
+        clearInterval(_scanAllPoll);
+        document.getElementById('scan-all-stop').style.display='none';
+        txt.textContent += d.status==='done' ? ' Complete!' : '';
+        bar.style.width = '100%';
+        loadDashboard();
+      }
+    });
+  }, 2000);
+}
+
+function scanAllStop() {
+  if(!_scanAllJobId) return;
+  fetch('/api/scan-all/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_id:_scanAllJobId})});
 }
 
 // ============================================================
