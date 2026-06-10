@@ -1,13 +1,22 @@
 @echo off
 cd /d %~dp0
 echo Stopping GraphPT...
-if exist "tools\neo4j\bin\neo4j.bat" (
-    call tools\neo4j\bin\neo4j.bat stop
-    if %ERRORLEVEL% neq 0 (
-        echo WARN: Neo4j did not stop. Run stop.bat as Administrator if Neo4j is still running.
-    )
+
+echo Stopping Web Server + Celery...
+for /f "tokens=2" %%p in ('netstat -ano ^| findstr ":8080 " ^| findstr "LISTENING" 2^>nul') do (
+    taskkill /PID %%p /F >nul 2>&1
 )
-taskkill /IM python.exe /F >nul 2>&1
+wmic process where "CommandLine like '%%graphpt.collector.app%%' and name='python.exe'" call terminate >nul 2>&1
+wmic process where "CommandLine like '%%celery%%graphpt%%' and name='python.exe'" call terminate >nul 2>&1
+
+echo Stopping Redis...
 taskkill /IM memurai.exe /F >nul 2>&1
+
+echo Stopping Neo4j...
+if exist "tools\neo4j\bin\neo4j.bat" (
+    call tools\neo4j\bin\neo4j.bat stop >nul 2>&1
+)
+wmic process where "CommandLine like '%%neo4j%%' and name='java.exe'" call terminate >nul 2>&1
+
 echo Done.
 pause

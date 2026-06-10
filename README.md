@@ -1,34 +1,31 @@
 # GraphPT
 
-Graph-driven automated penetration testing platform. Uses Neo4j knowledge graph for asset management, AI for decision-making, and YAML-configured tool orchestration for reconnaissance and vulnerability discovery.
+Graph-driven automated penetration testing platform. Automated tool chains handle reconnaissance and data collection, results flow into a Neo4j knowledge graph, and (planned) an AI Agent reads the graph for intelligent analysis and penetration decisions.
 
 ## Architecture
 
 ```
-AI Agent (CLI)
-    ↓ decides what to run next
-Pipeline Engine
-    ↓ executes tool stages
-tools/*/tool.yaml (per-tool config)
-    ↓ findings
-Neo4j Graph DB (asset relationships)
+Pipeline Engine          Neo4j Graph DB         AI Agent (planned)
+  recon / scan / collect ──→ asset relationships ──→ read graph → AI pentest
 ```
+
+**Implemented:** automated tool orchestration + data collection into graph
+**Planned:** LLM Agent reads Neo4j graph for context-aware penetration decisions
 
 ## Quick Start
 
 ```bash
 # 1. Install dependencies
-pip install -r requirements.txt
+install.bat
 
 # 2. Configure environment
-cp .env.example .env
 # Edit .env: Neo4j credentials, proxy, API keys
 
-# 3. Start infrastructure (Neo4j + Redis)
+# 3. Start all services (Neo4j + Redis + Worker + Web)
 start.bat
 
-# 4. Run CLI
-python -m graphpt
+# 4. Open browser
+# http://127.0.0.1:8080
 ```
 
 ## Configuration
