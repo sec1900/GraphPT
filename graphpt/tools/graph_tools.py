@@ -12,6 +12,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from graphpt.collector.neo4j_client import _get_driver
 from graphpt.common.log import get_logger
 from graphpt.tools.core import ToolDef, register_tool
@@ -151,7 +154,14 @@ def _exec_graph_attack_paths(arguments: dict[str, Any], **kwargs: Any) -> dict[s
         driver = _get_driver()
         with driver.session() as session:
             records = [dict(r) for r in session.run(cypher, asset_id=asset_id)]
-        return {"success": True, "asset_id": asset_id, "paths": records}
+        seen = set()
+        deduped = []
+        for r in records:
+            key = (r.get("entry_point"), r.get("target_id"))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(r)
+        return {"success": True, "asset_id": asset_id, "paths": deduped}
     except Exception as e:
         return {"error": str(e), "success": False}
 
