@@ -13,13 +13,37 @@ if %ERRORLEVEL% neq 0 (
 )
 
 echo Neo4j...
+if not exist "tools\neo4j\bin\neo4j.bat" (
+    echo ERROR: tools\neo4j not found. Run install.bat or manually extract Neo4j to tools\neo4j\
+    pause
+    exit /b 1
+)
 call tools\neo4j\bin\neo4j.bat start
+if %ERRORLEVEL% neq 0 (
+    echo ERROR: Neo4j failed to start. Run this script as Administrator and check tools\neo4j\logs\neo4j.log
+    pause
+    exit /b 1
+)
+for /l %%i in (1,1,30) do (
+    powershell -NoProfile -Command "exit (1 - [int](Test-NetConnection 127.0.0.1 -Port 7687 -InformationLevel Quiet))" >nul 2>&1
+    if not errorlevel 1 goto neo4j_ready
+    timeout /t 1 /nobreak >nul
+)
+echo ERROR: Neo4j did not open port 7687 in time. Check tools\neo4j\logs\neo4j.log
+pause
+exit /b 1
+:neo4j_ready
 
 echo Redis...
+if not exist "tools\memurai\memurai.exe" (
+    echo ERROR: tools\memurai not found. Download Memurai to tools\memurai\
+    pause
+    exit /b 1
+)
 start "" /B "tools\memurai\memurai.exe" --port 6379
 
 echo Celery Worker...
-start "" /MIN cmd /c "cd /d %~dp0 && python -m celery -A graphpt.collector.app worker -P solo -Q celery"
+start "" /MIN cmd /c "cd /d %~dp0 && python -m celery -A graphpt.collector.app worker -P solo -Q celery,collect,deep_crawl"
 
 echo Web Server...
 start "" /MIN cmd /c "cd /d %~dp0 && python -m uvicorn graphpt.web.app:web_app --host 0.0.0.0 --port 8080"

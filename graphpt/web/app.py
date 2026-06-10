@@ -17,10 +17,13 @@ import yaml
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from dotenv import load_dotenv
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 _TOOLS_DIR = _PROJECT_ROOT / "tools"
+
+load_dotenv(_PROJECT_ROOT / ".env")
 
 web_app = FastAPI(title="GraphPT Admin", version="0.1.0")
 
@@ -32,22 +35,24 @@ _neo4j_driver = None
 _neo4j_available = None  # None=未检测, True=可用, False=不可用
 
 def _check_neo4j() -> bool:
-    """快速检测 Neo4j 是否可达。结果缓存 30 秒。"""
+    """快速检测 Neo4j 是否可认证查询。结果缓存 30 秒。"""
     global _neo4j_available
     now = time.time()
     if _neo4j_available is not None and now - getattr(_check_neo4j, "_ts", 0) < 30:
         return _neo4j_available
     try:
-        from neo4j import GraphDatabase
-        import socket
-        uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-        # bolt://localhost:7687 → (localhost, 7687)
-        host = uri.replace("bolt://", "").replace("neo4j://", "").split(":")[0]
-        port = int(uri.split(":")[-1]) if ":" in uri.split("//")[-1] else 7687
-        sock = socket.create_connection((host, port), timeout=2)
-        sock.close()
+        driver = _neo4j()
+        driver.verify_connectivity()
+        with driver.session() as session:
+            session.run("RETURN 1 AS ok").consume()
         _neo4j_available = True
     except Exception:
+        if _neo4j_driver is not None:
+            try:
+                _neo4j_driver.close()
+            except Exception:
+                pass
+            globals()["_neo4j_driver"] = None
         _neo4j_available = False
     _check_neo4j._ts = time.time()
     return _neo4j_available
@@ -170,20 +175,20 @@ async def dashboard(asset_id: str = "default"):
             "ips": """
                 MATCH (a:Asset {id: $aid})
                 CALL { WITH a MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip
-                       UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip }
+                       UNION WITH a MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip }
                 RETURN count(DISTINCT ip) AS c
             """,
             "ports": """
                 MATCH (a:Asset {id: $aid})
                 CALL { WITH a MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p:Port) RETURN p
-                       UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(p:Port) RETURN p }
-                RETURN count(p) AS c
+                       UNION WITH a MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(p:Port) RETURN p }
+                RETURN count(DISTINCT p) AS c
             """,
             "http_endpoints": """
                 MATCH (a:Asset {id: $aid})
                 CALL { WITH a MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep
-                       UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep }
-                RETURN count(ep) AS c
+                       UNION WITH a MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep }
+                RETURN count(DISTINCT ep) AS c
             """,
         }
         for key, query in count_queries.items():
@@ -193,8 +198,18 @@ async def dashboard(asset_id: str = "default"):
         # 端点状态分布
         rows = _neo4j_query(
             """
-            MATCH (:Asset {id: $aid})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
-                  -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+            MATCH (a:Asset {id: $aid})
+            CALL {
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
+                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
+            }
+            WITH DISTINCT ep
             RETURN ep.crawl_status AS status, ep.status_code AS code, count(ep) AS c
             ORDER BY c DESC
             """,
@@ -208,7 +223,7 @@ async def dashboard(asset_id: str = "default"):
             """
             MATCH (a:Asset {id: $aid})
             CALL { WITH a MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip
-                   UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip }
+                   UNION WITH a MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip }
             WITH DISTINCT ip
             OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
             WITH ip, count(p) AS port_cnt
@@ -227,12 +242,13 @@ async def dashboard(asset_id: str = "default"):
             """
             MATCH (a:Asset {id: $aid})
             CALL { WITH a MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep
-                   UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep }
+                   UNION WITH a MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep }
             WITH DISTINCT ep
             OPTIONAL MATCH (ep)-[:EXPOSES_PATH]->(d:DirEntry)
             OPTIONAL MATCH (ep)-[:REFERENCES]->(f:File)
+            WITH ep, count(DISTINCT d) AS dir_cnt, count(DISTINCT f) AS file_cnt
             RETURN count(ep) AS total_eps,
-                   sum(CASE WHEN d IS NULL AND f IS NULL THEN 1 ELSE 0 END) AS unscanned_eps
+                   sum(CASE WHEN dir_cnt = 0 AND file_cnt = 0 THEN 1 ELSE 0 END) AS unscanned_eps
             """,
             aid=asset_id,
         )
@@ -1035,8 +1051,9 @@ async def list_surfaces_ips(asset_id: str = "default", page: int = 1, per_page: 
               WITH a
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)-[:RESOLVES_TO]->(ip:IP)
               OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
-              RETURN ip, collect(s.value) AS subdomains, collect(DISTINCT p.number) AS ports
+              RETURN ip, collect(DISTINCT s.value) AS subdomains, collect(DISTINCT p.number) AS ports
               UNION
+              WITH a
               MATCH (a)-[:HAS_IP]->(ip:IP)
               OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
               RETURN ip, [] AS subdomains, collect(DISTINCT p.number) AS ports
@@ -1054,7 +1071,7 @@ async def list_surfaces_ips(asset_id: str = "default", page: int = 1, per_page: 
             """
             MATCH (a:Asset {id: $aid})
             CALL { WITH a MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip
-                   UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip }
+                   UNION WITH a MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip }
             RETURN count(DISTINCT ip) AS c
             """,
             aid=asset_id,

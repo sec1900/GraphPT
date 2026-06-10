@@ -241,3 +241,25 @@ def test_dashboard_recent_changes_are_asset_scoped(monkeypatch):
     assert "WITH DISTINCT ep" in change_query
     assert "MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)" in change_query
     assert change_params["aid"] == "asset-a"
+
+
+def test_asset_union_branches_keep_asset_scope(monkeypatch):
+    calls = []
+
+    def fake_query(cypher, **params):
+        calls.append((cypher, params))
+        if "count(DISTINCT ip)" in cypher:
+            return [{"c": 0}]
+        return []
+
+    monkeypatch.setattr(web_app_mod, "_neo4j_query", fake_query)
+
+    result = asyncio.run(web_app_mod.list_surfaces_ips(asset_id="asset-a"))
+
+    assert result["ok"] is True
+    list_query, list_params = calls[0]
+    count_query, count_params = calls[1]
+    assert "UNION\n              WITH a\n              MATCH (a)-[:HAS_IP]->(ip:IP)" in list_query
+    assert "UNION WITH a MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip" in count_query
+    assert list_params["aid"] == "asset-a"
+    assert count_params["aid"] == "asset-a"
