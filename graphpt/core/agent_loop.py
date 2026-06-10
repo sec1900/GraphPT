@@ -106,6 +106,9 @@ _PARALLEL_SAFE_TOOL_NAMES = frozenset({
     "Grep",
     "Glob",
     "Task",
+    "graph_query",
+    "graph_summary",
+    "graph_attack_paths",
 })
 
 

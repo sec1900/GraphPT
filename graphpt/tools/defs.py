@@ -304,6 +304,10 @@ def init_builtin_tools() -> None:
         _exec_oob_callback,
     )
 
+    # Neo4j 图查询工具（Agent 读图分析）
+    from graphpt.tools.graph_tools import init_graph_tools
+    init_graph_tools()
+
 
 # TodoWrite 式任务清单：每次调用提交「完整」清单，覆盖式更新。
 _TODO_STATUSES = ("pending", "in_progress", "completed")

@@ -171,3 +171,40 @@ EXPLORATION_FLOW_INSTRUCTION = """
 
 每次实验后记录结果到 @attempts/attempts.jsonl，一试一行。试前先查已有记录避免重复。确认漏洞后入库 finding + 写 @evidence/。
 """
+
+GRAPH_ANALYST_TASK = """
+## 任务：图数据库攻击面分析
+
+读取指定资产的 Neo4j 图数据库，输出结构化攻击面分析报告。
+
+### 步骤
+
+1. 用 graph_summary(asset_id=$ASSET_ID) 获取资产全景
+2. 用 graph_attack_paths(asset_id=$ASSET_ID) 查找攻击路径
+3. 用 graph_query 深入查询：
+   - 高危漏洞详情
+   - 未覆盖节点（DNS未解析/端口未扫/端点未指纹）
+   - 同 IP 多服务（横向移动面）
+   - Secret 节点（凭据利用）
+
+### 输出
+
+写入 `@operations/graph_analysis.json`：
+
+```json
+{
+  "asset_id": "$ASSET_ID",
+  "summary": {"root_domains": N, "subdomains": N, "ips": N, "ports": N, "endpoints": N, "vulns": N},
+  "coverage_gaps": [
+    {"type": "unresolved_subdomains", "count": N, "recommended_tool": "dnsx"},
+    {"type": "unscanned_ips", "count": N, "recommended_tool": "naabu"}
+  ],
+  "attack_paths": [
+    {"entry": "ep:GET:https://...", "target": "vuln:...", "hops": 2, "severity": "critical"}
+  ],
+  "recommended_actions": [
+    {"priority": 1, "tool": "nuclei", "target": "...", "reason": "..."}
+  ]
+}
+```
+"""

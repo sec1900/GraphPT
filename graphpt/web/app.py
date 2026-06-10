@@ -1840,6 +1840,96 @@ async def check_tools():
 
 
 # ============================================================
+# Graph Agent API
+# ============================================================
+
+import threading
+from pydantic import BaseModel
+
+class _AgentRequest(BaseModel):
+    asset_id: str
+    prompt: str = ""
+
+_agent_sessions: dict[str, dict] = {}
+_agent_lock = threading.Lock()
+
+
+@web_app.post("/api/agent/analyze")
+async def api_agent_analyze(req: _AgentRequest):
+    """启动图分析 Agent（分析阶段）。"""
+    from graphpt.core.graph_agent import run_graph_agent
+
+    session_id = f"{req.asset_id}_{int(time.time())}"
+
+    def _run():
+        try:
+            result = run_graph_agent(
+                asset_id=req.asset_id,
+                phase="analyze",
+                user_prompt=req.prompt or "",
+                workspace_root=_PROJECT_ROOT,
+            )
+            with _agent_lock:
+                _agent_sessions[session_id]["status"] = "done"
+                _agent_sessions[session_id]["result"] = result.final_text
+                _agent_sessions[session_id]["tool_calls"] = result.tool_calls_count
+        except Exception as e:
+            with _agent_lock:
+                _agent_sessions[session_id]["status"] = "error"
+                _agent_sessions[session_id]["error"] = str(e)
+
+    with _agent_lock:
+        _agent_sessions[session_id] = {"status": "running", "asset_id": req.asset_id, "phase": "analyze"}
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "session_id": session_id}
+
+
+@web_app.get("/api/agent/status")
+async def api_agent_status(session_id: str = ""):
+    """获取 Agent 运行状态。"""
+    if not session_id:
+        with _agent_lock:
+            return {"ok": True, "sessions": {k: v["status"] for k, v in _agent_sessions.items()}}
+    with _agent_lock:
+        session = _agent_sessions.get(session_id)
+    if not session:
+        raise HTTPException(404, "session not found")
+    return {"ok": True, **session}
+
+
+@web_app.post("/api/agent/expand")
+async def api_agent_expand(req: _AgentRequest):
+    """启动拓展阶段 Agent。"""
+    from graphpt.core.graph_agent import run_graph_agent
+
+    session_id = f"{req.asset_id}_expand_{int(time.time())}"
+
+    def _run():
+        try:
+            result = run_graph_agent(
+                asset_id=req.asset_id,
+                phase="expand",
+                user_prompt=req.prompt or "",
+                workspace_root=_PROJECT_ROOT,
+            )
+            with _agent_lock:
+                _agent_sessions[session_id]["status"] = "done"
+                _agent_sessions[session_id]["result"] = result.final_text
+                _agent_sessions[session_id]["tool_calls"] = result.tool_calls_count
+        except Exception as e:
+            with _agent_lock:
+                _agent_sessions[session_id]["status"] = "error"
+                _agent_sessions[session_id]["error"] = str(e)
+
+    with _agent_lock:
+        _agent_sessions[session_id] = {"status": "running", "asset_id": req.asset_id, "phase": "expand"}
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"ok": True, "session_id": session_id}
+
+
+# ============================================================
 # 启动入口
 # ============================================================
 

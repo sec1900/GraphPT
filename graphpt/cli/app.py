@@ -102,7 +102,8 @@ class _SessionAttackState:
 
         # WAF 检测缓存
         if self.waf_results:
-            payload["waf_results"] = list(self.waf_results)
+            try:
+                payload["waf_results"] = list(self.waf_results)
             except Exception:
                 pass
 
@@ -607,6 +608,12 @@ def _build_cli_system_prompt() -> str:
         cap_block = build_capability_block()
         if cap_block:
             parts.append(cap_block)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from graphpt.core.graph_agent_prompt import GRAPH_SCHEMA_KNOWLEDGE, GRAPH_AGENT_METHODOLOGY
+        parts.append("\n\n" + GRAPH_SCHEMA_KNOWLEDGE)
+        parts.append("\n\n" + GRAPH_AGENT_METHODOLOGY)
     except Exception:  # noqa: BLE001
         pass
     return "".join(parts)
