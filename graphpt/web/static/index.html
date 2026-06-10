@@ -1,0 +1,2092 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GraphPT Admin</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --border: #2a2d3a;
+    --text: #c9d1d9;
+    --muted: #6e7681;
+    --accent: #58a6ff;
+    --green: #3fb950;
+    --red: #f85149;
+    --orange: #d2991d;
+    --purple: #a371f7;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  header h1 { font-size: 18px; font-weight: 600; color: var(--accent); }
+  header .sub { font-size: 12px; color: var(--muted); }
+  nav {
+    display: flex;
+    gap: 2px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+  }
+  nav button {
+    background: none; border: none; color: var(--muted);
+    padding: 10px 16px; font-size: 13px; cursor: pointer;
+    border-bottom: 2px solid transparent; transition: all .15s;
+  }
+  nav button:hover { color: var(--text); }
+  nav button.active { color: var(--accent); border-bottom-color: var(--accent); }
+  main { padding: 24px; max-width: 1400px; margin: 0 auto; }
+  .page { display: none; }
+  .page.active { display: block; }
+
+  /* Cards */
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px,1fr)); gap: 16px; margin-bottom: 24px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px;
+  }
+  .card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+  .card .value.accent { color: var(--accent); }
+  .card .value.green { color: var(--green); }
+  .card .value.orange { color: var(--orange); }
+  .card .value.red { color: var(--red); }
+  .card .value.purple { color: var(--purple); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: rgba(255,255,255,.02); }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 11px; font-weight: 600;
+  }
+  .badge.ok { background: rgba(63,185,80,.15); color: var(--green); }
+  .badge.err { background: rgba(248,81,73,.15); color: var(--red); }
+  .badge.warn { background: rgba(210,153,29,.15); color: var(--orange); }
+
+  /* Buttons */
+  .btn {
+    background: var(--accent); color: #fff; border: none;
+    padding: 6px 14px; border-radius: 6px; font-size: 12px; cursor: pointer;
+    font-weight: 500; transition: opacity .15s;
+  }
+  .btn:hover { opacity: .85; }
+  .btn.danger { background: var(--red); }
+  .btn.small { padding: 3px 10px; font-size: 11px; }
+  .btn.outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  .btn.outline:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* Forms */
+  input, textarea, select {
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); padding: 6px 10px; border-radius: 6px;
+    font-size: 13px; font-family: inherit;
+  }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+  input { width: 240px; }
+  textarea { width: 100%; }
+
+  /* Toolbar */
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .toolbar .spacer { flex: 1; }
+
+  /* Pagination */
+  .pagination { display: flex; gap: 4px; align-items: center; margin-top: 16px; font-size: 13px; }
+  .pagination button { min-width: 28px; }
+  .pagination .info { color: var(--muted); font-size: 12px; margin: 0 8px; }
+
+  /* Status dot */
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .dot.on { background: var(--green); }
+  .dot.off { background: var(--red); }
+
+  /* Section */
+  .section { margin-bottom: 24px; }
+  .section-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: var(--text); }
+
+  /* Sub-tabs */
+  .sub-tabs { display: flex; gap: 2px; margin-bottom: 16px; }
+  .sub-tabs button {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    padding: 6px 14px; font-size: 12px; cursor: pointer; border-radius: 6px;
+  }
+  .sub-tabs button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  /* Code */
+  .code-block { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .code-block pre { padding: 16px; overflow-x: auto; font-size: 12px; line-height: 1.5; margin: 0; }
+
+  /* Toast */
+  .toast {
+    position: fixed; bottom: 24px; right: 24px;
+    background: var(--surface); border: 1px solid var(--border);
+    padding: 12px 20px; border-radius: 8px; font-size: 13px;
+    z-index: 999; animation: slideUp .3s ease;
+  }
+  .toast.ok { border-color: var(--green); }
+  .toast.err { border-color: var(--red); }
+  @keyframes slideUp { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+  /* Loading */
+  .loading { color: var(--muted); font-size: 13px; padding: 24px 0; }
+  .loading::before { content: '⟳ '; animation: spin 1s linear infinite; display: inline-block; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+  /* Confirm modal */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6);
+    display: flex; align-items: center; justify-content: center; z-index: 1000;
+  }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; max-width: 420px; width: 90%;
+  }
+  .modal h3 { margin-bottom: 8px; }
+  .modal p { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  .modal .actions { display: flex; gap: 8px; justify-content: flex-end; }
+  /* Explorer tree table */
+  #explorer-table { table-layout: fixed; border-collapse: collapse; }
+  #explorer-table td:first-child { padding: 0; text-align: center; }
+  #explorer-table { table-layout: fixed; border-collapse: collapse; }
+  #explorer-table th:nth-child(1) { width: 32px; }
+  #explorer-table th:nth-child(2) { width: auto; }
+  #explorer-table th:nth-child(3) { width: 35%; }
+  #explorer-table th:nth-child(4) { width: 150px; }
+  #explorer-table th:nth-child(5) { width: 120px; }
+  .ex-toggle { display: inline-flex; width: 32px; height: 28px; align-items: center; justify-content: center; font-size: 14px; color: var(--muted); cursor: pointer; user-select: none; border-radius: 4px; }
+  .ex-toggle:hover { color: var(--text); background: rgba(255,255,255,.05); }
+  .ex-toggle.leaf { visibility: hidden; cursor: default; }
+  .ex-row { transition: background .1s; }
+  .ex-row.can-expand { cursor: pointer; }
+  .ex-row.can-expand:hover td { background: rgba(88,166,255,.05); }
+  .ex-row:hover td { background: rgba(255,255,255,.02); }
+  .ex-name { display: flex; align-items: center; gap: 6px; }
+  .ex-name .ico { font-size: 14px; flex-shrink: 0; width: 18px; text-align: center; }
+  .ex-name .val { font-weight: 500; font-size: 13px; }
+  .ex-name a { color: var(--accent); text-decoration: none; }
+  .ex-name a:hover { text-decoration: underline; }
+  .ex-detail { font-size: 12px; color: var(--muted); display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .src-tag { display: inline-block; padding: 1px 6px; border-radius: 4px; background: rgba(88,166,255,.1); color: var(--accent); margin: 1px 2px; font-size: 10px; }
+  .explorer-crumb-link { cursor: pointer; color: var(--accent); font-size: 12px; }
+  .explorer-crumb-link:hover { text-decoration: underline; }
+  /* Context menu */
+  .ctx-menu { position: fixed; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 4px 0; z-index: 2000; min-width: 180px; box-shadow: 0 4px 16px rgba(0,0,0,.4); display: none; }
+  .ctx-menu .item { padding: 6px 14px; font-size: 12px; cursor: pointer; display: flex; justify-content: space-between; gap: 12px; }
+  .ctx-menu .item:hover { background: rgba(88,166,255,.1); }
+  .ctx-menu .item .hint { color: var(--muted); font-size: 10px; }
+  .ctx-menu .sep { height: 1px; background: var(--border); margin: 4px 0; }
+  .ctx-search { width: calc(100% - 12px); margin: 6px; padding: 5px 8px; font-size: 12px; }
+  /* Asset selector */
+  .asset-sel { display: flex; align-items: center; gap: 6px; }
+  .asset-sel select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 12px; min-width: 130px; }
+  .asset-sel select:focus { outline: none; border-color: var(--accent); }
+  #modal-asset-id, #modal-asset-name { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+  #modal-asset-id:focus, #modal-asset-name:focus { outline: none; border-color: var(--accent); }
+  .header-link { margin-left:auto; color:var(--muted); border:1px solid var(--border); border-radius:6px; padding:4px 8px; font-size:12px; text-decoration:none; }
+  .header-link:hover { color:var(--accent); border-color:var(--accent); }
+  .health-strip { display:flex; gap:6px; align-items:center; margin:0 0 16px; flex-wrap:wrap; font-size:11px; }
+  .cfg-layout { display:grid; grid-template-columns:minmax(420px,1.35fr) minmax(360px,.9fr); gap:16px; align-items:start; }
+  #cfg-editor { min-height:520px; font-family:Consolas, 'Cascadia Mono', monospace; font-size:12px; line-height:1.5; resize:vertical; }
+  @media (max-width: 960px) { .cfg-layout { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>GraphPT</h1>
+  <span class="sub">Admin Panel</span>
+  <a class="header-link" href="/docs" target="_blank">API Docs</a>
+</header>
+
+<nav>
+  <button data-page="dashboard" class="active">Dashboard</button>
+  <button data-page="targets">Targets</button>
+  <button data-page="surfaces">Attack Surface</button>
+  <button data-page="vulns">Vulnerabilities</button>
+  <button data-page="tasks">Pipelines</button>
+  <button data-page="config">Config</button>
+</nav>
+
+<main>
+  <div id="health-strip" class="health-strip"></div>
+
+  <!-- ==================== Dashboard ==================== -->
+  <div id="page-dashboard" class="page active">
+    <div class="toolbar">
+      <div class="asset-sel">
+        <select id="dash-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
+        <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
+      </div>
+      <span class="spacer"></span>
+      <span style="font-size:11px;color:var(--muted)" id="dash-asset-name"></span>
+    </div>
+    <div class="card-grid" id="dash-cards"></div>
+    <div class="section">
+      <div class="section-title">Endpoint Status</div>
+      <table id="dash-endpoints"><tbody></tbody></table>
+    </div>
+    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+      <div class="section">
+        <div class="section-title">Recent Discoveries</div>
+        <table id="dash-recent-subs"><tbody></tbody></table>
+      </div>
+      <div class="section">
+        <div class="section-title">Recent Changes</div>
+        <table id="dash-changes"><tbody></tbody></table>
+      </div>
+    </div>
+    <div class="loading" id="dash-loading">Loading</div>
+  </div>
+
+  <!-- ==================== Targets ==================== -->
+  <div id="page-targets" class="page">
+    <div class="toolbar">
+      <div class="asset-sel">
+        <select id="tgt-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
+        <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
+      </div>
+      <span style="color:var(--muted);font-size:12px">|</span>
+      <select id="tgt-type">
+        <option value="domain">Domain</option>
+        <option value="ip">IP</option>
+        <option value="url">URL</option>
+        <option value="subdomain">Subdomain</option>
+      </select>
+      <input type="text" id="tgt-input" placeholder="example.com" />
+      <button class="btn" onclick="addTarget()">Add</button>
+      <span class="spacer"></span>
+      <span style="font-size:12px;color:var(--muted)" id="tgt-count"></span>
+    </div>
+    <table>
+      <thead><tr>
+        <th>Type</th><th>Value</th><th>Count</th><th>Created</th><th></th>
+      </tr></thead>
+      <tbody id="tgt-tbody"></tbody>
+    </table>
+    <div style="margin-top:16px;padding:12px;border:1px solid var(--border);border-radius:8px">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Bulk Import — paste domains, IPs, or URLs (one per line)</div>
+      <textarea id="bulk-input" rows="4" style="width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px;font-size:12px;font-family:monospace;resize:vertical" placeholder="example.com&#10;192.168.1.1&#10;https://api.example.com/login&#10;another-domain.org"></textarea>
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+        <select id="bulk-type" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px">
+          <option value="auto">Auto-detect</option>
+          <option value="domain">All as Domain</option>
+          <option value="ip">All as IP</option>
+          <option value="url">All as URL</option>
+        </select>
+        <button class="btn" onclick="bulkImport()">Import All</button>
+        <span id="bulk-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+    </div>
+    <div class="loading" id="tgt-loading">Loading</div>
+  </div>
+
+  <!-- ==================== Explorer (Attack Surface) ==================== -->
+  <div id="page-surfaces" class="page">
+    <div class="toolbar">
+      <div class="asset-sel">
+        <select id="exp-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
+        <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
+      </div>
+      <span id="explorer-crumb" style="font-size:12px;color:var(--muted)">All Assets</span>
+      <input type="text" id="explorer-filter" placeholder="Filter..." style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:12px;width:160px" oninput="rebuild()" />
+      <span class="spacer"></span>
+      <button class="btn outline small" onclick="explorerGoRoot()">Roots</button>
+      <button class="btn outline small" onclick="loadExplorer()">Refresh</button>
+    </div>
+    <table id="explorer-table">
+      <thead><tr>
+        <th></th>
+        <th>Name</th>
+        <th>Detail</th>
+        <th>Sources</th>
+        <th>Created</th>
+      </tr></thead>
+      <tbody id="explorer-tbody"></tbody>
+    </table>
+    <div class="loading" id="explorer-loading">Loading</div>
+    <div class="ctx-menu" id="ctx-menu"></div>
+  </div>
+
+  <!-- ==================== Vulnerabilities ==================== -->
+  <div id="page-vulns" class="page">
+    <div class="toolbar">
+      <div class="asset-sel">
+        <select id="vuln-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
+        <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
+      </div>
+      <select id="vuln-severity" onchange="loadVulnerabilities(1)">
+        <option value="">All severities</option>
+        <option value="critical">Critical</option>
+        <option value="high">High</option>
+        <option value="medium">Medium</option>
+        <option value="low">Low</option>
+        <option value="info">Info</option>
+      </select>
+      <input type="text" id="vuln-q" placeholder="Search title, type, URL..." onkeydown="if(event.key==='Enter')loadVulnerabilities(1)" />
+      <button class="btn outline small" onclick="loadVulnerabilities(1)">Search</button>
+      <span class="spacer"></span>
+      <span style="font-size:12px;color:var(--muted)" id="vuln-count"></span>
+      <button class="btn outline small" onclick="loadVulnerabilities(vulnPage)">Refresh</button>
+    </div>
+    <table>
+      <thead><tr>
+        <th style="width:100px">Severity</th>
+        <th>Finding</th>
+        <th>Endpoint</th>
+        <th style="width:110px">Source</th>
+        <th style="width:140px">Last Seen</th>
+      </tr></thead>
+      <tbody id="vuln-tbody"></tbody>
+    </table>
+    <div class="pagination">
+      <button class="btn outline small" onclick="loadVulnerabilities(vulnPage-1)" id="vuln-prev">Prev</button>
+      <span class="info" id="vuln-page-info"></span>
+      <button class="btn outline small" onclick="loadVulnerabilities(vulnPage+1)" id="vuln-next">Next</button>
+    </div>
+    <div class="loading" id="vuln-loading">Loading</div>
+  </div>
+
+  <!-- ==================== Tasks ==================== -->
+  <div id="page-tasks" class="page">
+    <div id="pipelines-panel">
+      <div class="toolbar">
+        <span id="pl-status"></span>
+        <span class="spacer"></span>
+        <span id="pl-broker" style="font-size:11px;color:var(--muted)"></span>
+        <button class="btn" onclick="newPipeline()">New Pipeline</button>
+        <button class="btn outline small" onclick="loadPipelines()">Refresh</button>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Name</th><th>Description</th><th>Stages</th><th></th>
+        </tr></thead>
+        <tbody id="pl-tbody"></tbody>
+      </table>
+      <div class="loading" id="pl-loading">Loading</div>
+    </div>
+  </div>
+
+  <!-- ==================== Config ==================== -->
+  <div id="page-config" class="page">
+    <div class="toolbar">
+      <span style="font-size:12px;color:var(--muted)">Tool Registry — register tools, then use them in Pipelines</span>
+      <span class="spacer"></span>
+      <button class="btn outline small" onclick="checkTools()">Re-check</button>
+      <button class="btn" onclick="saveConfig()">Save</button>
+    </div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:12px;line-height:1.8">
+      <div><b>{bin}</b> lookup: <code>tools/<b>&lt;name&gt;</b>.exe</code> → <code>tools/<b>&lt;name&gt;</b>/&lt;name&gt;.exe</code> → <code>tools/<b>&lt;name&gt;</b>.py</code> → system PATH</div>
+      <div style="margin-top:4px"><b>Stage flow:</b> each tool outputs typed findings → adapter parses → context accumulates → next stage uses placeholders:</div>
+      <div><code style="color:var(--accent)">{bin}</code> <code style="color:var(--green)">{ip}</code> <code style="color:var(--green)">{domain}</code> <code style="color:var(--green)">{url}</code> <code style="color:var(--green)">{port}</code> <code style="color:var(--green)">{subdomain}</code> <code style="color:var(--accent)">{company}</code> <code style="color:var(--green)">{ports}</code> <code style="color:var(--green)">{urls}</code> <code style="color:var(--green)">{urls_file}</code> <code style="color:var(--green)">{domains}</code></div>
+      <table style="margin-top:6px;font-size:10px">
+        <tr style="color:var(--accent)"><th style="text-align:left;padding-right:16px">Tool</th><th style="text-align:left;padding-right:16px">Output type</th><th style="text-align:left">Feeds →</th></tr>
+        <tr><td>enscan</td><td>domain</td><td style="color:var(--green)">{domain} {domains}</td></tr>
+        <tr><td>subfinder / crt</td><td>subdomain</td><td style="color:var(--green)">{domain} {subdomain}</td></tr>
+        <tr><td>nmap</td><td>port</td><td style="color:var(--green)">{ports} {ip} → {urls}</td></tr>
+        <tr><td>httpx</td><td>http_endpoint</td><td style="color:var(--green)">{urls} {urls_file}</td></tr>
+        <tr><td>katana</td><td>file / http_endpoint</td><td style="color:var(--green)">{urls}</td></tr>
+        <tr><td>dirbuster/ffuf</td><td>dir_entry</td><td style="color:var(--muted)">(writes to Neo4j directly)</td></tr>
+      </table>
+    </div>
+    <div class="cfg-layout">
+      <div>
+        <div class="section-title">Tool tool.yaml</div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+          <select id="cfg-tool-select" onchange="loadConfig(this.value)" style="min-width:180px"></select>
+          <span id="cfg-path" style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        </div>
+        <textarea id="cfg-editor" spellcheck="false"></textarea>
+      </div>
+      <div>
+        <div class="section-title">Tool Summary</div>
+        <table id="cfg-table">
+          <thead><tr>
+            <th style="width:100px">Tool</th><th style="width:180px">Use On</th><th>Default Command</th><th style="width:110px">Status</th>
+          </tr></thead>
+          <tbody id="cfg-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+    <div id="cfg-status" style="margin-top:8px;font-size:12px;"></div>
+  </div>
+</main>
+
+<!-- Tutorial Overlay -->
+<div class="modal-overlay" id="tut-overlay" style="display:none">
+  <div class="modal" style="max-width:680px;max-height:85vh;overflow-y:auto">
+    <h3 style="font-size:18px;margin-bottom:4px">GraphPT Quick Guide</h3>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:16px">3-layer recon platform — collect assets, store in graph, drive pentest agent</p>
+    <div id="tut-steps"></div>
+    <div class="actions" style="margin-top:16px">
+      <button class="btn outline small" onclick="tutPrev()" id="tut-prev-btn" style="display:none">← Prev</button>
+      <span class="spacer"></span>
+      <span style="font-size:11px;color:var(--muted)" id="tut-counter"></span>
+      <button class="btn small" id="tut-next-btn" onclick="tutNext()">Next →</button>
+      <button class="btn" id="tut-done-btn" onclick="tutClose()" style="display:none">Got it</button>
+    </div>
+  </div>
+</div>
+
+<!-- Pipeline Editor Modal -->
+<div class="modal-overlay" id="pl-editor-overlay" style="display:none">
+  <div class="modal" style="max-width:700px;max-height:85vh;overflow-y:auto;">
+    <h3 id="pl-editor-title">Edit Pipeline</h3>
+    <div style="margin-bottom:12px">
+      <label style="font-size:12px;color:var(--muted)">Name</label>
+      <input type="text" id="pl-ed-name" style="width:100%" placeholder="my_pipeline" />
+    </div>
+    <div style="margin-bottom:12px">
+      <label style="font-size:12px;color:var(--muted)">Description</label>
+      <input type="text" id="pl-ed-desc" style="width:100%" placeholder="What does this pipeline do?" />
+    </div>
+    <div style="margin-bottom:8px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px">Stages</div>
+    <div id="pl-ed-stages"></div>
+    <button class="btn outline small" onclick="addStageRow()" style="margin-top:8px">+ Add Stage</button>
+    <div class="actions" style="margin-top:16px">
+      <button class="btn outline" onclick="document.getElementById('pl-editor-overlay').style.display='none'">Cancel</button>
+      <button class="btn" onclick="savePipeline()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Pipeline Run Modal -->
+<div class="modal-overlay" id="pl-run-overlay" style="display:none">
+  <div class="modal" style="max-width:700px;max-height:85vh;overflow-y:auto;">
+    <h3 id="pl-run-title">Run Pipeline</h3>
+    <p id="pl-run-name" style="font-weight:600"></p>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <div style="flex:1"><input type="text" id="pl-run-ip" style="width:100%" placeholder="Target IP" /></div>
+      <div style="flex:1"><input type="text" id="pl-run-domain" style="width:100%" placeholder="Target Domain" /></div>
+      <div style="flex:1"><input type="text" id="pl-run-company" style="width:100%" placeholder="Company (optional)" /></div>
+    </div>
+    <div style="font-size:10px;color:var(--muted);margin-bottom:8px">
+      {bin} {ip} {domain} {company} | {ports} {ips} {urls} {urls_file} {targets_file}
+    </div>
+    <div id="pl-log" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;max-height:400px;overflow-y:auto;font-family:monospace;font-size:11px;line-height:1.6;display:none;margin-bottom:8px;white-space:pre-wrap;word-break:break-all"></div>
+    <div class="actions">
+      <span id="pl-log-status" style="font-size:11px;color:var(--muted)"></span>
+      <span class="spacer"></span>
+      <button class="btn outline" onclick="document.getElementById('pl-run-overlay').style.display='none'">Close</button>
+      <button class="btn outline" id="pl-preview-btn" onclick="previewPipeline()">Preview</button>
+      <button class="btn" id="pl-run-btn" onclick="runPipeline()">Run</button>
+    </div>
+  </div>
+</div>
+
+<!-- New Asset Modal -->
+<div class="modal-overlay" id="asset-modal-overlay" style="display:none">
+  <div class="modal" style="max-width:400px">
+    <h3>New Asset</h3>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:16px">An asset = a target company/organization. All domains, IPs, scans are scoped to one company. Company name can be used to discover more domains.</p>
+    <div style="margin-bottom:10px">
+      <label style="font-size:11px;color:var(--muted)">Company Name</label>
+      <input type="text" id="modal-asset-name" placeholder="Acme Corporation" />
+    </div>
+    <div style="margin-bottom:16px">
+      <label style="font-size:11px;color:var(--muted)">Asset ID <span style="color:var(--orange)">*slug, auto-generated</span></label>
+      <input type="text" id="modal-asset-id" placeholder="acme-corp" />
+    </div>
+    <div class="actions">
+      <button class="btn outline" onclick="document.getElementById('asset-modal-overlay').style.display='none'">Cancel</button>
+      <button class="btn" onclick="createAsset()">Create</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// SPA Router
+// ============================================================
+const API = '/api';
+function aq(url) { const sep = url.includes('?') ? '&' : '?'; return url + sep + 'asset_id=' + encodeURIComponent(currentAsset); }
+let currentAsset = 'default';
+let assetList = [];
+
+async function loadAssets() {
+  try {
+    const res = await fetch(API + '/assets');
+    const json = await res.json();
+    if (json.ok) {
+      assetList = json.data || [];
+      if (!assetList.find(a => a.id === currentAsset)) currentAsset = assetList[0]?.id || 'default';
+      renderAssetSelectors();
+    }
+  } catch(e) { /* ignore */ }
+}
+
+function renderAssetSelectors() {
+  const opts = assetList.map(a => `<option value="${esc(a.id)}" ${a.id===currentAsset?'selected':''}>${esc(a.name||a.id)} (${esc(a.id)})</option>`).join('') || '<option value="default">default</option>';
+  document.querySelectorAll('#tgt-asset-sel, #exp-asset-sel, #dash-asset-sel, #vuln-asset-sel').forEach(el => { el.innerHTML = opts; el.value = currentAsset; });
+}
+
+function switchAsset(id) {
+  if (id === currentAsset) return;
+  currentAsset = id;
+  renderAssetSelectors();
+  loadCurrentPage();
+}
+
+function loadCurrentPage() {
+  const active = document.querySelector('.page.active');
+  if (!active) return;
+  switch (active.id) {
+    case 'page-dashboard': loadDashboard(); break;
+    case 'page-targets': loadTargets(); break;
+    case 'page-surfaces': loadExplorer(); break;
+    case 'page-vulns': loadVulnerabilities(); break;
+    case 'page-tasks': loadPipelines(); break;
+  }
+}
+
+function openNewAssetModal() {
+  document.getElementById('modal-asset-id').value = '';
+  document.getElementById('modal-asset-name').value = '';
+  document.getElementById('asset-modal-overlay').style.display = 'flex';
+  document.getElementById('modal-asset-name').focus();
+}
+
+async function createAsset() {
+  const id = document.getElementById('modal-asset-id').value.trim().toLowerCase().replace(/\s+/g, '-');
+  const name = document.getElementById('modal-asset-name').value.trim() || id;
+  if (!id) return toast('Asset ID is required (slug, e.g. project-alpha)', false);
+  try {
+    const res = await fetch(API + '/assets', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id, name})
+    });
+    const json = await res.json();
+    if (json.ok) {
+      document.getElementById('asset-modal-overlay').style.display = 'none';
+      toast('Created: ' + name);
+      await loadAssets();
+      switchAsset(id);
+    } else {
+      toast(json.error, false);
+    }
+  } catch(e) { toast(e.message, false); }
+}
+
+async function deleteAsset(id, name) {
+  if (!confirm('Delete asset "' + name + '" and ALL its data (domains, IPs, ports, endpoints)? This cannot be undone.')) return;
+  try {
+    const res = await fetch(API + '/assets/' + encodeURIComponent(id), {method: 'DELETE'});
+    const json = await res.json();
+    if (json.ok) {
+      toast('Deleted: ' + name);
+      await loadAssets();
+    } else {
+      toast(json.error, false);
+    }
+  } catch(e) { toast(e.message, false); }
+}
+
+// Listen for Enter key in asset modal inputs
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('modal-asset-id').addEventListener('keydown', e => { if (e.key === 'Enter') createAsset(); });
+  document.getElementById('modal-asset-name').addEventListener('keydown', e => { if (e.key === 'Enter') createAsset(); });
+  // Auto-generate slug from company name
+  document.getElementById('modal-asset-name').addEventListener('input', e => {
+    const idEl = document.getElementById('modal-asset-id');
+    if (!idEl.dataset.manual) {
+      idEl.value = e.target.value.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+    }
+  });
+  document.getElementById('modal-asset-id').addEventListener('input', function() { this.dataset.manual = '1'; });
+  loadAssets();
+  window.addEventListener('beforeunload', () => saveTreeState());
+});
+
+// Click outside asset modal to close
+document.getElementById('asset-modal-overlay').addEventListener('click', function(e) {
+  if (e.target === this) this.style.display = 'none';
+});
+
+document.querySelectorAll('nav button[data-page]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById('page-' + btn.dataset.page).classList.add('active');
+    switch(btn.dataset.page) {
+      case 'dashboard': loadDashboard(); break;
+      case 'targets': loadTargets(); break;
+      case 'surfaces': loadExplorer(); break;
+      case 'vulns': loadVulnerabilities(); break;
+      case 'tasks': loadPipelines(); break;
+      case 'config': loadConfig(); break;
+    }
+  });
+});
+
+// ============================================================
+// Toast
+// ============================================================
+function toast(msg, ok = true) {
+  const el = document.createElement('div');
+  el.className = 'toast ' + (ok ? 'ok' : 'err');
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+// ============================================================
+// Health
+// ============================================================
+async function loadHealth() {
+  const el = document.getElementById('health-strip');
+  if (!el) return;
+  try {
+    const res = await fetch(API + '/health');
+    const json = await res.json();
+    if (!json.ok) return;
+    const d = json.data || {};
+    const items = [
+      ['Neo4j', d.neo4j && d.neo4j.ok],
+      ['Redis', d.redis && d.redis.ok],
+      ['Celery', d.celery && d.celery.ok],
+      ['Tools', d.tools && d.tools.ok],
+    ];
+    el.innerHTML = items.map(([label, ok]) =>
+      `<span class="badge ${ok ? 'ok' : 'err'}">${label}: ${ok ? 'OK' : 'DOWN'}</span>`
+    ).join('') + (json.status === 'degraded' ? '<span style="color:var(--orange)">degraded</span>' : '');
+  } catch(e) {
+    el.innerHTML = '<span class="badge err">Health: DOWN</span>';
+  }
+}
+
+// ============================================================
+// Dashboard
+// ============================================================
+async function loadDashboard() {
+  document.getElementById('dash-loading').style.display = 'block';
+  const assetName = (assetList.find(a => a.id === currentAsset) || {}).name || currentAsset;
+  document.getElementById('dash-asset-name').textContent = assetName;
+  try {
+    const res = await fetch(aq(API + '/dashboard'));
+    const json = await res.json();
+    if (!json.ok) { toast(json.error, false); return; }
+    const d = json.data;
+
+    const cov = d.coverage || {};
+    const cards = [
+      {label:'Root Domains', value: d.root_domains, cls:'accent'},
+      {label:'Subdomains', value: d.subdomains, cls:'accent'},
+      {label:'IP Addresses', value: d.ips, cls:'green', sub: cov.unscanned_ips > 0 ? `${cov.unscanned_ips} unscanned` : ''},
+      {label:'Open Ports', value: d.ports, cls:'orange'},
+      {label:'HTTP Endpoints', value: d.http_endpoints, cls:'purple', sub: cov.unscanned_eps > 0 ? `${cov.unscanned_eps} need scan` : ''},
+    ];
+    document.getElementById('dash-cards').innerHTML = cards.map(c =>
+      `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div>${c.sub ? `<div class="sub" style="font-size:10px;color:var(--orange);margin-top:2px">${c.sub}</div>` : ''}</div>`
+    ).join('');
+
+    // Endpoint status
+    let epRows = (d.endpoint_details || []).map(e =>
+      `<tr><td><span class="badge ${e.status==='success'?'ok':e.status==='error'?'err':'warn'}">${e.status||'unknown'}</span></td><td>${e.code||'-'}</td><td>${e.count}</td></tr>`
+    ).join('');
+    document.getElementById('dash-endpoints').innerHTML = epRows || '<tr><td colspan="3" style="color:var(--muted)">No endpoints</td></tr>';
+
+    // Recent subdomains
+    let subRows = (d.recent_subdomains || []).map(s =>
+      `<tr><td>${esc(s.value)}</td><td style="color:var(--muted)">${esc(s.source||'')}</td><td>${fmtTime(s.created_at)}</td></tr>`
+    ).join('');
+    document.getElementById('dash-recent-subs').innerHTML = subRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
+
+    // Recent changes
+    let chRows = (d.recent_changes || []).map(c =>
+      `<tr><td>${esc(c.url)}</td><td style="color:var(--orange)">${(c.fields||[]).join(', ')}</td><td>${fmtTime(c.changed_at)}</td></tr>`
+    ).join('');
+    document.getElementById('dash-changes').innerHTML = chRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
+  } catch(e) {
+    toast(e.message, false);
+  }
+  document.getElementById('dash-loading').style.display = 'none';
+}
+
+// ============================================================
+// Targets
+// ============================================================
+async function loadTargets() {
+  document.getElementById('tgt-loading').style.display = 'block';
+  try {
+    const res = await fetch(aq(API + '/targets'));
+    const json = await res.json();
+    if (!json.ok) { toast(json.error, false); return; }
+    const data = json.data || [];
+    document.getElementById('tgt-count').textContent = data.length + ' targets';
+    document.getElementById('tgt-tbody').innerHTML = data.map(t =>
+      `<tr>
+        <td><span class="badge ${t.type==='ip'?'warn':'ok'}">${esc(t.type||'domain')}</span></td>
+        <td><strong>${esc(t.value)}</strong></td>
+        <td>${t.sub_count||0}</td>
+        <td style="color:var(--muted)">${fmtTime(t.created_at)}</td>
+        <td style="text-align:right">
+          <button class="btn danger small" onclick="deleteTarget('${esc(t.id)}','${esc(t.value)}')">Delete</button>
+        </td>
+      </tr>`
+    ).join('') || '<tr><td colspan="5" style="color:var(--muted)">No targets. Add one above.</td></tr>';
+  } catch(e) {
+    toast(e.message, false);
+  }
+  document.getElementById('tgt-loading').style.display = 'none';
+}
+
+async function addTarget() {
+  const input = document.getElementById('tgt-input');
+  const typeEl = document.getElementById('tgt-type');
+  const value = input.value.trim();
+  const type = typeEl.value;
+  if (!value) return;
+  try {
+    const res = await fetch(aq(API + '/targets'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({type, value})
+    });
+    const json = await res.json();
+    if (json.ok) {
+      toast('Added: ' + value);
+      input.value = '';
+      loadTargets();
+    } else {
+      toast(json.error, false);
+    }
+  } catch(e) {
+    toast(e.message, false);
+  }
+}
+
+async function deleteTarget(id, name) {
+  if (!confirm('Delete ' + name + ' and all its subdomains/IPs/ports/endpoints?')) return;
+  try {
+    const res = await fetch(aq(API + '/targets/' + encodeURIComponent(id)), {method: 'DELETE'});
+    const json = await res.json();
+    if (json.ok) {
+      toast('Deleted: ' + name);
+      loadTargets();
+    } else {
+      toast(json.error, false);
+    }
+  } catch(e) {
+    toast(e.message, false);
+  }
+}
+
+async function bulkImport() {
+  const ta = document.getElementById('bulk-input');
+  const typeSel = document.getElementById('bulk-type');
+  const status = document.getElementById('bulk-status');
+  const lines = ta.value.split(/[\n\r]+/).map(s => s.trim()).filter(Boolean);
+  if (!lines.length) return;
+  const mode = typeSel.value;
+
+  function detectType(val) {
+    if (mode !== 'auto') return mode;
+    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}([/]\d+)?$/.test(val)) return 'ip';
+    if (/^https?:\/\//i.test(val)) return 'url';
+    return 'domain';
+  }
+
+  let ok = 0, fail = 0;
+  status.textContent = `Importing ${lines.length} items...`;
+  for (const val of lines) {
+    const type = detectType(val);
+    try {
+      const res = await fetch(aq(API + '/targets'), {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({type, value: val})
+      });
+      const json = await res.json();
+      if (json.ok) ok++; else fail++;
+    } catch(e) { fail++; }
+  }
+  status.textContent = `Done: ${ok} ok, ${fail} failed`;
+  ta.value = '';
+  loadTargets();
+}
+
+// ============================================================
+// Vulnerabilities
+// ============================================================
+let vulnPage = 1;
+const VULN_PAGE_SIZE = 50;
+
+async function loadVulnerabilities(page = vulnPage) {
+  page = Math.max(1, page || 1);
+  const loading = document.getElementById('vuln-loading');
+  loading.style.display = 'block';
+  const severity = document.getElementById('vuln-severity').value;
+  const q = document.getElementById('vuln-q').value.trim();
+  const params = new URLSearchParams({
+    asset_id: currentAsset,
+    page: String(page),
+    per_page: String(VULN_PAGE_SIZE),
+  });
+  if (severity) params.set('severity', severity);
+  if (q) params.set('q', q);
+
+  try {
+    const res = await fetch(API + '/vulnerabilities?' + params.toString());
+    const json = await res.json();
+    if (!json.ok) { toast(json.error || 'Load vulnerabilities failed', false); return; }
+
+    vulnPage = json.page || page;
+    const total = json.total || 0;
+    const data = json.data || [];
+    const totalPages = Math.max(1, Math.ceil(total / VULN_PAGE_SIZE));
+    document.getElementById('vuln-count').textContent = total + ' findings';
+    document.getElementById('vuln-page-info').textContent = `Page ${vulnPage} / ${totalPages}`;
+    document.getElementById('vuln-prev').disabled = vulnPage <= 1;
+    document.getElementById('vuln-next').disabled = vulnPage >= totalPages;
+    document.getElementById('vuln-tbody').innerHTML = renderVulnerabilityRows(data);
+  } catch(e) {
+    toast(e.message, false);
+  }
+  loading.style.display = 'none';
+}
+
+function renderVulnerabilityRows(rows) {
+  if (!rows.length) {
+    return '<tr><td colspan="5" style="color:var(--muted);padding:24px 0;text-align:center">No vulnerabilities. Run nuclei after endpoints are discovered.</td></tr>';
+  }
+  return rows.map(v => {
+    const title = v.title || v.type || 'Untitled finding';
+    const meta = [v.type, v.id].filter(Boolean).map(esc).join(' · ');
+    const detail = v.detail ? `<div style="color:var(--muted);font-size:12px;margin-top:4px;max-width:560px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(v.detail)}</div>` : '';
+    const evidence = v.evidence ? `<div style="color:var(--orange);font-size:11px;margin-top:4px;max-width:560px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(v.evidence)}</div>` : '';
+    const url = v.url || '';
+    const sourceTags = (v.sources || []).map(s => `<span class="src-tag">${esc(s)}</span>`).join('') || '<span style="color:var(--muted)">-</span>';
+    return `<tr>
+      <td>${severityBadge(v.severity)}</td>
+      <td>
+        <strong>${esc(title)}</strong>
+        <div style="color:var(--muted);font-size:11px">${meta}</div>
+        ${detail}
+        ${evidence}
+      </td>
+      <td>
+        ${url ? `<a href="${esc(url)}" target="_blank" style="color:var(--accent);text-decoration:none">${esc(url)}</a>` : '<span style="color:var(--muted)">-</span>'}
+        <div style="font-size:11px;color:var(--muted)">${v.status_code ? statusBadge(v.status_code) : ''} ${esc(v.endpoint_title || '')}</div>
+      </td>
+      <td>${sourceTags}</td>
+      <td style="font-size:11px;color:var(--muted)">${fmtTime(v.last_seen_at || v.created_at)}</td>
+    </tr>`;
+  }).join('');
+}
+
+function severityBadge(severity) {
+  const sev = (severity || 'info').toLowerCase();
+  const cls = sev === 'critical' || sev === 'high' ? 'err' : sev === 'medium' ? 'warn' : 'ok';
+  return `<span class="badge ${cls}">${esc(sev)}</span>`;
+}
+
+// ============================================================
+// Explorer — tree table
+// ============================================================
+let treeRoots = [];
+
+async function loadExplorer() {
+  const loading = document.getElementById('explorer-loading');
+  loading.style.display = 'block';
+  try {
+    const res = await fetch(aq(API + '/explorer'));
+    const json = await res.json();
+    if (!json.ok) { toast(json.error, false); loading.style.display = 'none'; return; }
+    treeRoots = (json.data.roots || []).map(r => { r._depth = 0; r._leaf = false; return r; });
+    document.getElementById('explorer-crumb').textContent = 'All Assets';
+    rebuild();
+  } catch(e) { toast(e.message, false); }
+  loading.style.display = 'none';
+  // Restore expanded state from localStorage
+  restoreTreeState();
+}
+
+function saveTreeState() {
+  const expanded = [];
+  function walk(items) {
+    for (const item of items) {
+      if (item._expanded && item.id) expanded.push(item.id);
+      if (item._children) walk(item._children);
+    }
+  }
+  walk(treeRoots);
+  localStorage.setItem('graphpt_tree_state', JSON.stringify({asset: currentAsset, expanded}));
+}
+
+function restoreTreeState() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('graphpt_tree_state') || '{}');
+    if (saved.asset !== currentAsset) return;
+    const ids = (saved.expanded || []).slice(0, 10); // max 10 to avoid overload
+    if (ids.length === 0) return;
+    let delay = 500;
+    ids.forEach(id => {
+      setTimeout(() => {
+        const node = findNode(id);
+        if (node && !node._leaf && !node._expanded) exToggle(id);
+      }, delay);
+      delay += 600; // stagger expansions
+    });
+  } catch(e) { /* ignore */ }
+}
+
+function explorerGoRoot() {
+  treeRoots.forEach(r => collapseNode(r));
+  document.getElementById('explorer-crumb').textContent = 'All Assets';
+  localStorage.removeItem('graphpt_tree_state');
+  rebuild();
+}
+
+function loadMoreChildren(nodeId) {
+  // Same as exToggle but forces append mode (node is already expanded)
+  const node = findNode(nodeId);
+  if (!node) return;
+  const row = document.querySelector(`tr[data-nid="${esc(nodeId)}"]`);
+  const depth = row ? parseInt(row.dataset.depth || '0') : 0;
+  // Remove the _load_more row from children
+  if (node._children) {
+    node._children = node._children.filter(c => c.type !== '_load_more');
+  }
+  exToggle(nodeId); // This will go to the fetch branch because we cleared _load_more
+}
+
+function exToggle(nodeId) {
+  const row = document.querySelector(`tr[data-nid="${esc(nodeId)}"]`);
+  if (!row) return;
+  const depth = parseInt(row.dataset.depth || '0');
+  const node = findNode(nodeId);
+  if (!node || node._leaf) return;
+
+  if (node._expanded) {
+    collapseNode(node);
+    removeChildRows(row, depth);
+    return;
+  }
+
+  const loading = document.getElementById('explorer-loading');
+  loading.style.display = 'block';
+  const pageSize = 100;
+  const currentOffset = node._offset || 0;
+  fetch(aq(API + '/explorer/' + encodeURIComponent(nodeId) + '?limit=' + pageSize + '&offset=' + currentOffset))
+    .then(r => r.json())
+    .then(json => {
+      loading.style.display = 'none';
+      if (!json.ok) { toast(json.error, false); return; }
+      const data = json.data;
+      const total = data.total || data.children?.length || 0;
+      const hasMore = total > (currentOffset + pageSize);
+
+      let flatChildren = [];
+
+      // Keep existing children if appending (offset > 0)
+      if (currentOffset > 0 && node._children) {
+        flatChildren = node._children.filter(c => c.type !== '_load_more');
+      }
+
+      if (data.node.type === 'RootDomain') {
+        for (const sub of (data.children || [])) {
+          sub._depth = depth + 1;
+          sub._leaf = true;  // Subdomain doesn't have its own API — IP children shown inline
+          flatChildren.push(sub);
+          if (sub.ips) {
+            for (const ip of sub.ips) {
+              ip._depth = depth + 2;
+              ip._leaf = !((ip.port_count || 0) > 0);
+              flatChildren.push(ip);
+            }
+          }
+        }
+      } else if (data.node.type === 'IP') {
+        for (const port of (data.children || [])) {
+          port._depth = depth + 1;
+          port._leaf = true;
+          flatChildren.push(port);
+          if (port.endpoints) {
+            for (const ep of port.endpoints) {
+              ep._depth = depth + 2;
+              ep._leaf = false;
+              flatChildren.push(ep);
+            }
+          }
+        }
+      } else if (data.node.type === 'Endpoint') {
+        // Scan run summary rows first
+        const runs = data.scan_runs || [];
+        runs.forEach(r => {
+          flatChildren.push({
+            _depth: depth + 1, _leaf: true,
+            type: 'ScanRun', tool: r.tool, wordlist: r.wordlist || '',
+            findings_count: r.findings_count,
+            config: r.config || '', last_run_at: r.last_run_at,
+          });
+        });
+        // Then children (dirs + files)
+        for (const child of (data.children || [])) {
+          child._depth = depth + 1;
+          child._leaf = true;
+          flatChildren.push(child);
+        }
+      }
+
+      node._expanded = true;
+      node._total = total;
+      node._limit = pageSize;
+      node._offset = currentOffset + pageSize;
+
+      // Add "Load more" row if there are more children
+      if (hasMore) {
+        flatChildren.push({
+          _depth: depth + 1, _leaf: true,
+          type: '_load_more', nodeId: nodeId,
+          remaining: total - (currentOffset + pageSize),
+        });
+      }
+
+      node._children = flatChildren;
+      updateCrumb(nodeId, data.node.value || data.node.url || '');
+      rebuild();
+      saveTreeState();
+    })
+    .catch(e => { loading.style.display = 'none'; toast(e.message, false); });
+}
+
+function collapseNode(node) {
+  node._expanded = false;
+  if (node._children) {
+    for (const c of node._children) collapseNode(c);
+    node._children = null;
+  }
+}
+
+function removeChildRows(parentRow, parentDepth) {
+  let next = parentRow.nextElementSibling;
+  while (next && parseInt(next.dataset.depth || '0') > parentDepth) {
+    const tmp = next.nextElementSibling;
+    next.remove();
+    next = tmp;
+  }
+}
+
+function findNode(nodeId) {
+  function walk(items) {
+    for (const item of items) {
+      if (item.id === nodeId) return item;
+      if (item._expanded && item._children) {
+        const found = walk(item._children);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+  return walk(treeRoots);
+}
+
+let crumbPath = [];
+
+function updateCrumb(nodeId, label) {
+  const idx = crumbPath.findIndex(c => c.id === nodeId);
+  if (idx >= 0) crumbPath = crumbPath.slice(0, idx + 1);
+  else crumbPath.push({id: nodeId, label});
+
+  document.getElementById('explorer-crumb').innerHTML =
+    '<span class="explorer-crumb-link" onclick="crumbNav(-1)">All Assets</span> ' +
+    crumbPath.map((c, i) =>
+      `▸ <span class="explorer-crumb-link" onclick="crumbNav(${i})">${esc(c.label)}</span>`
+    ).join(' ');
+}
+
+function crumbNav(idx) {
+  treeRoots.forEach(r => collapseNode(r));
+  crumbPath = crumbPath.slice(0, idx + 1);
+  rebuild();
+  crumbPath.reduce((p, c) => p.then(() => new Promise(res => { exToggle(c.id); setTimeout(res, 300); })), Promise.resolve());
+}
+
+function rebuild() {
+  const filter = (document.getElementById('explorer-filter')?.value || '').toLowerCase();
+  let rows = [];
+  function walk(items) {
+    for (const item of items) {
+      const val = (item.value || item.url || item.path || item.tool || '').toLowerCase();
+      if (!filter || val.includes(filter) || rows.some(r => r._expanded && r._children && r._children.includes(item))) {
+        rows.push(item);
+      }
+      if (item._expanded && item._children) walk(item._children);
+    }
+  }
+  walk(treeRoots);
+  renderRows(rows);
+}
+
+function renderRows(rows) {
+  const tbody = document.getElementById('explorer-tbody');
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="color:var(--muted);padding:24px 0;text-align:center">No assets. Add targets then run scans from the Tasks tab.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r => renderRow(r)).join('');
+}
+
+function renderRow(r) {
+  const depth = r._depth || 0;
+  const indent = depth * 20;
+  const isExpanded = r._expanded;
+  const isLeaf = r._leaf !== false || r.type === 'DirEntry' || r.type === 'File' || r.type === 'Subdomain' || r.type === '_load_more';
+  const hasChildren = !isLeaf && (r.type === 'root_domain' || r.type === 'standalone_ip' || r.type === 'IP' || r.type === 'Endpoint' || r.type === 'Subdomain');
+  if (r.type === '_load_more') {
+    return `<tr class="ex-row" style="cursor:pointer" onclick="event.stopPropagation();loadMoreChildren('${esc(r.nodeId)}')">
+      <td></td>
+      <td colspan="4"><span style="color:var(--accent);font-size:12px">Load more (${r.remaining} remaining)</span></td>
+    </tr>`;
+  }
+  const nodeId = esc(r.id || '');
+
+  let toggleHtml;
+  if (isLeaf) {
+    toggleHtml = '<span class="ex-toggle leaf">' + String.fromCodePoint(0x25B8) + '</span>';
+  } else {
+    toggleHtml = `<span class="ex-toggle" onclick="event.stopPropagation();exToggle('${nodeId}')">${isExpanded ? String.fromCodePoint(0x25BC) : String.fromCodePoint(0x25B8)}</span>`;
+  }
+
+  const type = r.type || '';
+  const icon = type === 'root_domain' ? String.fromCodePoint(0x1F4C1) : type === 'standalone_ip' ? String.fromCodePoint(0x1F517) : type === 'Subdomain' ? String.fromCodePoint(0x1F4C4) : type === 'IP' ? String.fromCodePoint(0x1F517) : type === 'Port' ? String.fromCodePoint(0x1F50C) : type === 'Endpoint' ? String.fromCodePoint(0x1F310) : type === 'DirEntry' ? String.fromCodePoint(0x1F4C2) : type === 'File' ? String.fromCodePoint(0x1F4C4) : type === 'ScanRun' ? String.fromCodePoint(0x2705) : String.fromCodePoint(0x2022);
+
+  let nameHtml = '';
+  if (type === 'Endpoint' && r.url) {
+    nameHtml = `<a href="${esc(r.url)}" target="_blank" onclick="event.stopPropagation()">${esc(r.url)}</a>`;
+  } else if (type === 'Port') {
+    nameHtml = `<span style="color:var(--orange)">:${r.number}/${r.protocol||'tcp'}</span> <span style="color:var(--text)">${esc(r.service||'')}</span>`;
+  } else if (type === 'standalone_ip') {
+    nameHtml = `<span style="color:var(--green)">${esc(r.value||'')}</span>`;
+  } else if (type === 'DirEntry') {
+    nameHtml = `<span style="color:var(--orange)">${esc(r.method||'GET')} ${esc(r.path||'')}</span>`;
+  } else if (type === 'File') {
+    const fn = (r.url || '').split('/').pop() || r.url || '';
+    nameHtml = `<span style="color:var(--purple)">${esc(fn)}</span>`;
+  } else if (type === 'ScanRun') {
+    nameHtml = `<span style="color:var(--green)">${esc(r.tool||'')}</span>`;
+  } else {
+    nameHtml = esc(r.value || r.number || r.path || r.url || '');
+  }
+
+  let detail = '';
+  if (type === 'root_domain') {
+    const parts = [];
+    if (r.subdomain_count) parts.push(`${r.subdomain_count} subdomains`);
+    if (r.ip_count) parts.push(`${r.ip_count} unique IPs`);
+    detail = parts.join(', ');
+  } else if (type === 'standalone_ip') {
+    if (r.port_count) detail = `${r.port_count} ports`;
+  } else if (type === 'Subdomain') {
+    if (r.ips && r.ips.length) {
+      detail = `<span style="color:var(--accent)">→</span> ` + r.ips.map(ip => `<span style="color:var(--green)">${esc(ip.value)}</span>`).join(', ');
+    }
+  } else if (type === 'IP') {
+    const parts = [];
+    if (r.port_count) parts.push(`${r.port_count} ports`);
+    else parts.push(`<span style="color:var(--orange)" title="No port scan yet">⏳ no scan</span>`);
+    if (r.endpoint_count) parts.push(`${r.endpoint_count} endpoints`);
+    if (r.rel_sources && r.rel_sources.length) parts.push(`resolved by ${r.rel_sources.join(', ')}`);
+    detail = parts.join(', ');
+  } else if (type === 'Port') {
+    if (r.endpoints && r.endpoints.length) detail = `${r.endpoints.length} endpoints`;
+    else detail = 'no HTTP services';
+  } else if (type === 'Endpoint') {
+    const parts = [];
+    if (r.status_code) parts.push(statusBadge(r.status_code));
+    if (r.title) parts.push(esc(r.title.substring(0, 60)));
+    if (r.tech && r.tech.length) parts.push(r.tech.join(', '));
+    if (r.content_length) parts.push(fmtSize(r.content_length));
+    if (r.crawl_status) parts.push(`<span class="badge ${r.crawl_status==='success'?'ok':r.crawl_status==='error'?'err':'warn'}">${esc(r.crawl_status)}</span>`);
+    // Coverage indicators
+    const dc = r.dir_count || (r.dir_count === 0 ? 0 : -1);
+    const fc = r.file_count || (r.file_count === 0 ? 0 : -1);
+    if (dc >= 0 || fc >= 0) {
+      const covParts = [];
+      if (dc > 0) covParts.push(`<span style="color:var(--green)">📂${dc}</span>`);
+      else if (dc === 0) covParts.push(`<span style="color:var(--orange)" title="No dir scan yet">📂0</span>`);
+      if (fc > 0) covParts.push(`<span style="color:var(--purple)">📄${fc}</span>`);
+      else if (fc === 0) covParts.push(`<span style="color:var(--orange)" title="No JS crawl yet">📄0</span>`);
+      if (covParts.length) parts.push(covParts.join(' '));
+    }
+    detail = parts.join(' ');
+  } else if (type === 'DirEntry') {
+    const parts = [];
+    if (r.status_code) parts.push(statusBadge(r.status_code));
+    if (r.content_type) parts.push(esc(r.content_type));
+    if (r.size) parts.push(fmtSize(r.size));
+    detail = parts.join(' ');
+  } else if (type === 'File') {
+    const parts = [];
+    if (r.content_type) parts.push(esc(r.content_type));
+    if (r.size) parts.push(fmtSize(r.size));
+    if (r.content_hash) parts.push(`<span style="color:var(--muted);font-size:10px">${esc(r.content_hash.substring(0,12))}</span>`);
+    if (r.secrets && r.secrets.length) {
+      r.secrets.forEach(s => {
+        parts.push(`<span class="badge err" title="line ${s.line}">${esc(s.type)}</span>`);
+      });
+    }
+    detail = parts.join(' ');
+  } else if (type === 'ScanRun') {
+    const parts = [];
+    parts.push(`<span style="color:var(--green)">${r.findings_count||0} found</span>`);
+    if (r.wordlist) parts.push(`<span style="color:var(--muted)">${esc(r.wordlist)}</span>`);
+    if (r.last_run_at) parts.push(`<span style="color:var(--muted)">${fmtTime(r.last_run_at)}</span>`);
+    detail = parts.join(' ');
+  }
+
+  let srcsHtml = '';
+  const srcs = r.sources || [];
+  if (srcs.length) {
+    srcsHtml = srcs.map(s => `<span class="src-tag">${esc(s)}</span>`).join('');
+  }
+
+  const timeStr = r.created_at ? fmtTime(r.created_at) : (r.first_seen_at ? fmtTime(r.first_seen_at) : '');
+
+  return `<tr class="ex-row${hasChildren ? ' can-expand' : ''}" data-nid="${nodeId}" data-depth="${depth}">
+    <td>${toggleHtml}</td>
+    <td style="padding-left:${indent}px;${hasChildren?'cursor:pointer':''}" onclick="${hasChildren ? `exToggle('${nodeId}')` : ''}"><div class="ex-name"><span class="ico">${icon}</span><span class="val">${nameHtml}</span></div></td>
+    <td><div class="ex-detail">${detail}</div></td>
+    <td>${srcsHtml}</td>
+    <td style="font-size:11px;color:var(--muted)">${timeStr}</td>
+  </tr>`;
+}
+
+// ============================================================
+// Context menu — right-click node to run tools
+// ============================================================
+let _ctxMenuNode = null;
+let _ctxMenuTools = [];
+
+document.addEventListener('click', () => {
+  document.getElementById('ctx-menu').style.display = 'none';
+});
+
+document.getElementById('explorer-table').addEventListener('contextmenu', function(e) {
+  const row = e.target.closest('tr.ex-row');
+  if (!row || !row.dataset.nid) return;
+  e.preventDefault();
+  _ctxMenuNode = findNode(row.dataset.nid);
+  if (!_ctxMenuNode || _ctxMenuNode.type === '_load_more' || _ctxMenuNode.type === 'ScanRun') return;
+
+  const menu = document.getElementById('ctx-menu');
+  _ctxMenuTools = (_cfgTools.length ? _cfgTools : PL_TOOLS).filter(t => toolUseRule(t, _ctxMenuNode));
+  renderToolContextMenu('');
+  menu.style.display = 'block';
+  menu.style.left = Math.min(e.clientX, window.innerWidth - 200) + 'px';
+  menu.style.top = Math.min(e.clientY, window.innerHeight - menu.scrollHeight - 10) + 'px';
+});
+
+function normalizedNodeType(node) {
+  if (!node) return '';
+  if (node.type === 'root_domain') return 'RootDomain';
+  return node.type || '';
+}
+
+function toolUseRule(tool, node) {
+  const useOn = tool.use_on || {};
+  return useOn[normalizedNodeType(node)] || null;
+}
+
+function nodePayload(node) {
+  const payload = {};
+  for (const key of ['id','type','value','url','path','number','parent_ip','parent_id','service']) {
+    if (node && node[key] !== undefined && node[key] !== null) payload[key] = String(node[key]);
+  }
+  if (node && node.ports) payload.ports = Array.isArray(node.ports) ? node.ports.join(',') : String(node.ports);
+  return payload;
+}
+
+function nodeDisplayValue(node) {
+  if (!node) return '';
+  if (node.type === 'Port') return `${node.parent_ip || ''}:${node.number || ''}`;
+  return node.value || node.url || node.path || node.tool || '';
+}
+
+function renderToolContextMenu(filter) {
+  const menu = document.getElementById('ctx-menu');
+  const targetVal = nodeDisplayValue(_ctxMenuNode);
+  const needle = (filter || '').toLowerCase();
+  const tools = _ctxMenuTools.filter(t =>
+    !needle
+    || (t.name || '').toLowerCase().includes(needle)
+    || (t.desc || '').toLowerCase().includes(needle)
+    || (t.command || '').toLowerCase().includes(needle)
+    || (toolUseRule(t, _ctxMenuNode)?.desc || '').toLowerCase().includes(needle)
+  );
+  menu.innerHTML = `
+    <div class="item" style="color:var(--muted);cursor:default;font-size:10px">${esc(_ctxMenuNode.type)}: ${esc(targetVal.substring(0, 40))}</div>
+    <input class="ctx-search" id="ctx-tool-search" placeholder="Search tool/desc/command..." value="${esc(filter || '')}" onclick="event.stopPropagation()" oninput="renderToolContextMenu(this.value)" />
+    <div class="sep"></div>
+    ${tools.map(t => `<div class="item" onclick="runToolOnNode('${esc(t.name)}')">
+      <span>${esc(t.name)}</span><span class="hint">${esc((toolUseRule(t, _ctxMenuNode)?.desc || t.desc || '').substring(0, 42))}</span>
+    </div>`).join('') || '<div class="item" style="color:var(--muted);cursor:default">No tools</div>'}
+  `;
+  const search = document.getElementById('ctx-tool-search');
+  if (search) { search.focus(); search.setSelectionRange(search.value.length, search.value.length); }
+}
+
+async function runToolOnNode(tool) {
+  document.getElementById('ctx-menu').style.display = 'none';
+  const value = nodeDisplayValue(_ctxMenuNode);
+  // Open Run dialog pre-filled
+  document.getElementById('pl-run-name').textContent = 'Ad-hoc: ' + tool + ' on ' + value.substring(0, 30);
+  document.getElementById('pl-run-name').dataset.name = '';
+  document.getElementById('pl-run-name').dataset.tool = tool;
+  document.getElementById('pl-run-name').dataset.value = value;
+  document.getElementById('pl-run-name').dataset.nodeType = normalizedNodeType(_ctxMenuNode);
+  document.getElementById('pl-run-name').dataset.node = JSON.stringify(nodePayload(_ctxMenuNode));
+  document.getElementById('pl-run-title').textContent = 'Run Tool';
+  if (_ctxMenuNode.type === 'IP' || _ctxMenuNode.type === 'standalone_ip') {
+    document.getElementById('pl-run-ip').value = value;
+    document.getElementById('pl-run-domain').value = '';
+  } else {
+    document.getElementById('pl-run-domain').value = value;
+    document.getElementById('pl-run-ip').value = '';
+  }
+  document.getElementById('pl-run-company').value = '';
+  document.getElementById('pl-log').style.display = 'none';
+  document.getElementById('pl-log').textContent = '';
+  document.getElementById('pl-log-status').textContent = '';
+  document.getElementById('pl-run-btn').style.display = '';
+  document.getElementById('pl-run-overlay').style.display = 'flex';
+}
+
+// ============================================================
+// Config — interactive tool registry
+// ============================================================
+let _cfgTools = [];
+let _cfgRawText = '';
+let _cfgSelectedTool = '';
+
+async function loadConfig(tool) {
+  try {
+    const query = tool ? ('?tool=' + encodeURIComponent(tool)) : '';
+    const res = await fetch(API + '/config' + query);
+    const json = await res.json();
+    if (json.ok) {
+      _cfgRawText = json.data || '';
+      _cfgSelectedTool = json.tool || '';
+      document.getElementById('cfg-editor').value = _cfgRawText;
+      document.getElementById('cfg-path').textContent = json.path || '';
+      const selector = document.getElementById('cfg-tool-select');
+      selector.innerHTML = (json.tools || []).map(name =>
+        `<option value="${esc(name)}" ${name===_cfgSelectedTool?'selected':''}>${esc(name)}</option>`
+      ).join('');
+      renderCfgTable();
+      checkTools();
+    } else {
+      toast(json.error, false);
+    }
+  } catch(e) {
+    toast(e.message, false);
+  }
+}
+
+function renderCfgTable(checkResults) {
+  const cr = checkResults || {};
+  const entries = Object.entries(cr);
+  _cfgTools = entries.map(([name, info]) => ({
+    name,
+    desc: info.desc || '',
+    command: info.command || '',
+    use_on: info.use_on || {},
+  }));
+  document.getElementById('cfg-tbody').innerHTML = entries.map(([name, info]) => {
+    let statusHtml = '';
+    if (info) {
+      statusHtml = info.found
+        ? `<span style="color:var(--green);font-size:10px" title="${esc(info.path)}">✓ found</span>`
+        : `<span style="color:var(--orange);font-size:10px" title="Place at: ${esc((info.expected||[]).join('  or  '))}">✗ not found</span>`;
+    }
+    const command = info.command || '';
+    const useOn = Object.keys(info.use_on || {}).join(', ') || '-';
+    return `<tr>
+      <td><button class="btn outline small" data-tool="${esc(name)}" onclick="loadConfig(this.dataset.tool)" title="${esc(info.config_path || '')}">${esc(name)}</button></td>
+      <td><span class="badge ok" title="${esc(info.desc || '')}">${esc(useOn)}</span></td>
+      <td style="font-family:monospace;font-size:11px;max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(command)}">${esc(command)}</td>
+      <td style="font-size:12px">${statusHtml}</td>
+    </tr>`;
+  }).join('');
+  if (!entries.length) {
+    document.getElementById('cfg-tbody').innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No tools parsed. Check tools/*/tool.yaml.</td></tr>';
+  }
+}
+
+async function checkTools() {
+  const btn = document.querySelector('#page-config .toolbar button');
+  if (btn) { btn.textContent = 'Checking...'; btn.disabled = true; }
+  try {
+    const res = await fetch(API + '/config/check');
+    const json = await res.json();
+    if (json.ok) { renderCfgTable(json.data); }
+  } catch(e) { toast(e.message, false); }
+  if (btn) { btn.textContent = 'Re-check'; btn.disabled = false; }
+}
+
+async function saveConfig() {
+  const content = document.getElementById('cfg-editor').value;
+  const tool = document.getElementById('cfg-tool-select').value || _cfgSelectedTool;
+  if (!tool) { toast('Select a tool first', false); return; }
+  if (!content.trim()) { toast('tool.yaml cannot be empty', false); return; }
+  try {
+    const res = await fetch(API + '/config', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({tool, content})
+    });
+    const json = await res.json();
+    const el = document.getElementById('cfg-status');
+    if (json.ok) {
+      _cfgRawText = content;
+      _cfgSelectedTool = json.tool || tool;
+      if (json.path) document.getElementById('cfg-path').textContent = json.path;
+      el.innerHTML = '<span style="color:var(--green)">Saved — tools/' + esc(_cfgSelectedTool) + '/tool.yaml</span>';
+      await checkTools();
+    } else {
+      el.innerHTML = '<span style="color:var(--red)">' + esc(json.detail||json.error) + '</span>';
+    }
+  } catch(e) {
+    document.getElementById('cfg-status').innerHTML = '<span style="color:var(--red)">' + esc(e.message) + '</span>';
+  }
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+function esc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function fmtTime(t) {
+  if (!t) return '-';
+  try { return new Date(t).toLocaleString(); } catch(e) { return t; }
+}
+
+function fmtSize(n) {
+  if (!n) return '-';
+  if (n > 1048576) return (n/1048576).toFixed(1) + ' MB';
+  if (n > 1024) return (n/1024).toFixed(1) + ' KB';
+  return n + ' B';
+}
+
+function statusBadge(code) {
+  if (!code) return '-';
+  if (code >= 200 && code < 300) return `<span class="badge ok">${code}</span>`;
+  if (code >= 300 && code < 400) return `<span class="badge warn">${code}</span>`;
+  if (code >= 400) return `<span class="badge err">${code}</span>`;
+  return code;
+}
+
+// ============================================================
+// Pipelines
+// ============================================================
+let _plEditorData = null; // {name, description, stages: [{name, tools}]}
+
+const PL_TOOLS = [
+  {name:'enscan', desc:'enscan — company→domain discovery', use_on:{Asset:{}}},
+  {name:'subfinder', desc:'subfinder — subdomain discovery', use_on:{RootDomain:{}}},
+  {name:'crt', desc:'crt.sh — certificate transparency subdomains', use_on:{RootDomain:{}}},
+  {name:'dnsx', desc:'dnsx — subdomain DNS resolution', use_on:{Subdomain:{}}},
+  {name:'naabu', desc:'naabu — fast port discovery', use_on:{IP:{}, standalone_ip:{}}},
+  {name:'nmap', desc:'nmap — service detection on discovered ports', use_on:{IP:{}, standalone_ip:{}}},
+  {name:'httpx', desc:'httpx — web fingerprint', use_on:{Subdomain:{}, IP:{}, standalone_ip:{}, Port:{}}},
+  {name:'katana', desc:'katana — headless JS crawler', use_on:{Endpoint:{}}},
+  {name:'dirbuster', desc:'dirbuster — directory/file brute-force', use_on:{Endpoint:{}}},
+  {name:'ffuf', desc:'ffuf — fast web fuzzer', use_on:{Endpoint:{}}},
+  {name:'gobuster', desc:'gobuster — directory/file/DNS brute-force', use_on:{Endpoint:{}}},
+  {name:'nuclei', desc:'nuclei — vulnerability scanner', use_on:{Endpoint:{}}},
+];
+
+async function loadPipelines() {
+  document.getElementById('pl-loading').style.display = 'block';
+  // Also fetch Celery status
+  fetch(API + '/tasks').then(r => r.json()).then(j => {
+    if (j.ok) {
+      const broker = j.broker_ok ? 'connected' : 'offline';
+      const worker = j.worker_online ? 'online' : 'offline';
+      document.getElementById('pl-broker').textContent =
+        `Broker: ${broker} | Worker: ${worker} | Queue: ${j.queue_depth || 0} | Active: ${j.active_count || 0}`;
+    }
+  }).catch(() => {});
+  try {
+    const res = await fetch(API + '/pipelines');
+    const json = await res.json();
+    if (!json.ok) { toast(json.error, false); document.getElementById('pl-loading').style.display = 'none'; return; }
+    const data = json.data || [];
+    document.getElementById('pl-tbody').innerHTML = data.map(p =>
+      `<tr>
+        <td><strong>${esc(p.name)}</strong></td>
+        <td style="color:var(--muted)">${esc(p.description||'')}</td>
+        <td>${(p.stages||[]).map(s => stageBadge(s)).join(' ')}</td>
+        <td style="text-align:right">
+          <button class="btn small" onclick="openRunModal('${esc(p.name)}')">Run</button>
+          <button class="btn outline small" onclick="editPipeline('${esc(p.name)}')">Edit</button>
+          <button class="btn danger small" onclick="deletePipeline('${esc(p.name)}')">Del</button>
+        </td>
+      </tr>`
+    ).join('') || '<tr><td colspan="4" style="color:var(--muted)">No pipelines defined. Click "New Pipeline".</td></tr>';
+  } catch(e) { toast(e.message, false); }
+  document.getElementById('pl-loading').style.display = 'none';
+}
+
+function stageBadge(stage) {
+  if (stage.tools) return `<span class="badge ok" title="Tools: ${stage.tools.join(', ')}">⚡ ${stage.tools.join(' + ')}</span>`;
+  if (stage.parallel) return `<span class="badge ok" title="Parallel: ${stage.parallel.map(p=>p.tool).join(', ')}">⚡ ${stage.parallel.map(p=>p.tool).join(' + ')}</span>`;
+  return `<span class="badge ok">${stage.tool}</span>`;
+}
+
+function newPipeline() {
+  _plEditorData = {name:'', description:'', stages:[
+    {name:'ip_to_port', tools:['naabu']},
+    {name:'port_to_endpoint', tools:['httpx']},
+  ]};
+  document.getElementById('pl-editor-title').textContent = 'New Pipeline';
+  document.getElementById('pl-ed-name').value = '';
+  document.getElementById('pl-ed-desc').value = '';
+  document.getElementById('pl-ed-name').disabled = false;
+  renderStages();
+  document.getElementById('pl-editor-overlay').style.display = 'flex';
+}
+
+async function editPipeline(name) {
+  try {
+    const res = await fetch(API + '/pipelines/' + encodeURIComponent(name));
+    const json = await res.json();
+    if (!json.ok) { toast(json.error, false); return; }
+    const d = json.data;
+    _plEditorData = {name: d.name, description: d.description||'', stages: d.stages||[]};
+    document.getElementById('pl-editor-title').textContent = 'Edit Pipeline';
+    document.getElementById('pl-ed-name').value = d.name;
+    document.getElementById('pl-ed-desc').value = d.description||'';
+    document.getElementById('pl-ed-name').disabled = true;
+    renderStages();
+    document.getElementById('pl-editor-overlay').style.display = 'flex';
+  } catch(e) { toast(e.message, false); }
+}
+
+function renderStages() {
+  const container = document.getElementById('pl-ed-stages');
+  container.innerHTML = _plEditorData.stages.map((s, i) => {
+    const tools = s.tools || (s.parallel ? s.parallel.map(p => p.tool) : (s.tool ? [s.tool] : []));
+    const body = `<div style="display:flex;gap:8px;align-items:center;margin:4px 0">
+        <input type="text" value="${esc(s.name || '')}" placeholder="stage name" onchange="_plEditorData.stages[${i}].name=this.value" style="width:180px" />
+        <span style="color:var(--muted);font-size:11px">Tools run in parallel:</span>
+      </div>`
+      + tools.map((toolName, pi) => `<div style="display:flex;gap:6px;align-items:center;margin-bottom:4px;padding-left:12px">
+          <span style="color:var(--muted);font-size:10px">#${pi+1}</span>
+          <select onchange="setStageTool(${i},${pi},this.value)" style="width:150px">${PL_TOOLS.map(t=>`<option value="${t.name}" ${toolName===t.name?'selected':''}>${t.name}</option>`).join('')}</select>
+          <span style="color:var(--muted);font-size:10px">${esc((PL_TOOLS.find(t=>t.name===toolName)||{}).desc || '')}</span>
+          <button class="btn danger small" onclick="removeStageTool(${i},${pi})">×</button>
+        </div>`).join('')
+      + `<button class="btn outline small" onclick="addStageTool(${i})" style="margin-left:12px">+ Add Tool</button>`;
+    return `<div style="margin-bottom:8px;padding:10px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:2px">
+        <span style="color:var(--accent);font-weight:700;font-size:13px;min-width:20px">${i+1}</span>
+        <span style="font-size:11px;color:var(--muted)">Stage</span>
+        <span class="spacer"></span>
+        <button class="btn outline small" onclick="moveStage(${i},-1)" ${i===0?'disabled':''}>▲</button>
+        <button class="btn outline small" onclick="moveStage(${i},1)" ${i===_plEditorData.stages.length-1?'disabled':''}>▼</button>
+        <button class="btn danger small" onclick="_plEditorData.stages.splice(${i},1);renderStages()">×</button>
+      </div>
+      ${body}
+      <div style="color:${i===0?'var(--muted)':'var(--green)'};font-size:10px;padding-left:4px;margin-top:2px">
+        command comes from tools/&lt;name&gt;/tool.yaml
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function ensureStageTools(idx) {
+  const s = _plEditorData.stages[idx];
+  if (!s.tools) s.tools = s.parallel ? s.parallel.map(p => p.tool) : (s.tool ? [s.tool] : []);
+  delete s.parallel;
+  delete s.tool;
+  delete s.command;
+  return s.tools;
+}
+
+function setStageTool(idx, pos, value) {
+  const tools = ensureStageTools(idx);
+  tools[pos] = value;
+}
+
+function addStageTool(idx) {
+  ensureStageTools(idx).push('nmap');
+  renderStages();
+}
+
+function removeStageTool(idx, pos) {
+  const tools = ensureStageTools(idx);
+  tools.splice(pos, 1);
+  if (!tools.length) _plEditorData.stages.splice(idx, 1);
+  renderStages();
+}
+
+function addStageRow() {
+  _plEditorData.stages.push({name:'new_stage', tools:['nmap']});
+  renderStages();
+}
+
+function moveStage(from, dir) {
+  const to = from + dir;
+  if (to < 0 || to >= _plEditorData.stages.length) return;
+  const tmp = _plEditorData.stages[from];
+  _plEditorData.stages[from] = _plEditorData.stages[to];
+  _plEditorData.stages[to] = tmp;
+  renderStages();
+}
+
+async function savePipeline() {
+  const nameEl = document.getElementById('pl-ed-name');
+  const name = nameEl.value.trim();
+  if (!name) { toast('Name is required', false); return; }
+  if (_plEditorData.stages.length === 0) { toast('Need at least one stage', false); return; }
+  const body = {
+    description: document.getElementById('pl-ed-desc').value.trim(),
+    stages: _plEditorData.stages.map(s => {
+      const tools = s.tools || (s.parallel ? s.parallel.map(p => p.tool) : (s.tool ? [s.tool] : []));
+      return {name: s.name || '', tools};
+    })
+  };
+  try {
+    const res = await fetch(API + '/pipelines/' + encodeURIComponent(name), {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const json = await res.json();
+    if (json.ok) {
+      toast('Saved: ' + name);
+      document.getElementById('pl-editor-overlay').style.display = 'none';
+      loadPipelines();
+    } else {
+      toast(json.detail || json.error || 'Save failed', false);
+    }
+  } catch(e) { toast(e.message, false); }
+}
+
+let _lastPipelineRun = null;
+let _pipelineRunWatcher = null;
+let _pipelineRunData = null; // {name, task_id, stages: [], total, status}
+
+async function watchPipelineRun(taskId, name, intervalMs = 1500, maxWait = 600000, logFn = null) {
+  if (_pipelineRunWatcher) clearInterval(_pipelineRunWatcher);
+  const start = Date.now();
+  _pipelineRunData = {name, task_id: taskId, stages: [], total: 0, status: 'running'};
+  updatePipelineStatus();
+  const log = logFn || (() => {});
+
+  _pipelineRunWatcher = setInterval(async () => {
+    try {
+      const r = await fetch(API + '/tasks/result/' + taskId);
+      const j = await r.json();
+      if (!j.ok) return;
+      const d = j.data;
+      const meta = d?.result || d?.meta || {};
+
+      if (d?.status === 'PROGRESS' || meta?.status === 'running') {
+        const prevLen = _pipelineRunData.stages.length;
+        _pipelineRunData.total = meta.total || _pipelineRunData.total;
+        _pipelineRunData.stages = meta.stages || [];
+        _pipelineRunData.stage = meta.stage;
+        updatePipelineStatus();
+        // Log new stages
+        for (let i = prevLen; i < _pipelineRunData.stages.length; i++) {
+          const s = _pipelineRunData.stages[i];
+          const tool = s.tool || (s.details ? s.details.map(d=>d.tool).join('+') : 'stage');
+          log(`Stage ${i+1}: ${tool} — ${s.status} findings=${s.findings||0}`, s.status==='ok'?'ok':'err');
+        }
+      } else if (d?.status === 'SUCCESS') {
+        clearInterval(_pipelineRunWatcher); _pipelineRunWatcher = null;
+        _pipelineRunData.status = 'ok';
+        _pipelineRunData.stages = meta.stages || d?.result?.stages || [];
+        updatePipelineStatus();
+        log('All stages complete');
+        document.getElementById('pl-log-status').innerHTML = '<span style="color:var(--green)">Complete</span>';
+        document.getElementById('pl-run-btn').style.display = '';
+      } else if (d?.status === 'FAILURE') {
+        clearInterval(_pipelineRunWatcher); _pipelineRunWatcher = null;
+        _pipelineRunData.status = 'fail';
+        _pipelineRunData.stages = meta.stages || [];
+        _pipelineRunData.resumeFrom = meta.resume_from;
+        updatePipelineStatus();
+        log('FAILED at stage ' + ((meta.resume_from||0)+1), 'err');
+        document.getElementById('pl-log-status').innerHTML = '<span style="color:var(--red)">Failed</span>';
+        document.getElementById('pl-run-btn').style.display = '';
+      }
+    } catch(e) {
+      if (Date.now() - start > maxWait) {
+        clearInterval(_pipelineRunWatcher); _pipelineRunWatcher = null;
+        log('Timeout — task may still be running in background');
+        document.getElementById('pl-run-btn').style.display = '';
+      }
+    }
+  }, intervalMs);
+}
+
+function updatePipelineStatus() {
+  const el = document.getElementById('pl-status');
+  if (!_pipelineRunData) {
+    el.innerHTML = '<span style="font-size:12px;color:var(--muted)">No recent pipeline run</span>';
+    return;
+  }
+  const d = _pipelineRunData;
+  if (d.status === 'running') {
+    let html = `<span style="font-size:12px;color:var(--accent)">⟳ ${esc(d.name)} </span>`;
+    if (d.total) {
+      const done = d.stages.filter(s => s.status === 'ok').length;
+      html += `<span style="font-size:11px;color:var(--muted)">[${done}/${d.total}]</span> `;
+      // Per-stage dots
+      for (let i = 0; i < d.total; i++) {
+        const s = d.stages[i];
+        const cls = s ? (s.status === 'ok' ? 'ok' : 'err') : (i === d.stage ? 'warn' : '');
+        const sym = s ? (s.status === 'ok' ? '✓' : '✗') : (i === d.stage ? '⟳' : '○');
+        html += `<span class="badge ${cls}" style="margin:0 1px">${sym}</span>`;
+      }
+    }
+    el.innerHTML = html;
+  } else if (d.status === 'ok') {
+    el.innerHTML = `<span style="font-size:12px;color:var(--green)">✓ ${esc(d.name)} — all ${d.stages.length} stages OK</span>`;
+  } else {
+    el.innerHTML = `<span style="font-size:12px;color:var(--red)">✗ ${esc(d.name)} — failed at stage ${(d.resumeFrom||0)+1} </span>
+      <button class="btn small" onclick="resumePipeline('${esc(d.name)}')">Resume</button>`;
+  }
+}
+
+async function deletePipeline(name) {
+  if (!confirm('Delete pipeline "' + name + '"?')) return;
+  try {
+    const res = await fetch(API + '/pipelines/' + encodeURIComponent(name), {method: 'DELETE'});
+    const json = await res.json();
+    if (json.ok) { toast('Deleted: ' + name); loadPipelines(); }
+    else { toast(json.detail||json.error, false); }
+  } catch(e) { toast(e.message, false); }
+}
+
+async function resumePipeline(name) {
+  // Fetch saved progress and re-run with the same ctx
+  try {
+    const r = await fetch(API + '/pipelines/' + encodeURIComponent(name) + '/progress?asset_id=' + encodeURIComponent(currentAsset));
+    const j = await r.json();
+    if (!j.ok || !j.data) { toast('No saved progress to resume from', false); return; }
+    const saved = j.data;
+    const params = saved.ctx || {};
+    toast('Resuming ' + name + ' from stage ' + (saved.stages.length) + '...');
+    const res = await fetch(API + '/pipelines/' + encodeURIComponent(name) + '/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({asset_id: currentAsset, params})
+    });
+    const jr = await res.json();
+    if (jr.ok) watchPipelineRun(jr.task_id, name);
+    else toast(jr.detail || jr.error, false);
+  } catch(e) { toast(e.message, false); }
+}
+
+function openRunModal(name) {
+  document.getElementById('pl-run-title').textContent = 'Run Pipeline';
+  document.getElementById('pl-run-name').textContent = name;
+  document.getElementById('pl-run-name').dataset.name = name;
+  document.getElementById('pl-run-name').dataset.tool = '';
+  document.getElementById('pl-run-name').dataset.value = '';
+  document.getElementById('pl-run-name').dataset.nodeType = '';
+  document.getElementById('pl-run-name').dataset.node = '';
+  document.getElementById('pl-run-ip').value = '';
+  document.getElementById('pl-run-domain').value = '';
+  document.getElementById('pl-run-company').value = '';
+  document.getElementById('pl-log').style.display = 'none';
+  document.getElementById('pl-log').textContent = '';
+  document.getElementById('pl-log-status').textContent = '';
+  document.getElementById('pl-run-btn').style.display = '';
+  document.getElementById('pl-run-overlay').style.display = 'flex';
+}
+
+function getPipelineRunParams() {
+  const ip = document.getElementById('pl-run-ip').value.trim();
+  const domain = document.getElementById('pl-run-domain').value.trim();
+  const company = document.getElementById('pl-run-company').value.trim();
+  const params = {};
+  if (ip) params.ip = ip;
+  if (domain) params.domain = domain;
+  if (company) params.company = company;
+  return params;
+}
+
+async function previewPipeline() {
+  const runMeta = document.getElementById('pl-run-name').dataset;
+  const name = runMeta.name;
+  const tool = runMeta.tool || '';
+  const target = runMeta.value || '';
+  const nodeType = runMeta.nodeType || '';
+  const node = runMeta.node ? JSON.parse(runMeta.node) : {};
+  const params = getPipelineRunParams();
+  if (!name && !tool) { toast('Select a pipeline or tool first', false); return; }
+  if (!params.ip && !params.domain && !params.company) { toast('Enter at least one target', false); return; }
+
+  const logEl = document.getElementById('pl-log');
+  logEl.style.display = 'block';
+  logEl.textContent = 'Previewing commands...\n';
+  document.getElementById('pl-log-status').innerHTML = '<span style="color:var(--accent)">Previewing...</span>';
+
+  try {
+    const url = tool
+      ? API + '/tools/' + encodeURIComponent(tool) + '/preview'
+      : API + '/pipelines/' + encodeURIComponent(name) + '/preview';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({params, target, node_type: nodeType, node, asset_id: currentAsset})
+    });
+    const json = await res.json();
+    if (!json.ok) {
+      logEl.textContent = 'ERROR: ' + (json.detail || json.error || 'unknown') + '\n';
+      document.getElementById('pl-log-status').innerHTML = '<span style="color:var(--red)">Preview failed</span>';
+      return;
+    }
+    const d = json.data || {};
+    logEl.textContent = renderPipelinePreview(d);
+    document.getElementById('pl-log-status').innerHTML =
+      d.status === 'ok'
+        ? '<span style="color:var(--green)">Preview OK</span>'
+        : '<span style="color:var(--red)">Preview has errors</span>';
+  } catch(e) {
+    logEl.textContent = 'ERROR: ' + e.message + '\n';
+    document.getElementById('pl-log-status').innerHTML = '<span style="color:var(--red)">Preview failed</span>';
+  }
+}
+
+function renderPipelinePreview(data) {
+  const lines = [];
+  lines.push(`Pipeline preview: ${data.status || 'unknown'}`);
+  lines.push('');
+  const stages = data.stages || [];
+  if (!stages.length) {
+    lines.push('No stages.');
+    return lines.join('\n');
+  }
+  function appendToolPreview(item, prefix) {
+    const status = item.status === 'ok' ? 'OK' : 'ERROR';
+    lines.push(`${prefix}${status} ${item.tool || '(missing tool)'}`);
+    if (item.command) lines.push(`${prefix}  command: ${item.command}`);
+    if (item.targets && item.targets.length) {
+      const shown = item.targets.slice(0, 5).join(', ');
+      const more = item.targets.length > 5 ? ` ... +${item.targets.length - 5} more` : '';
+      lines.push(`${prefix}  targets: ${shown}${more}`);
+    }
+    if (item.unresolved && item.unresolved.length) {
+      lines.push(`${prefix}  unresolved: ${item.unresolved.join(', ')}`);
+    }
+    for (const err of (item.errors || [])) {
+      lines.push(`${prefix}  error: ${err.message || err.kind || 'unknown'}`);
+    }
+  }
+  stages.forEach((stage, idx) => {
+    const name = stage.name ? ` ${stage.name}` : '';
+    lines.push(`Stage ${idx + 1}:${name}`);
+    if (stage.type === 'parallel') {
+      for (const detail of (stage.details || [])) appendToolPreview(detail, '  - ');
+    } else {
+      appendToolPreview(stage, '  ');
+    }
+    lines.push('');
+  });
+  return lines.join('\n');
+}
+
+async function runPipeline() {
+  const runMeta = document.getElementById('pl-run-name').dataset;
+  const name = runMeta.name;
+  const tool = runMeta.tool || '';
+  const target = runMeta.value || '';
+  const nodeType = runMeta.nodeType || '';
+  const node = runMeta.node ? JSON.parse(runMeta.node) : {};
+  const params = getPipelineRunParams();
+  if (!name && !tool) { toast('Select a pipeline or tool first', false); return; }
+  if (!params.ip && !params.domain && !params.company) { toast('Enter at least one target', false); return; }
+
+  // Show log panel
+  const logEl = document.getElementById('pl-log');
+  logEl.style.display = 'block';
+  logEl.textContent = '';
+  document.getElementById('pl-log-status').textContent = 'Sending...';
+  document.getElementById('pl-run-btn').style.display = 'none';
+
+  function log(msg, cls) {
+    logEl.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  try {
+    const url = tool
+      ? API + '/tools/' + encodeURIComponent(tool) + '/run'
+      : API + '/pipelines/' + encodeURIComponent(name) + '/run';
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({params, target, node_type: nodeType, node, asset_id: currentAsset})
+    });
+    const json = await res.json();
+    if (json.ok && json.task_id) {
+      log('Task queued: ' + json.task_id);
+      document.getElementById('pl-log-status').innerHTML = '<span style="color:var(--accent)">Running...</span>';
+      watchPipelineRun(json.task_id, name, 2000, 600000, log);
+    } else if (json.ok) {
+      const d = json.data || {};
+      log(`${tool || name} finished: ${d.status || json.status || 'ok'}`);
+      for (const stage of (d.stages || [])) {
+        log(`Stage ${stage.stage + 1}: ${stage.tool || stage.name || 'tool'} — ${stage.status} findings=${stage.findings || 0} written=${stage.written || 0}`);
+        for (const err of (stage.errors || [])) log(`ERROR: ${err.message || err.kind || 'unknown'}`);
+      }
+      document.getElementById('pl-log-status').innerHTML =
+        (d.status || json.status) === 'error'
+          ? '<span style="color:var(--red)">Failed</span>'
+          : '<span style="color:var(--green)">Complete</span>';
+      if (tool && (d.status || json.status) !== 'error') {
+        await loadExplorer();
+        log('Attack surface refreshed');
+      }
+      document.getElementById('pl-run-btn').style.display = '';
+    } else {
+      log('ERROR: ' + (json.detail || json.error || 'unknown'), 'err');
+      document.getElementById('pl-log-status').innerHTML = '<span style="color:var(--red)">Failed</span>';
+      document.getElementById('pl-run-btn').style.display = '';
+    }
+  } catch(e) { log('ERROR: ' + e.message, 'err'); document.getElementById('pl-run-btn').style.display = ''; }
+}
+
+// ============================================================
+// Tutorial
+// ============================================================
+const TUT_STEPS = [
+  {
+    title: '1. Add Targets',
+    html: `
+      <p>Add the domains, IPs, URLs, or subdomains you want to recon.</p>
+      <div style="background:var(--bg);border-radius:6px;padding:10px;margin:8px 0;font-size:12px;line-height:1.8">
+        <div>1. Go to <b>Targets</b> tab</div>
+        <div>2. Select type (Domain / IP / URL / Subdomain)</div>
+        <div>3. Enter value → click <b>Add</b></div>
+        <div>4. Go to <b>Tasks</b> tab to manually trigger scans</div>
+        <div style="color:var(--muted);margin-top:4px">Example: <code>example.com</code> or <code>192.168.1.0/24</code></div>
+      </div>
+      <p style="color:var(--muted);font-size:11px">Scanning is manual by default. Set AUTOPT_AUTO_SCAN=1 in .env for scheduled auto-scan.</p>
+    `,
+  },
+  {
+    title: '2. Explore Attack Surface',
+    html: `
+      <p>Browse the full asset hierarchy with sources and relationships visible at every level.</p>
+      <div style="background:var(--bg);border-radius:6px;padding:10px;margin:8px 0;font-size:12px;line-height:1.8">
+        <div>📁 <b>RootDomain</b> — click to expand → subdomains with resolved IPs</div>
+        <div>🔗 <b>IP</b> — click to expand → open ports with HTTP endpoints</div>
+        <div>Each node shows <b>sources</b> (which tool discovered it), timestamps, and relationships</div>
+        <div style="color:var(--muted);margin-top:4px">Multi-source consensus = higher confidence. Breadcrumb navigation at the top.</div>
+      </div>
+      <p style="color:var(--muted);font-size:11px">Data is stored in Neo4j with provenance tracking — drill down through Asset → Domain → Subdomain → IP → Port → Endpoint.</p>
+    `,
+  },
+  {
+    title: '3. Run Tasks & Pipelines',
+    html: `
+      <p>Manually trigger collection tasks or design multi-stage pipelines.</p>
+      <div style="background:var(--bg);border-radius:6px;padding:10px;margin:8px 0;font-size:12px;line-height:1.8">
+        <div><b>Tasks tab</b> — one-click trigger scheduled jobs</div>
+        <div style="margin:4px 0;padding-left:12px;border-left:2px solid var(--border)">
+          <code>dns_resolve</code>, <code>port_scan</code>, <code>web_fingerprint</code>, etc.
+        </div>
+        <div style="margin-top:8px"><b>Pipelines tab</b> — design custom multi-stage workflows</div>
+        <div style="margin:4px 0;padding-left:12px;border-left:2px solid var(--border)">
+          Example: <code>nmap SYN → nmap -sV -p {ports} → httpx -l {urls_file}</code>
+        </div>
+        <div style="color:var(--green);margin-top:4px">Stage 1 finds ports → {ports} feeds Stage 2 → {urls} feeds Stage 3</div>
+      </div>
+    `,
+  },
+  {
+    title: '4. Edit Tool Commands',
+    html: `
+      <p>Customize how each tool is invoked via <code>tools/&lt;name&gt;/tool.yaml</code>.</p>
+      <div style="background:var(--bg);border-radius:6px;padding:10px;margin:8px 0;font-size:12px;line-height:1.8">
+        <div>Available placeholders:</div>
+        <div><code>{bin}</code> — auto-resolved tool path</div>
+        <div><code>{ip}</code> <code>{domain}</code> <code>{subdomain}</code> — target</div>
+        <div><code>{port}</code> <code>{url}</code> — single value</div>
+        <div><code>{ports}</code> <code>{ips}</code> <code>{urls}</code> — comma-joined list (pipelines only)</div>
+        <div><code>{urls_file}</code> — temp file, one URL per line (pipelines only)</div>
+      </div>
+      <p style="color:var(--muted);font-size:11px">Changes take effect on next task run (hot-reload). No restart needed.</p>
+    `,
+  },
+];
+
+let _tutIdx = 0;
+
+function tutRender() {
+  const s = TUT_STEPS[_tutIdx];
+  document.getElementById('tut-steps').innerHTML = `
+    <h4 style="margin-bottom:10px">${s.title}</h4>
+    ${s.html}
+  `;
+  document.getElementById('tut-counter').textContent = `${_tutIdx+1} / ${TUT_STEPS.length}`;
+  document.getElementById('tut-prev-btn').style.display = _tutIdx > 0 ? '' : 'none';
+  document.getElementById('tut-next-btn').style.display = _tutIdx < TUT_STEPS.length - 1 ? '' : 'none';
+  document.getElementById('tut-done-btn').style.display = _tutIdx === TUT_STEPS.length - 1 ? '' : 'none';
+}
+
+function tutNext() {
+  if (_tutIdx < TUT_STEPS.length - 1) { _tutIdx++; tutRender(); }
+}
+function tutPrev() {
+  if (_tutIdx > 0) { _tutIdx--; tutRender(); }
+}
+function tutClose() {
+  document.getElementById('tut-overlay').style.display = 'none';
+  try { localStorage.setItem('graphpt_tutorial_done', '1'); } catch(e) {}
+}
+
+function tutOpen() {
+  _tutIdx = 0;
+  tutRender();
+  document.getElementById('tut-overlay').style.display = 'flex';
+}
+
+// ============================================================
+// Init
+// ============================================================
+loadHealth();
+loadDashboard();
+updatePipelineStatus();
+if (!localStorage.getItem('graphpt_tutorial_done')) { tutOpen(); }
+
+// "?" button in header to reopen tutorial
+(function() {
+  const hdr = document.querySelector('header');
+  const btn = document.createElement('button');
+  btn.textContent = '?';
+  btn.title = 'Quick Guide';
+  btn.style.cssText = 'background:var(--accent);color:#fff;border:none;width:26px;height:26px;border-radius:50%;font-size:14px;font-weight:700;cursor:pointer';
+  btn.onclick = tutOpen;
+  hdr.appendChild(btn);
+})();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest", "--headless", "--isolated"]
+    },
+    "ssh": {
+      "command": "npx",
+      "args": ["-y", "@aiondadotcom/mcp-ssh"],
+      "env": {"MCP_SILENT": "true"}
+    }
+  }
+}

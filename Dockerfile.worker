@@ -1,0 +1,37 @@
+# ============================================================
+# AutoPT Worker / Agent — 共享镜像
+# 采集引擎(Celery Worker) + 认知引擎(Agent) 共用同一 Python 环境
+# ============================================================
+
+FROM python:3.11-slim
+
+LABEL org.autopt.image="autopt-worker"
+
+# ---- 系统依赖 ----
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Playwright 浏览器依赖
+    libnss3 libnspr4 libatk-bridge2.0-0 libdrm2 libxkbcommon0 \
+    libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 \
+    libpango-1.0-0 libcairo2 libasound2 libatspi2.0-0 \
+    # 网络工具
+    curl dnsutils nmap \
+    # 编译依赖
+    gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---- 工作目录 ----
+WORKDIR /app
+
+# ---- Python 依赖 ----
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ---- Playwright 浏览器 ----
+RUN playwright install chromium && playwright install-deps chromium
+
+# ---- 应用代码 ----
+COPY autopt/ ./autopt/
+COPY bin/ ./bin/
+
+# ---- 入口（子镜像 / compose command 可覆盖）----
+CMD ["celery", "-A", "autopt.collector.app", "worker", "--loglevel=info"]

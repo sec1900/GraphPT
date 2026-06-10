@@ -1,0 +1,70 @@
+pipelines:
+  company_recon:
+    description: 公司→域名→子域名→DNS→端口→服务→指纹→爬虫/目录→漏洞扫描
+    stages:
+    - name: company_to_root_domain
+      tools:
+      - enscan
+    - name: root_domain_to_subdomain
+      tools:
+      - subfinder
+    - name: subdomain_to_ip
+      tools:
+      - dnsx
+    - name: ip_to_port
+      tools:
+      - naabu
+    - name: port_analysis
+      tools:
+      - nmap
+      - httpx
+    - name: endpoint_analysis
+      tools:
+      - katana
+      - ffuf
+      - gobuster
+      - nuclei
+
+  port_discovery:
+    description: 快速全端口发现 → 针对性服务识别 → Web 指纹收集
+    stages:
+    - name: ip_to_port
+      tools:
+      - naabu
+    - name: port_analysis
+      tools:
+      - nmap
+      - httpx
+
+  quick_scan:
+    description: 端口发现 + 服务识别 + 指纹
+    stages:
+    - name: ip_to_port
+      tools:
+      - naabu
+    - name: port_analysis
+      tools:
+      - nmap
+      - httpx
+
+  web_deep:
+    description: 端口扫描 → 指纹 → 并行爬虫+目录爆破
+    stages:
+    - name: ip_to_port
+      tools:
+      - naabu
+    - name: port_analysis
+      tools:
+      - nmap
+      - httpx
+    - name: endpoint_analysis
+      tools:
+      - katana
+      - ffuf
+
+  test_nmap_chain:
+    description: 单阶段 nmap（验证用）
+    stages:
+    - name: port_to_service
+      tools:
+      - nmap

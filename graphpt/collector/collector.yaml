@@ -1,0 +1,4 @@
+# GraphPT Tool Registry
+#
+# 工具配置已迁移至各工具目录: tools/<name>/tool.yaml
+# 此文件保留用于全局配置（如有需要）。

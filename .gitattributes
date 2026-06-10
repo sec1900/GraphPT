@@ -1,0 +1,5 @@
+tools/**/*.exe filter=lfs diff=lfs merge=lfs -text
+tools/**/*.jar filter=lfs diff=lfs merge=lfs -text
+tools/**/*.dll filter=lfs diff=lfs merge=lfs -text
+tools/**/*.so filter=lfs diff=lfs merge=lfs -text
+tools/**/*.bin filter=lfs diff=lfs merge=lfs -text

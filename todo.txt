@@ -1,0 +1,154 @@
+# GraphPT TODO
+
+## 节点右键 Auto Scan
+- 右键 RootDomain/Subdomain/IP/Endpoint → 可搜索工具、预览命令并执行
+- 图状态驱动：ScanRun 记录什么扫过、什么没扫，扫过自动跳过
+- 跑完自动刷新攻击面树，新节点自动出现
+- Pipeline 保留做定时任务（cron），日常操作走右键
+
+## Asset 级别 Scan All Unscanned
+- 对 Asset 下所有未扫节点批量跑对应 category 的工具
+- 遍历 RootDomain → subfinder/crt
+- 遍历 IP → nmap/masscan
+- 遍历 HTTPEndpoint → katana/dirbuster/ffuf/nuclei
+
+## 已做
+- Pipeline 执行日志面板 ✅
+- 攻击面右键菜单列出全部工具 ✅
+- 攻击面分页加载 ✅
+- Dashboard 按 Asset 统计 ✅
+- Config 页 Check All 一键检测 ✅
+- 树状态持久化 ✅
+- DNS 解析链路：dnsx / subdomain_to_ip ✅
+- httpx 输入链路：Subdomain + 任意 IP:Port，不预设 Web 端口 ✅
+- 命名分层：工具按能力、图谱靠关系、Pipeline 按链路 ✅
+- execute_tool 去 shell 执行并做基础命令校验 ✅
+- Pipeline 失败不再静默：input_query / 超时 / 非零退出 / adapter / 入图错误会返回 error/partial ✅
+- ScanRun 批量模式逐目标标记：批量工具仍跑一次，但按原始目标写 scanned ✅
+- service_detection 拆分：masscan 负责 port_discovery，nmap 负责 service_detection ✅
+- Pipeline 命令占位符残留校验：未替换的 {xxx} 会直接 error ✅
+- service_detection ScanRun 绑定 IP+端口集合：新增端口后 nmap 不会被旧 IP 级记录误跳过 ✅
+- nuclei JSONL adapter：漏洞扫描结果可写入 Vulnerability 图节点，并使用稳定 ID 去重 ✅
+- 漏洞列表 API/页面入口：nuclei 写入的 Vulnerability 可按 Asset、严重性、关键字查询和查看 ✅
+- Pipeline Dry Run/命令预览：运行前可展开流程命令，提前发现缺参数、工具缺失和残留占位符 ✅
+- Pipeline 前端修正：切 Asset 时正确刷新 Pipelines 页，工具分类同步为现行 category ✅
+- surfaces/endpoints API 覆盖独立 IP 链路：Asset→IP→Port→Endpoint 不再漏展示 ✅
+- Health API：/api/health 汇总 Neo4j、Redis、Celery、工具配置状态 ✅
+- 前端清理废弃 Task Queue 代码：删除无入口且引用不存在 DOM 的 loadTasks/triggerTask ✅
+- Pipelines 页状态显示修正：使用 broker_ok/worker_online/queue_depth/active_count 真实字段 ✅
+- 前端 Health 状态条：展示 Neo4j、Redis、Celery、Tools 状态 ✅
+- Dashboard Recent Changes 按 Asset 隔离：多 Asset 不再串端点变更 ✅
+- API Docs 入口：Header 增加 /docs 链接 ✅
+- Config 页改为完整 YAML 编辑器：保存时保留 category/input_query/input_mapping，并显示工具摘要状态 ✅
+- 右键 Ad-hoc 工具执行闭环：支持工具搜索、命令预览、单工具直接执行 ✅
+
+## 待做
+- 攻击面批量操作（勾选父子联动 + 批量删除/导出）← 已回退
+
+## 当前决策与暂停点
+### 命名规范
+- 工具分类 category 用“能力/动作”命名：
+  - company_recon
+  - subdomain_discovery
+  - dns_resolution
+  - port_discovery
+  - web_fingerprinting
+  - web_crawling
+  - content_discovery
+  - vulnerability_scanning
+- 图谱关系继续使用 Neo4j 关系语义：
+  - HAS_ROOT / HAS_SUB / RESOLVES_TO / HAS_PORT / EXPOSES / EXPOSES_PATH / REFERENCES
+- Pipeline/Runbook 阶段用链路命名：
+  - company_to_root_domain
+  - root_domain_to_subdomain
+  - subdomain_to_ip
+  - ip_to_port
+  - port_to_endpoint
+  - endpoint_to_path
+  - endpoint_to_vulnerability
+
+### DNS 解析补链路（已做，待联调）
+- 已补上 Subdomain → IP，后续 nmap/masscan 有 IP 输入。
+- 已做范围：
+  - adapter.py：新增 dnsx 输出适配器，输出 type=ip，parent_id=sub:<host>
+  - collector.yaml：新增 dnsx 工具注册，category=dns_resolution
+  - pipelines.yaml：在 subdomain_discovery 后插入 dns_resolution
+- 暂不扩大范围：
+  - 暂不改 Web UI
+  - 暂不做工具自动安装
+  - 暂不做完整 Runbook 编辑器
+
+### 当前需要人工判断
+- 是否细化 ScanRun 命中计数：批量工具当前按同一 findings_count 写给每个目标，未做到每目标独立计数。
+- 是否先清理 Pipeline/右键 Auto Scan 的边界，再继续补功能。
+
+## 功能缺失
+### DNS 解析（致命缺口）
+- 已补 dnsx，剩余是实际工具联调和每目标 findings_count 精确统计。
+
+### Web 指纹输入链路
+- 已改成从 Subdomain 或任意 IP:Port 输入，由 httpx 判断是否为 Web 服务并生成 HTTPEndpoint。
+
+### 漏洞管理
+- nuclei 结果已可写入 Vulnerability 节点，并已补 Web 列表入口。
+- 仍缺完整工作流：验证 → 评级 → 修复 → 复测。
+
+### Agent 决策层
+- 原设计第三层：Agent 读图 → 分析 → 决定下一步动作 → 调用工具 → 写入结果
+- 当前手动版：右键菜单跑工具
+- 缺少：LLM 集成、动作空间定义、决策历史记录
+
+### 报告生成
+- Neo4j 里有全部数据，但没法导出成客户要的 PDF/Word 报告
+
+### 变更检测
+- ScanRun 记录了扫过什么，但没有 diff
+- 新子域名、新端口、状态码变化 → 应自动告警
+
+### 定时调度
+- Pipeline 只能手动 Run，没有 cron
+
+## 架构/设计缺失
+### 无统一配置管理
+- Config 页已能完整编辑 collector.yaml；pipelines.yaml / enscan config.yaml / subfinder provider-config.yaml 仍散落各处。
+
+### 无认证/授权
+- Web 面板无登录，多租户只在数据层没有访问控制
+
+### 无错误处理/重试
+- Pipeline 静默失败已补；自动重试和失败后续跑策略仍未做。
+
+### 无日志/追踪
+- 无集中日志，无 request tracing
+
+### 工具安装手动
+- 二进制手动放 tools/，无版本管理，Agent 无法自动安装
+
+### 输入验证缺失
+- execute_tool 已改为 shell=False，并做基础参数校验。
+- Pipeline 已补命令占位符残留校验和 Dry Run 命令预览；更细粒度的参数类型/范围校验仍未做。
+
+### 健康监控
+- 已补 /api/health 汇总 Neo4j/Redis/Celery/工具配置；工具二进制仍依赖 Config 页手动 Check。
+
+### 无 API 文档
+- FastAPI 自带 /docs，Header 已增加 API Docs 入口；仍缺面向 Agent 的独立 API 使用说明。
+
+### 数据生命周期
+- 22k 子域名无清理/归档/压缩机制
+
+### 搜索太弱
+- 只能 DOM 过滤，无全文搜索，不能搜"所有 200 状态码的 nginx 端点"
+
+### 无图可视化
+- Neo4j 数据只展示为树表格，缺少关系图：ICP→域名→IP→端口→端点
+
+### Pipeline vs 右键冲突
+- 右键 ad-hoc 跑工具无法保存为可复用的模式
+- 需要 Runbook 概念
+
+### 无数据导入导出
+- 不能从 Burp/ZAP 导入，不能导出给外部工具
+
+### 无凭据/截图存储
+- HTTPEndpoint 有状态码但没有截图和原始响应

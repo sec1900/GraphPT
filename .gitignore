@@ -1,0 +1,40 @@
+# === 敏感信息（含真实密钥，绝不上传）===
+.env
+.env.bak
+.env.*.bak
+
+# === Python 缓存 ===
+.temp/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# === 运行时数据 / 备份 / 诊断 ===
+data/
+backup/
+debug/
+artifacts/
+
+# === 大体积资源（工具二进制 / PoC 库 / skill 知识库）===
+tools/
+res/toolkit/
+res/poc/
+res/skills/
+
+# === 杂项 ===
+/python
+.claude/settings.local.json
+# 项目工作区产物(如果有人在仓库根用 AUTOPT_ALLOW_REPO_ROOT=1 启动)
+.autopt/
+findings/
+operations/
+attempts.jsonl
+# 启动器产物
+bin/__pycache__/
+
+!.gitkeep
+
+dump.rdb
+*.png
+.playwright-mcp/

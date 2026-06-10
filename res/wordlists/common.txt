@@ -1,0 +1,10 @@
+admin
+api
+assets
+backup
+css
+debug
+images
+js
+login
+static
