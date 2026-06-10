@@ -151,8 +151,12 @@ services:
 
   # ==========================================
   # Agent — 认知引擎（7×24 持久运行）
+  # 尚未实现，profiles: [agent] 使其不随默认 up -d 启动
+  # 就绪后: docker compose --profile agent up -d
   # ==========================================
   agent:
+    profiles:
+      - agent
     build:
       context: .
       dockerfile: Dockerfile.worker

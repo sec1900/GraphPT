@@ -98,18 +98,24 @@ use_on:
 
 ## 内置工具
 
-| 工具 | 功能 |
-|------|------|
-| enscan | 公司信息收集 → 根域名发现（ICP/投资关系） |
-| subfinder | 子域名枚举 |
-| dnsx | DNS 解析 |
-| naabu | 快速端口扫描 |
-| nmap | 服务识别 |
-| httpx | Web 指纹识别 |
-| katana | Web 爬虫 |
-| ffuf | Web Fuzzing / 虚拟主机发现 |
-| gobuster | 目录/DNS/虚拟主机多模式扫描 |
-| nuclei | 漏洞扫描 |
+工具二进制文件**不包含在仓库中**（体积太大）。克隆后需自行下载，放到 `tools/<name>/` 目录下：
+
+| 工具 | 功能 | 下载地址 |
+|------|------|----------|
+| neo4j | 图数据库（基础设施） | https://neo4j.com/download/ |
+| memurai | Windows 版 Redis 兼容服务 | https://www.memurai.com/get-memurai |
+| enscan | 公司信息收集 → 根域名发现（ICP/投资关系） | https://github.com/wgpsec/ENScan_GO |
+| subfinder | 子域名枚举 | https://github.com/projectdiscovery/subfinder |
+| dnsx | DNS 解析 | https://github.com/projectdiscovery/dnsx |
+| naabu | 快速端口扫描 | https://github.com/projectdiscovery/naabu |
+| nmap | 服务识别 | https://nmap.org/download |
+| httpx | Web 指纹识别 | https://github.com/projectdiscovery/httpx |
+| katana | Web 爬虫 | https://github.com/projectdiscovery/katana |
+| ffuf | Web Fuzzing / 虚拟主机发现 | https://github.com/ffuf/ffuf |
+| gobuster | 目录/DNS/虚拟主机多模式扫描 | https://github.com/OJ/gobuster |
+| nuclei | 漏洞扫描 | https://github.com/projectdiscovery/nuclei |
+
+每个工具目录应包含二进制文件，`tool.yaml` 配置模板已在仓库中。
 
 ## 预置流水线
 

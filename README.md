@@ -58,18 +58,24 @@ use_on:
 
 ## Tools
 
-| Tool | Function |
-|------|----------|
-| enscan | Company → root domain discovery (ICP/invest) |
-| subfinder | Subdomain enumeration |
-| dnsx | DNS resolution |
-| naabu | Fast port scanning |
-| nmap | Service detection |
-| httpx | Web fingerprinting |
-| katana | Web crawling |
-| ffuf | Web fuzzing / vhost discovery |
-| gobuster | Dir/DNS/vhost multi-mode scanning |
-| nuclei | Vulnerability scanning |
+Tools are **not** included in the repository (binaries are too large for Git). After cloning, download each tool and place it in `tools/<name>/`:
+
+| Tool | Function | Download |
+|------|----------|----------|
+| neo4j | Graph database (infrastructure) | https://neo4j.com/download/ |
+| memurai | Redis-compatible server for Windows | https://www.memurai.com/get-memurai |
+| enscan | Company → root domain discovery (ICP/invest) | https://github.com/wgpsec/ENScan_GO |
+| subfinder | Subdomain enumeration | https://github.com/projectdiscovery/subfinder |
+| dnsx | DNS resolution | https://github.com/projectdiscovery/dnsx |
+| naabu | Fast port scanning | https://github.com/projectdiscovery/naabu |
+| nmap | Service detection | https://nmap.org/download |
+| httpx | Web fingerprinting | https://github.com/projectdiscovery/httpx |
+| katana | Web crawling | https://github.com/projectdiscovery/katana |
+| ffuf | Web fuzzing / vhost discovery | https://github.com/ffuf/ffuf |
+| gobuster | Dir/DNS/vhost multi-mode scanning | https://github.com/OJ/gobuster |
+| nuclei | Vulnerability scanning | https://github.com/projectdiscovery/nuclei |
+
+Each tool directory should contain the binary and a `tool.yaml` defining its command template (already in the repo).
 
 ## Pipelines
 
