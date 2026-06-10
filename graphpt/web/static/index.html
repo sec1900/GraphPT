@@ -220,6 +220,7 @@
   <button data-page="vulns">Vulnerabilities</button>
   <button data-page="tasks">Pipelines</button>
   <button data-page="config">Config</button>
+  <button data-page="agent">Agent</button>
 </nav>
 
 <main>
@@ -423,6 +424,31 @@
       </div>
     </div>
     <div id="cfg-status" style="margin-top:8px;font-size:12px;"></div>
+  </div>
+
+  <!-- ==================== Agent ==================== -->
+  <div id="page-agent" class="page">
+    <div class="toolbar">
+      <span style="font-size:14px;font-weight:600">Graph Agent</span>
+      <span class="spacer"></span>
+      <select id="agent-asset-sel" style="min-width:180px"></select>
+      <button class="btn" onclick="startAnalyze()">Analyze</button>
+      <button class="btn outline" onclick="startExpand()" id="btn-expand" disabled>Expand</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+      <div>
+        <div class="section-title">Status</div>
+        <div id="agent-status" class="card" style="min-height:60px;font-size:13px;color:var(--muted)">No session</div>
+      </div>
+      <div>
+        <div class="section-title">Sessions</div>
+        <div id="agent-sessions" style="font-size:12px;max-height:120px;overflow-y:auto"></div>
+      </div>
+    </div>
+    <div class="section" style="margin-top:16px">
+      <div class="section-title">Agent Output</div>
+      <div class="code-block"><pre id="agent-output" style="min-height:200px;max-height:500px;overflow-y:auto;white-space:pre-wrap">Waiting...</pre></div>
+    </div>
   </div>
 </main>
 
@@ -630,6 +656,7 @@ document.querySelectorAll('nav button[data-page]').forEach(btn => {
       case 'vulns': loadVulnerabilities(); break;
       case 'tasks': loadPipelines(); break;
       case 'config': loadConfig(); break;
+      case 'agent': loadAgent(); break;
     }
   });
 });
@@ -2070,6 +2097,79 @@ function tutOpen() {
 
 // ============================================================
 // Init
+// ============================================================
+// Agent Page
+// ============================================================
+let _agentSessionId = null;
+let _agentPoll = null;
+
+function loadAgent() {
+  const sel = document.getElementById('agent-asset-sel');
+  fetch('/api/assets').then(r=>r.json()).then(d=>{
+    sel.innerHTML = (d.assets||[]).map(a=>`<option value="${a.id}">${a.name||a.id}</option>`).join('');
+  }).catch(()=>{});
+  refreshAgentSessions();
+}
+
+function refreshAgentSessions() {
+  fetch('/api/agent/status').then(r=>r.json()).then(d=>{
+    const box = document.getElementById('agent-sessions');
+    const sessions = d.sessions || {};
+    const keys = Object.keys(sessions);
+    if(!keys.length){ box.textContent='No sessions'; return; }
+    box.innerHTML = keys.map(k=>`<div style="margin-bottom:4px"><span class="badge ${sessions[k]==='done'?'ok':sessions[k]==='error'?'err':'warn'}">${sessions[k]}</span> ${k}</div>`).join('');
+  });
+}
+
+function startAnalyze() {
+  const assetId = document.getElementById('agent-asset-sel').value;
+  if(!assetId){ toast('Select an asset','err'); return; }
+  document.getElementById('agent-output').textContent = 'Starting analyze...';
+  document.getElementById('btn-expand').disabled = true;
+  fetch('/api/agent/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId})})
+    .then(r=>r.json()).then(d=>{
+      if(!d.ok){ toast(d.error||'failed','err'); return; }
+      _agentSessionId = d.session_id;
+      document.getElementById('agent-status').innerHTML = `<span class="badge warn">running</span> ${d.session_id}`;
+      pollAgent();
+    });
+}
+
+function startExpand() {
+  const assetId = document.getElementById('agent-asset-sel').value;
+  if(!assetId){ toast('Select an asset','err'); return; }
+  document.getElementById('agent-output').textContent = 'Starting expand...';
+  fetch('/api/agent/expand',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId})})
+    .then(r=>r.json()).then(d=>{
+      if(!d.ok){ toast(d.error||'failed','err'); return; }
+      _agentSessionId = d.session_id;
+      document.getElementById('agent-status').innerHTML = `<span class="badge warn">running</span> ${d.session_id}`;
+      document.getElementById('btn-expand').disabled = true;
+      pollAgent();
+    });
+}
+
+function pollAgent() {
+  if(_agentPoll) clearInterval(_agentPoll);
+  _agentPoll = setInterval(()=>{
+    if(!_agentSessionId) return;
+    fetch(`/api/agent/status?session_id=${_agentSessionId}`).then(r=>r.json()).then(d=>{
+      if(d.status==='done'){
+        clearInterval(_agentPoll);
+        document.getElementById('agent-status').innerHTML = `<span class="badge ok">done</span> ${_agentSessionId} (${d.tool_calls||0} tool calls)`;
+        document.getElementById('agent-output').textContent = d.result||'(no output)';
+        document.getElementById('btn-expand').disabled = false;
+        refreshAgentSessions();
+      } else if(d.status==='error'){
+        clearInterval(_agentPoll);
+        document.getElementById('agent-status').innerHTML = `<span class="badge err">error</span> ${_agentSessionId}`;
+        document.getElementById('agent-output').textContent = d.error||'Unknown error';
+        refreshAgentSessions();
+      }
+    });
+  }, 2000);
+}
+
 // ============================================================
 loadHealth();
 loadDashboard();
