@@ -2,7 +2,7 @@
 
 两种模式（自动检测）：
 1. interactsh 模式：启动 interactsh-client → 公共服务器中转 DNS/HTTP/SMTP → poll 自动解析
-2. 预配置域名模式：设 AUTOPT_VALIDATION_OOB_DOMAIN=xxx.instances.httpworkbench.com
+2. 预配置域名模式：设 GRAPHPT_VALIDATION_OOB_DOMAIN=xxx.instances.httpworkbench.com
    → generate 直接产出子域名 → poll 提示到网页查看日志
 
 用于验证盲 SSRF、盲 XXE、盲 RCE、盲 SQL 注入等无回显漏洞。
@@ -45,7 +45,7 @@ def _is_interactsh_available() -> bool:
 
 def _get_configured_domain() -> str:
     """读取预配置的 OOB 域名（如 httpworkbench.com instance）。"""
-    return os.environ.get("AUTOPT_VALIDATION_OOB_DOMAIN", "").strip().strip(".")
+    return os.environ.get("GRAPHPT_VALIDATION_OOB_DOMAIN", "").strip().strip(".")
 
 
 class OOBCallbackManager:
@@ -110,7 +110,7 @@ class OOBCallbackManager:
             "hint": (
                 "OOB 回调不可用。任选其一：\n"
                 "1. 安装 interactsh-client: go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest\n"
-                "2. 在 .env 设 AUTOPT_VALIDATION_OOB_DOMAIN=<你的 httpworkbench.com instance>\n"
+                "2. 在 .env 设 GRAPHPT_VALIDATION_OOB_DOMAIN=<你的 httpworkbench.com instance>\n"
                 "   打开 https://httpworkbench.com 创建 Instance 获取域名。\n"
                 "3. 内网测试: Bash 启动 nc -l <port> 临时监听 HTTP 回调。"
             ),
@@ -270,8 +270,8 @@ class OOBCallbackManager:
     # ── internal ──
 
     def _start_interactsh(self, server: str, timeout_s: int = 20) -> dict[str, Any]:
-        server_url = server or os.environ.get("AUTOPT_OOB_INTERACTSH_SERVER", "").strip()
-        token = os.environ.get("AUTOPT_OOB_INTERACTSH_TOKEN", "").strip()
+        server_url = server or os.environ.get("GRAPHPT_OOB_INTERACTSH_SERVER", "").strip()
+        token = os.environ.get("GRAPHPT_OOB_INTERACTSH_TOKEN", "").strip()
 
         cmd = ["interactsh-client", "-json", "-poll-interval", "1"]
         if server_url:

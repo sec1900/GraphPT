@@ -11,7 +11,7 @@ _log = get_logger(__name__)
 
 
 def _get_fernet_key() -> bytes | None:
-    raw = os.environ.get("AUTOPT_SECRET_KEY", "").strip()
+    raw = os.environ.get("GRAPHPT_SECRET_KEY", "").strip()
     if not raw:
         return None
     if len(raw) < 32:

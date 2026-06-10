@@ -255,7 +255,7 @@ def _resolve_browser_runtime() -> tuple[bool, str]:
     except (ImportError, RuntimeError):  # noqa: BLE001
         pass
     import os
-    headless = os.environ.get("AUTOPT_BROWSER_HEADLESS", "true").lower() not in ("false", "0", "no")
+    headless = os.environ.get("GRAPHPT_BROWSER_HEADLESS", "true").lower() not in ("false", "0", "no")
 
     _ = sync_playwright  # 延迟导入探针，保持依赖错误在真实启动时暴露
     return headless, proxy_url

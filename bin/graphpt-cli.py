@@ -14,11 +14,11 @@ import sys
 from pathlib import Path
 
 # 推导 GraphPT 仓库根: bin/graphpt-cli.py 的父目录的父目录
-_AUTOPT_HOME = Path(__file__).resolve().parent.parent
+_GRAPHPT_HOME = Path(__file__).resolve().parent.parent
 
 # 注入 sys.path 头部,让 graphpt 模块可发现
-if str(_AUTOPT_HOME) not in sys.path:
-    sys.path.insert(0, str(_AUTOPT_HOME))
+if str(_GRAPHPT_HOME) not in sys.path:
+    sys.path.insert(0, str(_GRAPHPT_HOME))
 
 # 调用 CLI 入口
 from graphpt.cli import app

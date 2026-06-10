@@ -31,11 +31,11 @@ def mcp_config_path() -> Path:
     """MCP 配置文件路径:项目级优先,fallback 全局。
 
     查找顺序:
-    1. 环境变量 AUTOPT_MCP_CONFIG(绝对路径直接用,相对走 PROJECT_ROOT)
+    1. 环境变量 GRAPHPT_MCP_CONFIG(绝对路径直接用,相对走 PROJECT_ROOT)
     2. <cwd>/.mcp.json — 项目级配置(每个渗透项目可独立配 MCP 服务)
     3. PROJECT_ROOT/.mcp.json — 全局兜底
     """
-    raw = str(os.environ.get("AUTOPT_MCP_CONFIG") or "").strip()
+    raw = str(os.environ.get("GRAPHPT_MCP_CONFIG") or "").strip()
     if raw:
         p = Path(raw)
         return p if p.is_absolute() else (PROJECT_ROOT / p)

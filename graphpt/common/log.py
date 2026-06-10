@@ -61,10 +61,10 @@ def get_logger(name: str) -> logging.Logger:
     """获取带 JSON 格式化的 logger。"""
     logger = logging.getLogger(name)
     if not logger.handlers:
-        logger.setLevel(getattr(logging, os.environ.get("AUTOPT_LOG_LEVEL", "INFO").upper(), logging.INFO))
+        logger.setLevel(getattr(logging, os.environ.get("GRAPHPT_LOG_LEVEL", "INFO").upper(), logging.INFO))
         logger.propagate = False
 
-        raw_log_dir = os.environ.get("AUTOPT_LOG_DIR", "").strip()
+        raw_log_dir = os.environ.get("GRAPHPT_LOG_DIR", "").strip()
         if raw_log_dir:
             log_dir = Path(raw_log_dir).expanduser()
         else:
@@ -82,7 +82,7 @@ def get_logger(name: str) -> logging.Logger:
         except Exception:  # noqa: BLE001
             pass
 
-        if os.environ.get("AUTOPT_LOG_STDERR", "").strip().lower() in {"1", "true", "yes", "on"}:
+        if os.environ.get("GRAPHPT_LOG_STDERR", "").strip().lower() in {"1", "true", "yes", "on"}:
             stream_handler = logging.StreamHandler(sys.stderr)
             stream_handler.setFormatter(_JsonFormatter())
             logger.addHandler(stream_handler)

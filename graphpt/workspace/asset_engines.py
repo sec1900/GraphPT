@@ -44,8 +44,8 @@ def search_fofa(
     size: int = 100,
 ) -> dict[str, Any]:
     """FOFA 资产搜索。"""
-    email = api_email or get_setting_text(attr_name="fofa_email", env_key="AUTOPT_FOFA_EMAIL") or os.environ.get("FOFA_EMAIL", "")
-    key = api_key or get_setting_text(attr_name="fofa_key", env_key="AUTOPT_FOFA_KEY") or os.environ.get("FOFA_KEY", "")
+    email = api_email or get_setting_text(attr_name="fofa_email", env_key="GRAPHPT_FOFA_EMAIL") or os.environ.get("FOFA_EMAIL", "")
+    key = api_key or get_setting_text(attr_name="fofa_key", env_key="GRAPHPT_FOFA_KEY") or os.environ.get("FOFA_KEY", "")
     if not email or not key:
         return {"error": "fofa_credentials_missing", "message": "需要设置 FOFA_EMAIL 和 FOFA_KEY 环境变量"}
 
@@ -86,7 +86,7 @@ def search_shodan(
     page: int = 1,
 ) -> dict[str, Any]:
     """Shodan 搜索。"""
-    key = api_key or get_setting_text(attr_name="shodan_api_key", env_key="AUTOPT_SHODAN_API_KEY") or os.environ.get("SHODAN_API_KEY", "")
+    key = api_key or get_setting_text(attr_name="shodan_api_key", env_key="GRAPHPT_SHODAN_API_KEY") or os.environ.get("SHODAN_API_KEY", "")
     if not key:
         return {"error": "shodan_key_missing", "message": "需要设置 SHODAN_API_KEY 环境变量"}
 
@@ -127,7 +127,7 @@ def search_hunter(
     page_size: int = 100,
 ) -> dict[str, Any]:
     """Hunter 资产搜索。"""
-    key = api_key or get_setting_text(attr_name="hunter_api_key", env_key="AUTOPT_HUNTER_API_KEY") or os.environ.get("HUNTER_API_KEY", "")
+    key = api_key or get_setting_text(attr_name="hunter_api_key", env_key="GRAPHPT_HUNTER_API_KEY") or os.environ.get("HUNTER_API_KEY", "")
     if not key:
         return {"error": "hunter_key_missing", "message": "需要设置 HUNTER_API_KEY 环境变量"}
 

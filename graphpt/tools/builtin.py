@@ -543,8 +543,8 @@ def _exec_run_command(
                 continue
 
     # 读取 Docker 隔离配置
-    _docker_mode = os.environ.get("AUTOPT_DOCKER_MODE", "").lower() in ("true", "1", "yes")
-    _docker_image = os.environ.get("AUTOPT_DOCKER_IMAGE", "") or "graphpt-tools:latest"
+    _docker_mode = os.environ.get("GRAPHPT_DOCKER_MODE", "").lower() in ("true", "1", "yes")
+    _docker_image = os.environ.get("GRAPHPT_DOCKER_IMAGE", "") or "graphpt-tools:latest"
 
     # 构建流式回调：通过 SSE 向前端推送工具输出
     _stream_cb = None
@@ -871,7 +871,7 @@ def _read_poc_via_path(poc_id_str: str) -> dict[str, Any]:
         poc_id = int(poc_id_str.strip())
     except (ValueError, TypeError):
         return {"error": "invalid_poc_id", "success": False}
-    db_file = Path(os.environ.get("AUTOPT_DB", ""))
+    db_file = Path(os.environ.get("GRAPHPT_DB", ""))
     if not db_file.name:
         return {"error": "db_not_available", "success": False}
         return {"error": "db_not_available", "success": False}
@@ -882,7 +882,7 @@ def _read_poc_via_path(poc_id_str: str) -> dict[str, Any]:
         conn.close()
     if row is None:
         return {"error": "poc_not_found", "success": False}
-    poc_dir = _resolve_storage_dir(os.environ.get("AUTOPT_POC_DIR", ""), default_rel=DEFAULT_POC_DIR_RELATIVE)
+    poc_dir = _resolve_storage_dir(os.environ.get("GRAPHPT_POC_DIR", ""), default_rel=DEFAULT_POC_DIR_RELATIVE)
     effective = _effective_item_path(str(row["path"] or ""), poc_dir)
     source = _read_poc_file(Path(effective))
     return {"id": row["id"], "name": row["name"], "source": source, "success": True}

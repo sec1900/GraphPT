@@ -25,8 +25,8 @@ res/skills/
 # === 杂项 ===
 /python
 .claude/settings.local.json
-# 项目工作区产物(如果有人在仓库根用 AUTOPT_ALLOW_REPO_ROOT=1 启动)
-.autopt/
+# 项目工作区产物(如果有人在仓库根用 GRAPHPT_ALLOW_REPO_ROOT=1 启动)
+.graphpt/
 findings/
 operations/
 attempts.jsonl

@@ -67,9 +67,9 @@ docker-compose up -d
 | `NEO4J_URI` | Neo4j 连接地址 | `bolt://localhost:7687` |
 | `NEO4J_USER` / `NEO4J_PASSWORD` | Neo4j 认证 | `neo4j` / `graphpt123` |
 | `CELERY_BROKER_URL` | Redis 消息队列 | `redis://localhost:6379/0` |
-| `AUTOPT_AI_BASE_URL` | AI 接口地址 | `https://api.deepseek.com` |
-| `AUTOPT_AI_MODEL` | AI 模型 | `deepseek-v4-pro` |
-| `AUTOPT_AI_API_KEY` | AI API Key | — |
+| `GRAPHPT_AI_BASE_URL` | AI 接口地址 | `https://api.deepseek.com` |
+| `GRAPHPT_AI_MODEL` | AI 模型 | `deepseek-v4-pro` |
+| `GRAPHPT_AI_API_KEY` | AI API Key | — |
 | `FOFA_EMAIL` / `FOFA_KEY` | FOFA 搜索引擎 | — |
 | `SHODAN_API_KEY` | Shodan | — |
 | `HUNTER_API_KEY` | Hunter | — |

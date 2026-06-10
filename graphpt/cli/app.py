@@ -372,7 +372,7 @@ def _env_flag(name: str) -> bool | None:
 
 def _show_cli_reasoning(mode: str | None = None) -> bool:
     """CLI 默认隐藏模型推理流；verbose 或显式环境变量才展示。"""
-    forced = _env_flag("AUTOPT_CLI_SHOW_REASONING")
+    forced = _env_flag("GRAPHPT_CLI_SHOW_REASONING")
     if forced is not None:
         return forced
     return (mode or _get_cli_view_mode()) == "verbose"
@@ -613,7 +613,7 @@ def _build_cli_system_prompt() -> str:
 
 
 # 交互对话单轮实际不设迭代上限：跑到任务完成为止，要停用户可随时 /stop 或插话。
-# range 惰性不占内存，故用一个极大值表示"无限制"。AUTOPT_CLI_MAX_ITERS 可覆盖。
+# range 惰性不占内存，故用一个极大值表示"无限制"。GRAPHPT_CLI_MAX_ITERS 可覆盖。
 _CLI_UNLIMITED_ITERS = 1_000_000
 
 
@@ -621,9 +621,9 @@ def _cli_workspace_root() -> Path:
     """CLI 文件工具（read_file/edit_file/grep/glob）的工作区根。
 
     对齐 Claude Code：默认就是 CLI 启动时所在的当前目录（cwd），即用户的项目。
-    AUTOPT_CLI_WORKSPACE 可显式覆盖。所有文件工具限定在此目录内、拦截越界。
+    GRAPHPT_CLI_WORKSPACE 可显式覆盖。所有文件工具限定在此目录内、拦截越界。
     """
-    raw = os.environ.get("AUTOPT_CLI_WORKSPACE", "").strip()
+    raw = os.environ.get("GRAPHPT_CLI_WORKSPACE", "").strip()
     base = Path(raw) if raw else Path.cwd()
     try:
         return base.resolve()
@@ -726,9 +726,9 @@ def _cli_max_iterations(default: int = _CLI_UNLIMITED_ITERS) -> int:
 
     run_agent_loop 默认仅 10 步，多步渗透任务会撞顶提前停（表现为"干到一半自动
     断开、要用户说继续"）。CLI 默认放到无限（跑到完成为止）——全双工下用户可随时
-    `/stop` 中断或插话指导。AUTOPT_CLI_MAX_ITERS 设正整数可显式封顶。
+    `/stop` 中断或插话指导。GRAPHPT_CLI_MAX_ITERS 设正整数可显式封顶。
     """
-    raw = os.environ.get("AUTOPT_CLI_MAX_ITERS", "").strip()
+    raw = os.environ.get("GRAPHPT_CLI_MAX_ITERS", "").strip()
     if raw.isdigit() and int(raw) > 0:
         return int(raw)
     return default
@@ -792,9 +792,9 @@ def build_ai_config(settings: AppSettings) -> AiConfig:
     缺少 base_url 或 model 时抛 ConfigError，引导用户去 .env 配置。
     """
     if not settings.ai_base_url:
-        raise ConfigError("缺少 AUTOPT_AI_BASE_URL，请在 .env 中配置模型 base_url")
+        raise ConfigError("缺少 GRAPHPT_AI_BASE_URL，请在 .env 中配置模型 base_url")
     if not settings.ai_model:
-        raise ConfigError("缺少 AUTOPT_AI_MODEL，请在 .env 中配置模型名称")
+        raise ConfigError("缺少 GRAPHPT_AI_MODEL，请在 .env 中配置模型名称")
 
     return AiConfig(
         base_url=settings.ai_base_url,
@@ -1891,8 +1891,8 @@ def main(argv: list[str] | None = None) -> int:
             print()
 
     # TTY 下走 prompt_toolkit 全双工 REPL（执行中可继续输入/插话）；
-    # 非 TTY（管道/重定向）或显式 AUTOPT_CLI_PLAIN 时回退基础阻塞模式。
-    _plain = os.environ.get("AUTOPT_CLI_PLAIN", "").strip().lower()
+    # 非 TTY（管道/重定向）或显式 GRAPHPT_CLI_PLAIN 时回退基础阻塞模式。
+    _plain = os.environ.get("GRAPHPT_CLI_PLAIN", "").strip().lower()
     use_pt = _stdio_is_tty() and _plain not in ("1", "true", "yes", "on")
     if use_pt:
         try:
@@ -1938,7 +1938,7 @@ def _main_blocking(
 ) -> int:
     """基础阻塞式 REPL：input() + 同步执行。
 
-    非 TTY（管道/重定向/测试）或显式 AUTOPT_CLI_PLAIN 时使用。
+    非 TTY（管道/重定向/测试）或显式 GRAPHPT_CLI_PLAIN 时使用。
     执行期间无法插话（这是 PT 全双工模式才解决的问题）。
     """
     stop_event = threading.Event()

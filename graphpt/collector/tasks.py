@@ -283,7 +283,7 @@ def subdomain_enum(self, asset_id: str | None = None):
       4. 解析 JSON 输出 → 写入 Neo4j
       5. 新发现子域名 → 级联触发 on_new_subdomain
     """
-    asset_id = asset_id or os.getenv("AUTOPT_ASSET_ID", "default")
+    asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
 
     # 1. 获取根域名（首次运行从 targets.yaml 种子填充）
     domains = list_root_domains(asset_id)
@@ -365,7 +365,7 @@ def dns_resolve(self, asset_id: str | None = None):
       2. 逐个子域名 socket.getaddrinfo 解析
       3. 写入 IP 节点（自动级联变化感知 diff）
     """
-    asset_id = asset_id or os.getenv("AUTOPT_ASSET_ID", "default")
+    asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
     pending = list_subdomains_without_ip(asset_id)
 
     if not pending:
@@ -427,7 +427,7 @@ def web_fingerprint(self, asset_id: str | None = None):
     except ImportError:
         raise RuntimeError("httpx_not_installed — pip install httpx")
 
-    asset_id = asset_id or os.getenv("AUTOPT_ASSET_ID", "default")
+    asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
     pending = list_subdomains_for_fingerprint(asset_id)
 
     if not pending:
@@ -546,7 +546,7 @@ def port_scan(self, asset_id: str | None = None):
       4. 批量写入 Neo4j
       5. 级联触发 web_fingerprint（新 web 端口）
     """
-    asset_id = asset_id or os.getenv("AUTOPT_ASSET_ID", "default")
+    asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
     pending = list_ips_without_ports(asset_id)
 
     if not pending:
@@ -611,7 +611,7 @@ def bootstrap_asset(self, asset_id: str | None = None):
     幂等：已存在的节点不会重复创建（MERGE + ON CREATE）。
     支持 domains, subdomains, ips, cidrs, urls。
     """
-    asset_id = asset_id or os.getenv("AUTOPT_ASSET_ID", "default")
+    asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
     counts = _seed_asset_from_targets(asset_id)
 
     total = sum(counts.values())
@@ -636,7 +636,7 @@ def query_unverified(self, asset_id: str | None = None):
     返回按类型分组的未验证节点列表。
     size(sources) <= 1 → 未验证，交给 LLM 决策。
     """
-    asset_id = asset_id or os.getenv("AUTOPT_ASSET_ID", "default")
+    asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
     unverified = list_unverified_nodes(asset_id)
     total = sum(len(v) for v in unverified.values())
     return {
@@ -691,7 +691,7 @@ def change_detection(self, asset_id: str | None = None):
     变更写入对应节点的 changed_at + changed_fields 属性，
     Agent 查询 crawl_status="changed" 即可发现。
     """
-    asset_id = asset_id or os.getenv("AUTOPT_ASSET_ID", "default")
+    asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
     writer = get_graph_writer()
     changes = writer.detect_changes(asset_id=asset_id)
     return {"status": "ok", "changes": len(changes)}

@@ -1359,7 +1359,7 @@ async def list_tasks():
 async def trigger_task(task_name: str, body: dict | None = None):
     """手动触发采集任务。body 可包含 asset_id 等参数。"""
     body = body or {}
-    asset_id = body.get("asset_id", os.getenv("AUTOPT_ASSET_ID", "default"))
+    asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
 
     from graphpt.collector.app import app as celery_app
 
@@ -1435,7 +1435,7 @@ async def get_pipeline(name: str):
 async def preview_pipeline(name: str, body: dict | None = None):
     """预览流水线展开后的命令，不执行工具。body: {params: {domain, ip}, asset_id}"""
     body = body or {}
-    asset_id = body.get("asset_id", os.getenv("AUTOPT_ASSET_ID", "default"))
+    asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
     params = body.get("params", {})
 
     try:
@@ -1567,7 +1567,7 @@ def _adhoc_target_overrides(tool: str, body: dict) -> dict[str, list[dict[str, s
 async def preview_tool(tool: str, body: dict | None = None):
     """预览右键单工具命令，不执行工具。body: {target, node_type, node, params, asset_id}"""
     body = body or {}
-    asset_id = body.get("asset_id", os.getenv("AUTOPT_ASSET_ID", "default"))
+    asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
     node_type = str(body.get("node_type") or "").strip()
     try:
         from graphpt.collector.pipeline import PipelineExecutor
@@ -1590,7 +1590,7 @@ async def preview_tool(tool: str, body: dict | None = None):
 async def run_tool(tool: str, body: dict | None = None):
     """执行右键单工具。body: {target, node_type, node, params, asset_id}"""
     body = body or {}
-    asset_id = body.get("asset_id", os.getenv("AUTOPT_ASSET_ID", "default"))
+    asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
     node_type = str(body.get("node_type") or "").strip()
     try:
         from graphpt.collector.pipeline import PipelineExecutor
@@ -1677,7 +1677,7 @@ async def delete_pipeline(name: str):
 async def run_pipeline(name: str, body: dict | None = None):
     """触发流水线执行。body: {params: {domain, ip}, asset_id}"""
     body = body or {}
-    asset_id = body.get("asset_id", os.getenv("AUTOPT_ASSET_ID", "default"))
+    asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
     params = body.get("params", {})
 
     try:

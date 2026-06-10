@@ -39,8 +39,8 @@ app.conf.update(
 )
 
 # ---- 定时任务调度 (Celery Beat) ----
-# 默认关闭，纯手动触发。设置 AUTOPT_AUTO_SCAN=1 启用自动调度。
-if os.getenv("AUTOPT_AUTO_SCAN", "").strip() in ("1", "true", "yes"):
+# 默认关闭，纯手动触发。设置 GRAPHPT_AUTO_SCAN=1 启用自动调度。
+if os.getenv("GRAPHPT_AUTO_SCAN", "").strip() in ("1", "true", "yes"):
     app.conf.beat_schedule = {
         "subdomain_enum": {
             "task": "graphpt.collector.tasks.subdomain_enum",

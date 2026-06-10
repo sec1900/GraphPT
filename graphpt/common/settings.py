@@ -231,51 +231,51 @@ class AppSettings:
             return str(env.get(key, "") or "").strip()
 
         return AppSettings(
-            db=get("AUTOPT_DB"),
-            poc_dir=get("AUTOPT_POC_DIR"),
-            toolkit_dir=get("AUTOPT_TOOLKIT_DIR"),
-            projects_dir=get("AUTOPT_PROJECTS_DIR"),
-            webdav_url=get("AUTOPT_WEBDAV_URL"),
-            webdav_base_dir=get("AUTOPT_WEBDAV_BASE_DIR"),
-            webdav_username=get("AUTOPT_WEBDAV_USERNAME"),
-            webdav_password=get("AUTOPT_WEBDAV_PASSWORD"),
-            fofa_email=get("AUTOPT_FOFA_EMAIL"),
-            fofa_key=get("AUTOPT_FOFA_KEY"),
-            shodan_api_key=get("AUTOPT_SHODAN_API_KEY"),
-            hunter_api_key=get("AUTOPT_HUNTER_API_KEY"),
-            github_token=get("AUTOPT_GITHUB_TOKEN"),
-            tianyancha_token=get("AUTOPT_TIANYANCHA_TOKEN"),
-            ai_base_url=get("AUTOPT_AI_BASE_URL"),
-            ai_model=get("AUTOPT_AI_MODEL"),
-            ai_api_key=get("AUTOPT_AI_API_KEY"),
-            ai_wire_api=get("AUTOPT_AI_WIRE_API"),
-            ai_max_tokens=_safe_int(get("AUTOPT_AI_MAX_TOKENS"), 65536),
-            ai_timeout_s=normalize_ai_timeout_s(get("AUTOPT_AI_TIMEOUT_S")),
-            ai_max_retries=normalize_ai_max_retries(get("AUTOPT_AI_MAX_RETRIES")),
-            ai_max_concurrent=normalize_ai_max_concurrent(get("AUTOPT_AI_MAX_CONCURRENT")),
-            approval_mode=get("AUTOPT_APPROVAL_MODE") or DEFAULT_APPROVAL_MODE,
-            approval_timeout_s=normalize_approval_timeout_s(get("AUTOPT_APPROVAL_TIMEOUT_S")),
-            cmd_timeout_max_s=normalize_cmd_timeout_max_s(get("AUTOPT_CMD_TIMEOUT_MAX_S")),
-            parallel_workers=normalize_parallel_workers(get("AUTOPT_PARALLEL_WORKERS")),
-            proxy_url=get("AUTOPT_PROXY_URL"),
-            validation_mailbox_url=get("AUTOPT_VALIDATION_MAILBOX_URL"),
-            validation_callback_url=get("AUTOPT_VALIDATION_CALLBACK_URL"),
-            validation_oob_domain=get("AUTOPT_VALIDATION_OOB_DOMAIN"),
-            validation_infra_hosts=get("AUTOPT_VALIDATION_INFRA_HOSTS"),
-            docker_mode=get("AUTOPT_DOCKER_MODE"),
-            cache_rotate_mb=_safe_float(get("AUTOPT_CACHE_ROTATE_MB"), 5.0),
-            cache_rotate_lines=_safe_int(get("AUTOPT_CACHE_ROTATE_LINES"), 50000),
-            cache_retention_count=_safe_int(get("AUTOPT_CACHE_RETENTION_COUNT"), 40),
-            cache_compress_after_h=_safe_float(get("AUTOPT_CACHE_COMPRESS_AFTER_H"), 24.0),
-            scheduler_mode=_normalize_scheduler_mode(get("AUTOPT_SCHEDULER_MODE")),
-            docker_image=get("AUTOPT_DOCKER_IMAGE"),
-            max_token_budget=_safe_int(get("AUTOPT_MAX_TOKEN_BUDGET"), 0),
-            browser_headless=_coerce_bool(get("AUTOPT_BROWSER_HEADLESS"), True),
-            debug_dir=normalize_debug_dir(get("AUTOPT_DEBUG_DIR")),
-            debug=_coerce_bool(get("AUTOPT_DEBUG"), False),
-            reasoning_mode=get("AUTOPT_REASONING_MODE") or "auto",
-            reasoning_effort=get("AUTOPT_REASONING_EFFORT") or "high",
-            reasoning_fallback=get("AUTOPT_REASONING_FALLBACK") or "disable",
+            db=get("GRAPHPT_DB"),
+            poc_dir=get("GRAPHPT_POC_DIR"),
+            toolkit_dir=get("GRAPHPT_TOOLKIT_DIR"),
+            projects_dir=get("GRAPHPT_PROJECTS_DIR"),
+            webdav_url=get("GRAPHPT_WEBDAV_URL"),
+            webdav_base_dir=get("GRAPHPT_WEBDAV_BASE_DIR"),
+            webdav_username=get("GRAPHPT_WEBDAV_USERNAME"),
+            webdav_password=get("GRAPHPT_WEBDAV_PASSWORD"),
+            fofa_email=get("GRAPHPT_FOFA_EMAIL"),
+            fofa_key=get("GRAPHPT_FOFA_KEY"),
+            shodan_api_key=get("GRAPHPT_SHODAN_API_KEY"),
+            hunter_api_key=get("GRAPHPT_HUNTER_API_KEY"),
+            github_token=get("GRAPHPT_GITHUB_TOKEN"),
+            tianyancha_token=get("GRAPHPT_TIANYANCHA_TOKEN"),
+            ai_base_url=get("GRAPHPT_AI_BASE_URL"),
+            ai_model=get("GRAPHPT_AI_MODEL"),
+            ai_api_key=get("GRAPHPT_AI_API_KEY"),
+            ai_wire_api=get("GRAPHPT_AI_WIRE_API"),
+            ai_max_tokens=_safe_int(get("GRAPHPT_AI_MAX_TOKENS"), 65536),
+            ai_timeout_s=normalize_ai_timeout_s(get("GRAPHPT_AI_TIMEOUT_S")),
+            ai_max_retries=normalize_ai_max_retries(get("GRAPHPT_AI_MAX_RETRIES")),
+            ai_max_concurrent=normalize_ai_max_concurrent(get("GRAPHPT_AI_MAX_CONCURRENT")),
+            approval_mode=get("GRAPHPT_APPROVAL_MODE") or DEFAULT_APPROVAL_MODE,
+            approval_timeout_s=normalize_approval_timeout_s(get("GRAPHPT_APPROVAL_TIMEOUT_S")),
+            cmd_timeout_max_s=normalize_cmd_timeout_max_s(get("GRAPHPT_CMD_TIMEOUT_MAX_S")),
+            parallel_workers=normalize_parallel_workers(get("GRAPHPT_PARALLEL_WORKERS")),
+            proxy_url=get("GRAPHPT_PROXY_URL"),
+            validation_mailbox_url=get("GRAPHPT_VALIDATION_MAILBOX_URL"),
+            validation_callback_url=get("GRAPHPT_VALIDATION_CALLBACK_URL"),
+            validation_oob_domain=get("GRAPHPT_VALIDATION_OOB_DOMAIN"),
+            validation_infra_hosts=get("GRAPHPT_VALIDATION_INFRA_HOSTS"),
+            docker_mode=get("GRAPHPT_DOCKER_MODE"),
+            cache_rotate_mb=_safe_float(get("GRAPHPT_CACHE_ROTATE_MB"), 5.0),
+            cache_rotate_lines=_safe_int(get("GRAPHPT_CACHE_ROTATE_LINES"), 50000),
+            cache_retention_count=_safe_int(get("GRAPHPT_CACHE_RETENTION_COUNT"), 40),
+            cache_compress_after_h=_safe_float(get("GRAPHPT_CACHE_COMPRESS_AFTER_H"), 24.0),
+            scheduler_mode=_normalize_scheduler_mode(get("GRAPHPT_SCHEDULER_MODE")),
+            docker_image=get("GRAPHPT_DOCKER_IMAGE"),
+            max_token_budget=_safe_int(get("GRAPHPT_MAX_TOKEN_BUDGET"), 0),
+            browser_headless=_coerce_bool(get("GRAPHPT_BROWSER_HEADLESS"), True),
+            debug_dir=normalize_debug_dir(get("GRAPHPT_DEBUG_DIR")),
+            debug=_coerce_bool(get("GRAPHPT_DEBUG"), False),
+            reasoning_mode=get("GRAPHPT_REASONING_MODE") or "auto",
+            reasoning_effort=get("GRAPHPT_REASONING_EFFORT") or "high",
+            reasoning_fallback=get("GRAPHPT_REASONING_FALLBACK") or "disable",
         )
 
     def with_overrides(self, **kwargs: Any) -> "AppSettings":
@@ -334,59 +334,59 @@ class AppSettings:
 
 
 ENV_KEY_MAP: dict[str, str] = {
-    "db": "AUTOPT_DB",
-    "poc_dir": "AUTOPT_POC_DIR",
-    "toolkit_dir": "AUTOPT_TOOLKIT_DIR",
-    "projects_dir": "AUTOPT_PROJECTS_DIR",
-    "webdav_url": "AUTOPT_WEBDAV_URL",
-    "webdav_base_dir": "AUTOPT_WEBDAV_BASE_DIR",
-    "webdav_username": "AUTOPT_WEBDAV_USERNAME",
-    "webdav_password": "AUTOPT_WEBDAV_PASSWORD",
-    "fofa_email": "AUTOPT_FOFA_EMAIL",
-    "fofa_key": "AUTOPT_FOFA_KEY",
-    "shodan_api_key": "AUTOPT_SHODAN_API_KEY",
-    "hunter_api_key": "AUTOPT_HUNTER_API_KEY",
-    "github_token": "AUTOPT_GITHUB_TOKEN",
-    "tianyancha_token": "AUTOPT_TIANYANCHA_TOKEN",
-    "ai_base_url": "AUTOPT_AI_BASE_URL",
-    "ai_model": "AUTOPT_AI_MODEL",
-    "ai_api_key": "AUTOPT_AI_API_KEY",
-    "ai_wire_api": "AUTOPT_AI_WIRE_API",
-    "ai_timeout_s": "AUTOPT_AI_TIMEOUT_S",
-    "ai_max_retries": "AUTOPT_AI_MAX_RETRIES",
-    "ai_max_concurrent": "AUTOPT_AI_MAX_CONCURRENT",
-    "approval_mode": "AUTOPT_APPROVAL_MODE",
-    "approval_timeout_s": "AUTOPT_APPROVAL_TIMEOUT_S",
-    "cmd_timeout_max_s": "AUTOPT_CMD_TIMEOUT_MAX_S",
-    "parallel_workers": "AUTOPT_PARALLEL_WORKERS",
-    "proxy_url": "AUTOPT_PROXY_URL",
-    "validation_mailbox_url": "AUTOPT_VALIDATION_MAILBOX_URL",
-    "validation_callback_url": "AUTOPT_VALIDATION_CALLBACK_URL",
-    "validation_oob_domain": "AUTOPT_VALIDATION_OOB_DOMAIN",
-    "validation_infra_hosts": "AUTOPT_VALIDATION_INFRA_HOSTS",
-    "docker_mode": "AUTOPT_DOCKER_MODE",
-    "cache_rotate_mb": "AUTOPT_CACHE_ROTATE_MB",
-    "cache_rotate_lines": "AUTOPT_CACHE_ROTATE_LINES",
-    "cache_retention_count": "AUTOPT_CACHE_RETENTION_COUNT",
-    "cache_compress_after_h": "AUTOPT_CACHE_COMPRESS_AFTER_H",
-    "scheduler_mode": "AUTOPT_SCHEDULER_MODE",
-    "docker_image": "AUTOPT_DOCKER_IMAGE",
-    "max_token_budget": "AUTOPT_MAX_TOKEN_BUDGET",
-    "browser_headless": "AUTOPT_BROWSER_HEADLESS",
-    "debug_dir": "AUTOPT_DEBUG_DIR",
-    "debug": "AUTOPT_DEBUG",
-    "reasoning_mode": "AUTOPT_REASONING_MODE",
-    "reasoning_effort": "AUTOPT_REASONING_EFFORT",
-    "reasoning_fallback": "AUTOPT_REASONING_FALLBACK",
+    "db": "GRAPHPT_DB",
+    "poc_dir": "GRAPHPT_POC_DIR",
+    "toolkit_dir": "GRAPHPT_TOOLKIT_DIR",
+    "projects_dir": "GRAPHPT_PROJECTS_DIR",
+    "webdav_url": "GRAPHPT_WEBDAV_URL",
+    "webdav_base_dir": "GRAPHPT_WEBDAV_BASE_DIR",
+    "webdav_username": "GRAPHPT_WEBDAV_USERNAME",
+    "webdav_password": "GRAPHPT_WEBDAV_PASSWORD",
+    "fofa_email": "GRAPHPT_FOFA_EMAIL",
+    "fofa_key": "GRAPHPT_FOFA_KEY",
+    "shodan_api_key": "GRAPHPT_SHODAN_API_KEY",
+    "hunter_api_key": "GRAPHPT_HUNTER_API_KEY",
+    "github_token": "GRAPHPT_GITHUB_TOKEN",
+    "tianyancha_token": "GRAPHPT_TIANYANCHA_TOKEN",
+    "ai_base_url": "GRAPHPT_AI_BASE_URL",
+    "ai_model": "GRAPHPT_AI_MODEL",
+    "ai_api_key": "GRAPHPT_AI_API_KEY",
+    "ai_wire_api": "GRAPHPT_AI_WIRE_API",
+    "ai_timeout_s": "GRAPHPT_AI_TIMEOUT_S",
+    "ai_max_retries": "GRAPHPT_AI_MAX_RETRIES",
+    "ai_max_concurrent": "GRAPHPT_AI_MAX_CONCURRENT",
+    "approval_mode": "GRAPHPT_APPROVAL_MODE",
+    "approval_timeout_s": "GRAPHPT_APPROVAL_TIMEOUT_S",
+    "cmd_timeout_max_s": "GRAPHPT_CMD_TIMEOUT_MAX_S",
+    "parallel_workers": "GRAPHPT_PARALLEL_WORKERS",
+    "proxy_url": "GRAPHPT_PROXY_URL",
+    "validation_mailbox_url": "GRAPHPT_VALIDATION_MAILBOX_URL",
+    "validation_callback_url": "GRAPHPT_VALIDATION_CALLBACK_URL",
+    "validation_oob_domain": "GRAPHPT_VALIDATION_OOB_DOMAIN",
+    "validation_infra_hosts": "GRAPHPT_VALIDATION_INFRA_HOSTS",
+    "docker_mode": "GRAPHPT_DOCKER_MODE",
+    "cache_rotate_mb": "GRAPHPT_CACHE_ROTATE_MB",
+    "cache_rotate_lines": "GRAPHPT_CACHE_ROTATE_LINES",
+    "cache_retention_count": "GRAPHPT_CACHE_RETENTION_COUNT",
+    "cache_compress_after_h": "GRAPHPT_CACHE_COMPRESS_AFTER_H",
+    "scheduler_mode": "GRAPHPT_SCHEDULER_MODE",
+    "docker_image": "GRAPHPT_DOCKER_IMAGE",
+    "max_token_budget": "GRAPHPT_MAX_TOKEN_BUDGET",
+    "browser_headless": "GRAPHPT_BROWSER_HEADLESS",
+    "debug_dir": "GRAPHPT_DEBUG_DIR",
+    "debug": "GRAPHPT_DEBUG",
+    "reasoning_mode": "GRAPHPT_REASONING_MODE",
+    "reasoning_effort": "GRAPHPT_REASONING_EFFORT",
+    "reasoning_fallback": "GRAPHPT_REASONING_FALLBACK",
 }
 
 
 def is_debug() -> bool:
-    return _coerce_bool(os.environ.get("AUTOPT_DEBUG", ""), False)
+    return _coerce_bool(os.environ.get("GRAPHPT_DEBUG", ""), False)
 
 
 def get_proxy_url() -> str:
-    return os.environ.get("AUTOPT_PROXY_URL", "")
+    return os.environ.get("GRAPHPT_PROXY_URL", "")
 
 
 def get_setting_text(*, attr_name: str, env_key: str, default: str = "") -> str:
@@ -394,28 +394,28 @@ def get_setting_text(*, attr_name: str, env_key: str, default: str = "") -> str:
 
 
 def get_ai_max_concurrent() -> int:
-    return normalize_ai_max_concurrent(os.environ.get("AUTOPT_AI_MAX_CONCURRENT", ""))
+    return normalize_ai_max_concurrent(os.environ.get("GRAPHPT_AI_MAX_CONCURRENT", ""))
 
 
 def get_parallel_workers() -> int:
-    return normalize_parallel_workers(os.environ.get("AUTOPT_PARALLEL_WORKERS", ""))
+    return normalize_parallel_workers(os.environ.get("GRAPHPT_PARALLEL_WORKERS", ""))
 
 
 def get_approval_timeout() -> float:
-    return normalize_approval_timeout_s(os.environ.get("AUTOPT_APPROVAL_TIMEOUT_S", ""))
+    return normalize_approval_timeout_s(os.environ.get("GRAPHPT_APPROVAL_TIMEOUT_S", ""))
 
 
 def get_approval_mode() -> str:
     from graphpt.core.approval import public_approval_mode
-    return public_approval_mode(os.environ.get("AUTOPT_APPROVAL_MODE", ""), default=DEFAULT_APPROVAL_MODE)
+    return public_approval_mode(os.environ.get("GRAPHPT_APPROVAL_MODE", ""), default=DEFAULT_APPROVAL_MODE)
 
 
 def get_scheduler_mode() -> str:
-    return _normalize_scheduler_mode(os.environ.get("AUTOPT_SCHEDULER_MODE", ""))
+    return _normalize_scheduler_mode(os.environ.get("GRAPHPT_SCHEDULER_MODE", ""))
 
 
 def get_debug_dir() -> str:
-    return normalize_debug_dir(os.environ.get("AUTOPT_DEBUG_DIR", ""))
+    return normalize_debug_dir(os.environ.get("GRAPHPT_DEBUG_DIR", ""))
 
 
 def normalize_update_payload(payload: Any) -> dict[str, str | None]:

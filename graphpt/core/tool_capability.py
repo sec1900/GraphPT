@@ -223,7 +223,7 @@ def build_capability_block() -> str:
         return "✓" if b else "✗"
 
     caps = _discover_tool_capabilities()
-    headless = os.environ.get("AUTOPT_BROWSER_HEADLESS", "true").strip().lower()
+    headless = os.environ.get("GRAPHPT_BROWSER_HEADLESS", "true").strip().lower()
 
     lines: list[str] = ["\n\n## 工具能力画像（本轮自检）"]
 
@@ -261,7 +261,7 @@ def build_capability_block() -> str:
     oob_ok, oob_val = _check_oob()
     lines.append(f"\n### 验证基础设施\n"
                  f"- OOB 回调: {ok(oob_ok)}"
-                 f"{'（' + oob_val[:60] + '）' if oob_ok else '（未配置 AUTOPT_VALIDATION_OOB_DOMAIN / CALLBACK_URL）'}")
+                 f"{'（' + oob_val[:60] + '）' if oob_ok else '（未配置 GRAPHPT_VALIDATION_OOB_DOMAIN / CALLBACK_URL）'}")
 
     # 剩余未归类项（如未来的新 category）
     for cat, items in by_cat.items():
@@ -273,8 +273,8 @@ def build_capability_block() -> str:
 
 
 def _check_oob() -> tuple[bool, str]:
-    domain = os.environ.get("AUTOPT_VALIDATION_OOB_DOMAIN", "").strip().strip(".")
-    callback = os.environ.get("AUTOPT_VALIDATION_CALLBACK_URL", "").strip()
+    domain = os.environ.get("GRAPHPT_VALIDATION_OOB_DOMAIN", "").strip().strip(".")
+    callback = os.environ.get("GRAPHPT_VALIDATION_CALLBACK_URL", "").strip()
     if callback:
         return True, f"外部回调: {callback[:50]}"
     if domain:

@@ -11,7 +11,7 @@
 - 真正调用模型摘要的 summarize_fn 由调用方注入（app.py 用 call_chat_completion），
   本模块只负责把历史渲染成转写文本喂给它、并把返回摘要装回消息列表。
 
-无 tiktoken，故自动触发用**字符数预算**（非 token），env AUTOPT_CLI_COMPACT_AT_CHARS
+无 tiktoken，故自动触发用**字符数预算**（非 token），env GRAPHPT_CLI_COMPACT_AT_CHARS
 可调，默认见 _DEFAULT_COMPACT_AT_CHARS。
 """
 
@@ -23,7 +23,7 @@ from typing import Callable
 # 默认字符预算：保守按 ~128k token 上下文估算（中文转写约 1.5~2 字符/token，
 # 再为系统提示+方法论+技能目录(~18k 字符)与单轮输出留足余量）。超过即建议压缩。
 # 仅为安全网；声明了模型上下文窗口或显式字符预算时会被覆盖（见 compact_budget_chars）。
-# 默认 token 预算：保守按常用模型 32K 上下文估算。声明了 AUTOPT_AI_CONTEXT_TOKENS
+# 默认 token 预算：保守按常用模型 32K 上下文估算。声明了 GRAPHPT_AI_CONTEXT_TOKENS
 # 时按模型窗口的 75% 触发压缩（留 25% 给系统提示 + 单轮输出余量）。
 _DEFAULT_COMPACT_AT_TOKENS = 24_000
 _COMPACT_SAFETY_FRACTION = 0.75
@@ -33,14 +33,14 @@ def compact_budget_tokens() -> int:
     """自动压缩的 token 预算。
 
     优先级（高→低）：
-    1) AUTOPT_CLI_COMPACT_AT_TOKENS —— 显式 token 预算
-    2) AUTOPT_AI_CONTEXT_TOKENS —— 按模型窗口 75% 换算
+    1) GRAPHPT_CLI_COMPACT_AT_TOKENS —— 显式 token 预算
+    2) GRAPHPT_AI_CONTEXT_TOKENS —— 按模型窗口 75% 换算
     3) 兜底 _DEFAULT_COMPACT_AT_TOKENS
     """
-    raw = os.environ.get("AUTOPT_CLI_COMPACT_AT_TOKENS", "").strip()
+    raw = os.environ.get("GRAPHPT_CLI_COMPACT_AT_TOKENS", "").strip()
     if raw.isdigit() and int(raw) > 0:
         return int(raw)
-    ctx = os.environ.get("AUTOPT_AI_CONTEXT_TOKENS", "").strip()
+    ctx = os.environ.get("GRAPHPT_AI_CONTEXT_TOKENS", "").strip()
     if ctx.isdigit() and int(ctx) > 0:
         return int(int(ctx) * _COMPACT_SAFETY_FRACTION)
     return _DEFAULT_COMPACT_AT_TOKENS

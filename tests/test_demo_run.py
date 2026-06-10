@@ -115,9 +115,9 @@ def run_agent(target_url: str, prompt: str, max_iters: int = 15):
     # 加载配置
     settings = AppSettings.from_env()
     if not settings.ai_base_url:
-        raise RuntimeError("AUTOPT_AI_BASE_URL not set in .env")
+        raise RuntimeError("GRAPHPT_AI_BASE_URL not set in .env")
     if not settings.ai_model:
-        raise RuntimeError("AUTOPT_AI_MODEL not set in .env")
+        raise RuntimeError("GRAPHPT_AI_MODEL not set in .env")
 
     ai_config = AiConfig(
         base_url=settings.ai_base_url,

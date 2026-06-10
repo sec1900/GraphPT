@@ -1093,7 +1093,7 @@ def run_pipeline(
     if not pipeline_def:
         return {"status": "error", "error": f"pipeline_not_found: {pipeline_name}"}
 
-    asset_id = asset_id or os.getenv("AUTOPT_ASSET_ID", "default")
+    asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
     executor = PipelineExecutor(pipeline_def, asset_id=asset_id, params=params)
 
     validation = executor._tool_validation_result()

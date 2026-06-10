@@ -668,9 +668,9 @@ def _call_ai_streaming_openai(
 def _should_carry_reasoning() -> bool:
     """是否把思维链随带工具调用的 assistant 消息回传 API（默认开启）。
 
-    DeepSeek 思考模式要求回传；个别网关可能拒收，置 AUTOPT_REASONING_CARRY=0 关闭。
+    DeepSeek 思考模式要求回传；个别网关可能拒收，置 GRAPHPT_REASONING_CARRY=0 关闭。
     """
-    return os.environ.get("AUTOPT_REASONING_CARRY", "1").strip() not in ("0", "false", "no", "")
+    return os.environ.get("GRAPHPT_REASONING_CARRY", "1").strip() not in ("0", "false", "no", "")
 
 
 def _extract_cache_tokens(usage: dict[str, Any]) -> tuple[int, int]:
@@ -1337,7 +1337,7 @@ def run_agent_loop(
         assistant_msg: dict[str, Any] = {"role": "assistant", "content": chat_result.text or ""}
         # DeepSeek 思考模式：带工具调用的 assistant 轮必须回传本轮 reasoning_content，
         # 否则后续请求 400。非思考模型该字段为空串、不附加（不影响其他模型）。可用
-        # AUTOPT_REASONING_CARRY=0 关闭（某些网关若拒收该字段时）。
+        # GRAPHPT_REASONING_CARRY=0 关闭（某些网关若拒收该字段时）。
         if chat_result.reasoning_content and _should_carry_reasoning():
             assistant_msg["reasoning_content"] = chat_result.reasoning_content
         assistant_msg["tool_calls"] = [
