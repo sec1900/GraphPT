@@ -113,10 +113,13 @@ def run_graph_agent(
         prior_messages: 上一阶段的对话历史（用于 analyze → expand 续接）
     """
     from graphpt.cli.app import build_ai_config
-    from graphpt.common.settings import load_settings
+    from graphpt.common.settings import AppSettings
     from graphpt.core.agent_loop import run_agent_loop
 
-    settings = load_settings()
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    settings = AppSettings.from_env()
     ai_config = build_ai_config(settings)
 
     system_prompt = _build_system_prompt(asset_id, phase)
