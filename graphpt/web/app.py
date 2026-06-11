@@ -2047,6 +2047,15 @@ async def api_agent_analyze(req: _AgentRequest):
                 if s:
                     s["output_buf"] = s.get("output_buf", "") + t
 
+        def _steering():
+            with _agent_lock:
+                s = _agent_sessions.get(session_id)
+                if s:
+                    msgs = list(s.get("steering_queue", []))
+                    s["steering_queue"] = []
+                    return msgs
+            return []
+
         try:
             result = run_graph_agent(
                 asset_id=req.asset_id,
@@ -2055,6 +2064,7 @@ async def api_agent_analyze(req: _AgentRequest):
                 workspace_root=_PROJECT_ROOT,
                 on_status=_on_status,
                 on_token=_on_token,
+                steering_provider=_steering,
             )
             with _agent_lock:
                 _agent_sessions[session_id]["status"] = "done"
@@ -2085,6 +2095,25 @@ async def api_agent_status(session_id: str = ""):
     return {"ok": True, **session}
 
 
+class _SteerRequest(BaseModel):
+    session_id: str
+    message: str
+
+@web_app.post("/api/agent/steer")
+async def api_agent_steer(req: _SteerRequest):
+    """向运行中的 Agent 发送指导消息。"""
+    with _agent_lock:
+        session = _agent_sessions.get(req.session_id)
+    if not session:
+        raise HTTPException(404, "session not found")
+    if session["status"] != "running":
+        return {"ok": False, "error": "session is not running"}
+    with _agent_lock:
+        session.setdefault("steering_queue", []).append(req.message)
+        session.setdefault("logs", []).append(f"[user] {req.message}")
+    return {"ok": True}
+
+
 @web_app.post("/api/agent/expand")
 async def api_agent_expand(req: _AgentRequest):
     """启动拓展阶段 Agent。"""
@@ -2105,6 +2134,15 @@ async def api_agent_expand(req: _AgentRequest):
                 if s:
                     s["output_buf"] = s.get("output_buf", "") + t
 
+        def _steering():
+            with _agent_lock:
+                s = _agent_sessions.get(session_id)
+                if s:
+                    msgs = list(s.get("steering_queue", []))
+                    s["steering_queue"] = []
+                    return msgs
+            return []
+
         try:
             result = run_graph_agent(
                 asset_id=req.asset_id,
@@ -2113,6 +2151,7 @@ async def api_agent_expand(req: _AgentRequest):
                 workspace_root=_PROJECT_ROOT,
                 on_status=_on_status,
                 on_token=_on_token,
+                steering_provider=_steering,
             )
             with _agent_lock:
                 _agent_sessions[session_id]["status"] = "done"
@@ -2128,6 +2167,67 @@ async def api_agent_expand(req: _AgentRequest):
 
     threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "session_id": session_id}
+
+
+# ============================================================
+# Agent Prompt 配置 API
+# ============================================================
+
+_AGENT_PROMPT_PATH = _PROJECT_ROOT / "graphpt" / "config" / "agent_prompt.yaml"
+
+
+@web_app.get("/api/agent/prompt")
+async def api_agent_prompt_get():
+    """读取 Agent 提示词配置（YAML 原文）。"""
+    import yaml
+    if _AGENT_PROMPT_PATH.exists():
+        raw = _AGENT_PROMPT_PATH.read_text(encoding="utf-8")
+    else:
+        # 返回代码内置默认值
+        from graphpt.core.graph_agent import _DEFAULT_SYSTEM_TEMPLATE, _DEFAULT_PHASE_INSTRUCTIONS
+        from graphpt.core.graph_agent_prompt import GRAPH_SCHEMA_KNOWLEDGE, GRAPH_AGENT_METHODOLOGY
+        raw = yaml.dump({
+            "system_template": _DEFAULT_SYSTEM_TEMPLATE,
+            "schema_knowledge": GRAPH_SCHEMA_KNOWLEDGE,
+            "methodology": GRAPH_AGENT_METHODOLOGY,
+            "phase_instructions": _DEFAULT_PHASE_INSTRUCTIONS,
+        }, allow_unicode=True, default_flow_style=False, sort_keys=False)
+    return {"ok": True, "yaml": raw}
+
+
+@web_app.put("/api/agent/prompt")
+async def api_agent_prompt_put(request: Request):
+    """保存 Agent 提示词配置（YAML 原文）。"""
+    import yaml
+    body = await request.json()
+    raw = body.get("yaml", "")
+    if not raw.strip():
+        raise HTTPException(400, "empty yaml")
+    # 重置到默认
+    if raw.strip() == "__RESET__":
+        if _AGENT_PROMPT_PATH.exists():
+            _AGENT_PROMPT_PATH.unlink()
+        return {"ok": True}
+    # 校验是否合法 YAML
+    try:
+        cfg = yaml.safe_load(raw)
+    except Exception as e:
+        raise HTTPException(400, f"YAML 解析错误: {e}")
+    if not isinstance(cfg, dict):
+        raise HTTPException(400, "YAML 顶层必须是 mapping")
+    # 检查关键字段
+    required = {"system_template", "schema_knowledge", "methodology", "phase_instructions"}
+    missing = required - set(cfg.keys())
+    if missing:
+        raise HTTPException(400, f"缺少必要字段: {', '.join(missing)}")
+    # 检查 system_template 占位符
+    tpl = cfg.get("system_template", "")
+    for ph in ["{asset_id}", "{phase_desc}", "{schema_knowledge}", "{methodology}", "{phase_instruction}"]:
+        if ph not in tpl:
+            raise HTTPException(400, f"system_template 缺少占位符: {ph}")
+    _AGENT_PROMPT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _AGENT_PROMPT_PATH.write_text(raw, encoding="utf-8")
+    return {"ok": True}
 
 
 # ============================================================

@@ -1172,6 +1172,9 @@ def run_agent_loop(
 
         result.iterations = iteration + 1
 
+        if on_status:
+            on_status(f"[iter {iteration+1}] 思考中...")
+
         # 注入用户插话/指导（CLI 全双工模式）：在本次 AI 调用前把排队消息追加进对话。
         if steering_provider is not None:
             try:
@@ -1309,6 +1312,8 @@ def run_agent_loop(
 
         # 无工具调用 → 循环结束
         if not tool_call_requests:
+            if on_status:
+                on_status(f"[iter {iteration+1}] 生成最终回答...")
             _text = (chat_result.text or "").strip()
             _reasoning_only = not _text and chat_result.reasoning_content
             if _reasoning_only:
@@ -1468,6 +1473,10 @@ def run_agent_loop(
             pending_parallel = []
 
         for tc in tool_call_requests:
+            if on_status:
+                args_brief = json.dumps(tc.arguments, ensure_ascii=False)[:80]
+                on_status(f"[iter {iteration+1}] 调用工具 {tc.name}({args_brief})")
+
             tool_record = {
                 "call_id": tc.id,
                 "tool_name": tc.name,

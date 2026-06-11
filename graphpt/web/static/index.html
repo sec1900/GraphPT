@@ -387,46 +387,78 @@
 
   <!-- ==================== Config ==================== -->
   <div id="page-config" class="page">
-    <div class="toolbar">
-      <span style="font-size:12px;color:var(--muted)">Tool Registry — register tools, then use them in Pipelines</span>
-      <span class="spacer"></span>
-      <button class="btn outline small" onclick="checkTools()">Re-check</button>
-      <button class="btn" onclick="saveConfig()">Save</button>
+    <div class="sub-tabs" id="cfg-tabs">
+      <button class="active" onclick="switchCfgTab('tools')">Tools</button>
+      <button onclick="switchCfgTab('agent-prompt')">Agent Prompt</button>
     </div>
-    <div style="font-size:10px;color:var(--muted);margin-bottom:12px;line-height:1.8">
-      <div><b>{bin}</b> lookup: <code>tools/<b>&lt;name&gt;</b>.exe</code> → <code>tools/<b>&lt;name&gt;</b>/&lt;name&gt;.exe</code> → <code>tools/<b>&lt;name&gt;</b>.py</code> → system PATH</div>
-      <div style="margin-top:4px"><b>Stage flow:</b> each tool outputs typed findings → adapter parses → context accumulates → next stage uses placeholders:</div>
-      <div><code style="color:var(--accent)">{bin}</code> <code style="color:var(--green)">{ip}</code> <code style="color:var(--green)">{domain}</code> <code style="color:var(--green)">{url}</code> <code style="color:var(--green)">{port}</code> <code style="color:var(--green)">{subdomain}</code> <code style="color:var(--accent)">{company}</code> <code style="color:var(--green)">{ports}</code> <code style="color:var(--green)">{urls}</code> <code style="color:var(--green)">{urls_file}</code> <code style="color:var(--green)">{domains}</code></div>
-      <table style="margin-top:6px;font-size:10px">
-        <tr style="color:var(--accent)"><th style="text-align:left;padding-right:16px">Tool</th><th style="text-align:left;padding-right:16px">Output type</th><th style="text-align:left">Feeds →</th></tr>
-        <tr><td>enscan</td><td>domain</td><td style="color:var(--green)">{domain} {domains}</td></tr>
-        <tr><td>subfinder / crt</td><td>subdomain</td><td style="color:var(--green)">{domain} {subdomain}</td></tr>
-        <tr><td>nmap</td><td>port</td><td style="color:var(--green)">{ports} {ip} → {urls}</td></tr>
-        <tr><td>httpx</td><td>http_endpoint</td><td style="color:var(--green)">{urls} {urls_file}</td></tr>
-        <tr><td>katana</td><td>file / http_endpoint</td><td style="color:var(--green)">{urls}</td></tr>
-        <tr><td>dirbuster/ffuf</td><td>dir_entry</td><td style="color:var(--muted)">(writes to Neo4j directly)</td></tr>
-      </table>
-    </div>
-    <div class="cfg-layout">
-      <div>
-        <div class="section-title">Tool tool.yaml</div>
-        <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-          <select id="cfg-tool-select" onchange="loadConfig(this.value)" style="min-width:180px"></select>
-          <span id="cfg-path" style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
-        </div>
-        <textarea id="cfg-editor" spellcheck="false"></textarea>
+
+    <!-- Tab: Tools -->
+    <div id="cfg-tab-tools" class="cfg-tab-pane">
+      <div class="toolbar">
+        <span style="font-size:12px;color:var(--muted)">Tool Registry — register tools, then use them in Pipelines</span>
+        <span class="spacer"></span>
+        <button class="btn outline small" onclick="checkTools()">Re-check</button>
+        <button class="btn" onclick="saveConfig()">Save</button>
       </div>
-      <div>
-        <div class="section-title">Tool Summary</div>
-        <table id="cfg-table">
-          <thead><tr>
-            <th style="width:100px">Tool</th><th style="width:180px">Use On</th><th>Default Command</th><th style="width:110px">Status</th>
-          </tr></thead>
-          <tbody id="cfg-tbody"></tbody>
+      <div style="font-size:10px;color:var(--muted);margin-bottom:12px;line-height:1.8">
+        <div><b>{bin}</b> lookup: <code>tools/<b>&lt;name&gt;</b>.exe</code> → <code>tools/<b>&lt;name&gt;</b>/&lt;name&gt;.exe</code> → <code>tools/<b>&lt;name&gt;</b>.py</code> → system PATH</div>
+        <div style="margin-top:4px"><b>Stage flow:</b> each tool outputs typed findings → adapter parses → context accumulates → next stage uses placeholders:</div>
+        <div><code style="color:var(--accent)">{bin}</code> <code style="color:var(--green)">{ip}</code> <code style="color:var(--green)">{domain}</code> <code style="color:var(--green)">{url}</code> <code style="color:var(--green)">{port}</code> <code style="color:var(--green)">{subdomain}</code> <code style="color:var(--accent)">{company}</code> <code style="color:var(--green)">{ports}</code> <code style="color:var(--green)">{urls}</code> <code style="color:var(--green)">{urls_file}</code> <code style="color:var(--green)">{domains}</code></div>
+        <table style="margin-top:6px;font-size:10px">
+          <tr style="color:var(--accent)"><th style="text-align:left;padding-right:16px">Tool</th><th style="text-align:left;padding-right:16px">Output type</th><th style="text-align:left">Feeds →</th></tr>
+          <tr><td>enscan</td><td>domain</td><td style="color:var(--green)">{domain} {domains}</td></tr>
+          <tr><td>subfinder / crt</td><td>subdomain</td><td style="color:var(--green)">{domain} {subdomain}</td></tr>
+          <tr><td>nmap</td><td>port</td><td style="color:var(--green)">{ports} {ip} → {urls}</td></tr>
+          <tr><td>httpx</td><td>http_endpoint</td><td style="color:var(--green)">{urls} {urls_file}</td></tr>
+          <tr><td>katana</td><td>file / http_endpoint</td><td style="color:var(--green)">{urls}</td></tr>
+          <tr><td>dirbuster/ffuf</td><td>dir_entry</td><td style="color:var(--muted)">(writes to Neo4j directly)</td></tr>
         </table>
       </div>
+      <div class="cfg-layout">
+        <div>
+          <div class="section-title">Tool tool.yaml</div>
+          <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+            <select id="cfg-tool-select" onchange="loadConfig(this.value)" style="min-width:180px"></select>
+            <span id="cfg-path" style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          </div>
+          <textarea id="cfg-editor" spellcheck="false"></textarea>
+        </div>
+        <div>
+          <div class="section-title">Tool Summary</div>
+          <table id="cfg-table">
+            <thead><tr>
+              <th style="width:100px">Tool</th><th style="width:180px">Use On</th><th>Default Command</th><th style="width:110px">Status</th>
+            </tr></thead>
+            <tbody id="cfg-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="cfg-status" style="margin-top:8px;font-size:12px;"></div>
     </div>
-    <div id="cfg-status" style="margin-top:8px;font-size:12px;"></div>
+
+    <!-- Tab: Agent Prompt -->
+    <div id="cfg-tab-agent-prompt" class="cfg-tab-pane" style="display:none">
+      <div class="toolbar" style="margin-bottom:8px">
+        <span style="font-size:12px;color:var(--muted)">Agent System Prompt — 完整自定义 Agent 的角色、知识、方法论和阶段指令</span>
+        <span class="spacer"></span>
+        <button class="btn outline small" onclick="resetAgentPrompt()">Reset to Default</button>
+        <button class="btn" onclick="saveAgentPrompt()">Save</button>
+      </div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.6">
+        <div>YAML 格式，包含 5 个可编辑部分。模板占位符: <code>{asset_id}</code> <code>{phase_desc}</code> <code>{schema_knowledge}</code> <code>{methodology}</code> <code>{phase_instruction}</code></div>
+        <div style="margin-top:4px">
+          <b>system_template</b> — 整体框架模板 &nbsp;|&nbsp;
+          <b>schema_knowledge</b> — Neo4j Schema 知识 &nbsp;|&nbsp;
+          <b>methodology</b> — 工作方法论
+        </div>
+        <div>
+          <b>phase_instructions.analyze</b> — 分析阶段指令 &nbsp;|&nbsp;
+          <b>phase_instructions.expand</b> — 拓展阶段指令
+        </div>
+      </div>
+      <textarea id="agent-prompt-editor" spellcheck="false" style="width:100%;min-height:500px;font-family:monospace;font-size:12px;background:var(--bg2);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:10px;resize:vertical;tab-size:2"></textarea>
+      <div id="agent-prompt-status" style="margin-top:6px;font-size:12px"></div>
+    </div>
   </div>
 
   <!-- ==================== Agent ==================== -->
@@ -451,6 +483,10 @@
     <div class="section" style="margin-top:16px">
       <div class="section-title">Agent Output</div>
       <div class="code-block"><pre id="agent-output" style="min-height:200px;max-height:500px;overflow-y:auto;white-space:pre-wrap">Waiting...</pre></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <input id="agent-prompt" type="text" placeholder="输入提示词或指导消息..." style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:13px">
+      <button class="btn small" onclick="sendAgentPrompt()">发送</button>
     </div>
   </div>
 
@@ -624,6 +660,7 @@ function loadCurrentPage() {
     case 'page-vulns': loadVulnerabilities(); break;
     case 'page-tasks': loadPipelines(); break;
     case 'page-graph': loadGraph(); break;
+    case 'page-agent': loadAgent(); break;
   }
 }
 
@@ -1461,8 +1498,17 @@ async function runToolOnNode(tool) {
 }
 
 // ============================================================
-// Config — interactive tool registry
+// Config — tab switching + tool registry
 // ============================================================
+
+function switchCfgTab(tab) {
+  document.querySelectorAll('#cfg-tabs button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.cfg-tab-pane').forEach(p => p.style.display = 'none');
+  document.querySelector(`#cfg-tabs button[onclick*="${tab}"]`).classList.add('active');
+  document.getElementById('cfg-tab-' + tab).style.display = '';
+  if (tab === 'agent-prompt') loadAgentPrompt();
+}
+
 let _cfgTools = [];
 let _cfgRawText = '';
 let _cfgSelectedTool = '';
@@ -1556,6 +1602,65 @@ async function saveConfig() {
     }
   } catch(e) {
     document.getElementById('cfg-status').innerHTML = '<span style="color:var(--red)">' + esc(e.message) + '</span>';
+  }
+}
+
+// ---- Agent Prompt Config ----
+
+async function loadAgentPrompt() {
+  const editor = document.getElementById('agent-prompt-editor');
+  const status = document.getElementById('agent-prompt-status');
+  try {
+    const res = await fetch(API + '/agent/prompt');
+    const d = await res.json();
+    if (d.ok) {
+      editor.value = d.yaml;
+      status.innerHTML = '<span style="color:var(--green)">Loaded</span>';
+    } else {
+      status.innerHTML = '<span style="color:var(--red)">' + esc(d.detail||'load failed') + '</span>';
+    }
+  } catch(e) {
+    status.innerHTML = '<span style="color:var(--red)">' + esc(e.message) + '</span>';
+  }
+}
+
+async function saveAgentPrompt() {
+  const editor = document.getElementById('agent-prompt-editor');
+  const status = document.getElementById('agent-prompt-status');
+  const raw = editor.value;
+  if (!raw.trim()) { toast('提示词不能为空', false); return; }
+  try {
+    const res = await fetch(API + '/agent/prompt', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({yaml: raw})
+    });
+    const d = await res.json();
+    if (d.ok) {
+      status.innerHTML = '<span style="color:var(--green)">Saved</span>';
+      toast('Agent 提示词已保存');
+    } else {
+      status.innerHTML = '<span style="color:var(--red)">' + esc(d.detail||d.error||'save failed') + '</span>';
+    }
+  } catch(e) {
+    status.innerHTML = '<span style="color:var(--red)">' + esc(e.message) + '</span>';
+  }
+}
+
+async function resetAgentPrompt() {
+  if (!confirm('确认恢复默认 Agent 提示词？当前修改将丢失。')) return;
+  const status = document.getElementById('agent-prompt-status');
+  try {
+    // 删除配置文件，让后端回退到代码默认值
+    await fetch(API + '/agent/prompt', {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({yaml: '__RESET__'})
+    });
+    await loadAgentPrompt();
+    status.innerHTML = '<span style="color:var(--green)">已恢复默认</span>';
+  } catch(e) {
+    status.innerHTML = '<span style="color:var(--red)">' + esc(e.message) + '</span>';
   }
 }
 
@@ -2432,7 +2537,7 @@ let _agentPoll = null;
 function loadAgent() {
   const sel = document.getElementById('agent-asset-sel');
   fetch('/api/assets').then(r=>r.json()).then(d=>{
-    sel.innerHTML = (d.assets||[]).map(a=>`<option value="${a.id}">${a.name||a.id}</option>`).join('');
+    sel.innerHTML = (d.data||[]).map(a=>`<option value="${a.id}">${a.name||a.id}</option>`).join('');
   }).catch(()=>{});
   refreshAgentSessions();
 }
@@ -2450,13 +2555,15 @@ function refreshAgentSessions() {
 function startAnalyze() {
   const assetId = document.getElementById('agent-asset-sel').value;
   if(!assetId){ toast('Select an asset','err'); return; }
+  const prompt = document.getElementById('agent-prompt').value.trim();
   document.getElementById('agent-output').textContent = 'Starting analyze...';
   document.getElementById('btn-expand').disabled = true;
-  fetch('/api/agent/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId})})
+  fetch('/api/agent/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId, prompt:prompt})})
     .then(r=>r.json()).then(d=>{
       if(!d.ok){ toast(d.error||'failed','err'); return; }
       _agentSessionId = d.session_id;
       document.getElementById('agent-status').innerHTML = `<span class="badge warn">running</span> ${d.session_id}`;
+      document.getElementById('agent-prompt').value = '';
       pollAgent();
     });
 }
@@ -2464,14 +2571,31 @@ function startAnalyze() {
 function startExpand() {
   const assetId = document.getElementById('agent-asset-sel').value;
   if(!assetId){ toast('Select an asset','err'); return; }
+  const prompt = document.getElementById('agent-prompt').value.trim();
   document.getElementById('agent-output').textContent = 'Starting expand...';
-  fetch('/api/agent/expand',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId})})
+  fetch('/api/agent/expand',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId, prompt:prompt})})
     .then(r=>r.json()).then(d=>{
       if(!d.ok){ toast(d.error||'failed','err'); return; }
       _agentSessionId = d.session_id;
       document.getElementById('agent-status').innerHTML = `<span class="badge warn">running</span> ${d.session_id}`;
       document.getElementById('btn-expand').disabled = true;
+      document.getElementById('agent-prompt').value = '';
       pollAgent();
+    });
+}
+
+function sendAgentPrompt() {
+  const prompt = document.getElementById('agent-prompt').value.trim();
+  if (!prompt) return;
+  if (!_agentSessionId) {
+    startAnalyze();
+    return;
+  }
+  fetch('/api/agent/steer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:_agentSessionId, message:prompt})})
+    .then(r=>r.json()).then(d=>{
+      if(!d.ok){ toast(d.error||'failed','err'); return; }
+      toast('已发送指导消息');
+      document.getElementById('agent-prompt').value = '';
     });
 }
 
@@ -2490,7 +2614,14 @@ function pollAgent() {
       } else if(d.status==='done'){
         clearInterval(_agentPoll);
         document.getElementById('agent-status').innerHTML = `<span class="badge ok">done</span> ${_agentSessionId} (${d.tool_calls||0} tool calls)`;
-        out.textContent = d.result||'(no output)';
+        // 保留完整日志 + 流式输出，最后附上报告分隔线
+        let txt = '';
+        if(d.logs && d.logs.length) txt += d.logs.map(l=>'[status] '+l).join('\n')+'\n\n';
+        if(d.output_buf) txt += d.output_buf + '\n\n';
+        txt += '══════════════ 最终报告 ══════════════\n\n';
+        txt += d.result||'(no output)';
+        out.textContent = txt;
+        out.scrollTop = out.scrollHeight;
         document.getElementById('btn-expand').disabled = false;
         refreshAgentSessions();
       } else if(d.status==='error'){

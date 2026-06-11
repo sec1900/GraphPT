@@ -13,8 +13,41 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+import yaml
+
 from graphpt.core.graph_agent_prompt import GRAPH_AGENT_METHODOLOGY, GRAPH_SCHEMA_KNOWLEDGE
 from graphpt.tools.core import _TOOL_REGISTRY
+
+
+# ---- 配置加载 ----
+
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "agent_prompt.yaml"
+
+_DEFAULT_SYSTEM_TEMPLATE = """你是 GraphPT 渗透测试分析 Agent。
+
+当前资产: {asset_id}
+当前阶段: {phase_desc}
+
+{schema_knowledge}
+
+{methodology}
+
+{phase_instruction}
+"""
+
+_DEFAULT_PHASE_INSTRUCTIONS = {
+    "analyze": (
+        "【分析阶段】\n"
+        "你当前只能读取图数据库。请充分分析已有数据，发现攻击路径和薄弱环节。\n"
+        "完成分析后，输出结构化报告并列出建议的拓展动作。\n"
+        "禁止调用 trigger_scan — 该工具在分析阶段不可用。"
+    ),
+    "expand": (
+        "【拓展阶段】\n"
+        "分析已完成，你现在可以使用 trigger_scan 触发精准扫描。\n"
+        "原则：不重复已有 ScanRun、每次触发都有分析依据、最小化扫描范围。"
+    ),
+}
 
 
 # ---- 工具过滤 ----
@@ -41,41 +74,31 @@ def _get_tool_schemas(phase: str) -> list[dict[str, Any]]:
 
 # ---- 系统提示构建 ----
 
-_SYSTEM_PROMPT_TEMPLATE = """你是 GraphPT 渗透测试分析 Agent。
 
-当前资产: {asset_id}
-当前阶段: {phase_desc}
-
-{schema_knowledge}
-
-{methodology}
-
-{phase_instruction}
-"""
-
-_PHASE_INSTRUCTIONS = {
-    "analyze": (
-        "【分析阶段】\n"
-        "你当前只能读取图数据库。请充分分析已有数据，发现攻击路径和薄弱环节。\n"
-        "完成分析后，输出结构化报告并列出建议的拓展动作。\n"
-        "禁止调用 trigger_scan — 该工具在分析阶段不可用。"
-    ),
-    "expand": (
-        "【拓展阶段】\n"
-        "分析已完成，你现在可以使用 trigger_scan 触发精准扫描。\n"
-        "原则：不重复已有 ScanRun、每次触发都有分析依据、最小化扫描范围。"
-    ),
-}
+def _load_prompt_config() -> dict:
+    """从 yaml 加载 prompt 配置，失败则返回空 dict（用代码默认值）。"""
+    try:
+        if _CONFIG_PATH.exists():
+            return yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    except Exception:
+        pass
+    return {}
 
 
 def _build_system_prompt(asset_id: str, phase: str) -> str:
+    cfg = _load_prompt_config()
     phase_desc = "分析（只读）" if phase == "analyze" else "拓展（可触发扫描）"
-    return _SYSTEM_PROMPT_TEMPLATE.format(
+    template = cfg.get("system_template") or _DEFAULT_SYSTEM_TEMPLATE
+    schema = cfg.get("schema_knowledge") or GRAPH_SCHEMA_KNOWLEDGE
+    methodology = cfg.get("methodology") or GRAPH_AGENT_METHODOLOGY
+    phase_instrs = cfg.get("phase_instructions") or _DEFAULT_PHASE_INSTRUCTIONS
+    phase_instruction = phase_instrs.get(phase, _DEFAULT_PHASE_INSTRUCTIONS.get(phase, ""))
+    return template.format(
         asset_id=asset_id,
         phase_desc=phase_desc,
-        schema_knowledge=GRAPH_SCHEMA_KNOWLEDGE,
-        methodology=GRAPH_AGENT_METHODOLOGY,
-        phase_instruction=_PHASE_INSTRUCTIONS[phase],
+        schema_knowledge=schema,
+        methodology=methodology,
+        phase_instruction=phase_instruction,
     )
 
 
@@ -103,6 +126,7 @@ def run_graph_agent(
     on_status: Callable[[str], None] | None = None,
     stop_event: threading.Event | None = None,
     prior_messages: list[dict[str, Any]] | None = None,
+    steering_provider: Callable[[], list[str]] | None = None,
 ) -> GraphAgentResult:
     """启动图分析 Agent。
 
@@ -145,6 +169,7 @@ def run_graph_agent(
         stop_event=stop_event,
         session_role="graph_agent",
         prior_messages=prior_messages,
+        steering_provider=steering_provider,
     )
 
     return GraphAgentResult(
