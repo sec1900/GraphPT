@@ -1887,6 +1887,132 @@ async def api_scan_all_stop(body: dict | None = None):
 
 
 # ============================================================
+# Graph Visualization + Change Detection API
+# ============================================================
+
+@web_app.get("/api/graph/data")
+async def graph_data(asset_id: str = "default"):
+    """返回 Asset 下所有节点和关系，供 vis.js 渲染。"""
+    try:
+        rows = _neo4j_query(
+            """
+            MATCH (a:Asset {id: $aid})
+            CALL {
+              WITH a
+              MATCH (a)-[r]->(n)
+              RETURN a AS src, r, n AS tgt
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(rd)-[r]->(n)
+              RETURN rd AS src, r, n AS tgt
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s)-[r]->(n)
+              RETURN s AS src, r, n AS tgt
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_IP]->(ip)-[r]->(n)
+              RETURN ip AS src, r, n AS tgt
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
+                    -[:RESOLVES_TO]->(ip)-[r]->(n)
+              RETURN ip AS src, r, n AS tgt
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
+                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p)-[r]->(n)
+              RETURN p AS src, r, n AS tgt
+            }
+            WITH COLLECT(DISTINCT {id: src.id, labels: labels(src), value: coalesce(src.value, src.url, src.name, src.id), created_at: src.created_at}) +
+                 COLLECT(DISTINCT {id: tgt.id, labels: labels(tgt), value: coalesce(tgt.value, tgt.url, tgt.name, tgt.id), created_at: tgt.created_at}) AS all_nodes,
+                 COLLECT(DISTINCT {from_id: src.id, to_id: tgt.id, type: type(r)}) AS edges
+            UNWIND all_nodes AS n
+            WITH COLLECT(DISTINCT n) AS nodes, edges
+            RETURN nodes[..1000] AS nodes, edges[..2000] AS edges
+            """,
+            aid=asset_id,
+        )
+        if not rows:
+            return {"ok": True, "data": {"nodes": [], "edges": []}}
+        row = rows[0]
+        nodes = [{"id": asset_id, "labels": ["Asset"], "value": asset_id, "created_at": None}]
+        nodes.extend(row["nodes"] or [])
+        return {"ok": True, "data": {"nodes": nodes, "edges": row["edges"] or []}}
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
+@web_app.get("/api/changes")
+async def api_changes(asset_id: str = "default", since: str = "", limit: int = 50):
+    """统一变更检测：新节点 + HTTPEndpoint 属性变更。"""
+    from datetime import datetime, timezone, timedelta
+    if not since:
+        since = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    try:
+        new_nodes = _neo4j_query(
+            """
+            MATCH (a:Asset {id: $aid})
+            CALL {
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(r:RootDomain) WHERE r.created_at > $since
+              RETURN r.id AS id, r.value AS value, 'RootDomain' AS type, r.created_at AS discovered_at
+              UNION ALL
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain) WHERE s.created_at > $since
+              RETURN s.id AS id, s.value AS value, 'Subdomain' AS type, s.created_at AS discovered_at
+              UNION ALL
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) WHERE ip.created_at > $since
+              RETURN ip.id AS id, ip.value AS value, 'IP' AS type, ip.created_at AS discovered_at
+              UNION ALL
+              WITH a
+              MATCH (a)-[:HAS_IP]->(ip:IP) WHERE ip.created_at > $since
+              RETURN ip.id AS id, ip.value AS value, 'IP' AS type, ip.created_at AS discovered_at
+              UNION ALL
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p:Port) WHERE p.created_at > $since
+              RETURN p.id AS id, coalesce(p.number,'') + '/' + coalesce(p.protocol,'') AS value, 'Port' AS type, p.created_at AS discovered_at
+              UNION ALL
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) WHERE ep.created_at > $since
+              RETURN ep.id AS id, ep.url AS value, 'HTTPEndpoint' AS type, ep.created_at AS discovered_at
+            }
+            RETURN DISTINCT id, value, type, discovered_at
+            ORDER BY discovered_at DESC LIMIT $limit
+            """,
+            aid=asset_id, since=since, limit=limit,
+        )
+
+        prop_changes = _neo4j_query(
+            """
+            MATCH (a:Asset {id: $aid})
+            CALL {
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
+            }
+            WITH DISTINCT ep WHERE ep.changed_at IS NOT NULL AND ep.changed_at > $since
+            RETURN ep.id AS id, ep.url AS value, ep.changed_fields AS fields, ep.changed_at AS changed_at
+            ORDER BY ep.changed_at DESC LIMIT $limit
+            """,
+            aid=asset_id, since=since, limit=limit,
+        )
+
+        return {"ok": True, "data": {
+            "new_nodes": [{"id": r["id"], "value": r["value"], "type": r["type"], "discovered_at": r["discovered_at"]} for r in new_nodes],
+            "property_changes": [{"id": r["id"], "value": r["value"], "fields": r["fields"], "changed_at": r["changed_at"]} for r in prop_changes],
+        }}
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+
+# ============================================================
 # Graph Agent API
 # ============================================================
 
@@ -1909,12 +2035,26 @@ async def api_agent_analyze(req: _AgentRequest):
     session_id = f"{req.asset_id}_{int(time.time())}"
 
     def _run():
+        def _on_status(msg):
+            with _agent_lock:
+                s = _agent_sessions.get(session_id)
+                if s:
+                    s.setdefault("logs", []).append(msg)
+
+        def _on_token(t):
+            with _agent_lock:
+                s = _agent_sessions.get(session_id)
+                if s:
+                    s["output_buf"] = s.get("output_buf", "") + t
+
         try:
             result = run_graph_agent(
                 asset_id=req.asset_id,
                 phase="analyze",
                 user_prompt=req.prompt or "",
                 workspace_root=_PROJECT_ROOT,
+                on_status=_on_status,
+                on_token=_on_token,
             )
             with _agent_lock:
                 _agent_sessions[session_id]["status"] = "done"
@@ -1926,7 +2066,7 @@ async def api_agent_analyze(req: _AgentRequest):
                 _agent_sessions[session_id]["error"] = str(e)
 
     with _agent_lock:
-        _agent_sessions[session_id] = {"status": "running", "asset_id": req.asset_id, "phase": "analyze"}
+        _agent_sessions[session_id] = {"status": "running", "asset_id": req.asset_id, "phase": "analyze", "logs": [], "output_buf": ""}
 
     threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "session_id": session_id}
@@ -1953,12 +2093,26 @@ async def api_agent_expand(req: _AgentRequest):
     session_id = f"{req.asset_id}_expand_{int(time.time())}"
 
     def _run():
+        def _on_status(msg):
+            with _agent_lock:
+                s = _agent_sessions.get(session_id)
+                if s:
+                    s.setdefault("logs", []).append(msg)
+
+        def _on_token(t):
+            with _agent_lock:
+                s = _agent_sessions.get(session_id)
+                if s:
+                    s["output_buf"] = s.get("output_buf", "") + t
+
         try:
             result = run_graph_agent(
                 asset_id=req.asset_id,
                 phase="expand",
                 user_prompt=req.prompt or "",
                 workspace_root=_PROJECT_ROOT,
+                on_status=_on_status,
+                on_token=_on_token,
             )
             with _agent_lock:
                 _agent_sessions[session_id]["status"] = "done"
@@ -1970,7 +2124,7 @@ async def api_agent_expand(req: _AgentRequest):
                 _agent_sessions[session_id]["error"] = str(e)
 
     with _agent_lock:
-        _agent_sessions[session_id] = {"status": "running", "asset_id": req.asset_id, "phase": "expand"}
+        _agent_sessions[session_id] = {"status": "running", "asset_id": req.asset_id, "phase": "expand", "logs": [], "output_buf": ""}
 
     threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "session_id": session_id}

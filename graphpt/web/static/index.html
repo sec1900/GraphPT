@@ -204,6 +204,7 @@
   #cfg-editor { min-height:520px; font-family:Consolas, 'Cascadia Mono', monospace; font-size:12px; line-height:1.5; resize:vertical; }
   @media (max-width: 960px) { .cfg-layout { grid-template-columns:1fr; } }
 </style>
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
 
@@ -221,6 +222,7 @@
   <button data-page="tasks">Pipelines</button>
   <button data-page="config">Config</button>
   <button data-page="agent">Agent</button>
+  <button data-page="graph">Graph</button>
 </nav>
 
 <main>
@@ -247,7 +249,7 @@
         <table id="dash-recent-subs"><tbody></tbody></table>
       </div>
       <div class="section">
-        <div class="section-title">Recent Changes</div>
+        <div class="section-title">Recent Changes <span style="font-size:10px;color:var(--muted)">(24h)</span></div>
         <table id="dash-changes"><tbody></tbody></table>
       </div>
     </div>
@@ -451,6 +453,31 @@
       <div class="code-block"><pre id="agent-output" style="min-height:200px;max-height:500px;overflow-y:auto;white-space:pre-wrap">Waiting...</pre></div>
     </div>
   </div>
+
+  <!-- ==================== Graph Visualization ==================== -->
+  <div id="page-graph" class="page">
+    <div class="toolbar">
+      <div class="asset-sel">
+        <select id="graph-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
+        <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
+      </div>
+      <select id="graph-layout-sel" onchange="loadGraph()" style="min-width:100px;margin-left:8px">
+        <option value="hierarchical" selected>层级</option>
+        <option value="force">力导向</option>
+        <option value="radial">径向</option>
+      </select>
+      <span style="margin-left:12px;font-size:11px;color:var(--muted)">过滤:</span>
+      <div id="graph-type-filters" style="display:inline-flex;gap:4px;margin-left:4px;flex-wrap:wrap"></div>
+      <span class="spacer"></span>
+      <button class="btn outline small" onclick="loadGraph()">Refresh</button>
+    </div>
+    <div style="position:relative">
+      <div id="graph-container" style="width:100%;height:calc(100vh - 180px);border:1px solid var(--border);border-radius:8px;background:var(--bg)"></div>
+      <div id="graph-info" style="position:absolute;right:16px;top:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;max-width:320px;display:none;z-index:10;box-shadow:0 4px 12px rgba(0,0,0,.4)"></div>
+      <div id="graph-legend" style="position:absolute;left:16px;bottom:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:11px;z-index:10;display:flex;gap:12px;flex-wrap:wrap"></div>
+    </div>
+    <div class="loading" id="graph-loading">Loading graph...</div>
+  </div>
 </main>
 
 <!-- Tutorial Overlay -->
@@ -577,7 +604,7 @@ async function loadAssets() {
 
 function renderAssetSelectors() {
   const opts = assetList.map(a => `<option value="${esc(a.id)}" ${a.id===currentAsset?'selected':''}>${esc(a.name||a.id)} (${esc(a.id)})</option>`).join('') || '<option value="default">default</option>';
-  document.querySelectorAll('#tgt-asset-sel, #exp-asset-sel, #dash-asset-sel, #vuln-asset-sel').forEach(el => { el.innerHTML = opts; el.value = currentAsset; });
+  document.querySelectorAll('#tgt-asset-sel, #exp-asset-sel, #dash-asset-sel, #vuln-asset-sel, #graph-asset-sel').forEach(el => { el.innerHTML = opts; el.value = currentAsset; });
 }
 
 function switchAsset(id) {
@@ -596,6 +623,7 @@ function loadCurrentPage() {
     case 'page-surfaces': loadExplorer(); break;
     case 'page-vulns': loadVulnerabilities(); break;
     case 'page-tasks': loadPipelines(); break;
+    case 'page-graph': loadGraph(); break;
   }
 }
 
@@ -677,6 +705,7 @@ document.querySelectorAll('nav button[data-page]').forEach(btn => {
       case 'tasks': loadPipelines(); break;
       case 'config': loadConfig(); break;
       case 'agent': loadAgent(); break;
+      case 'graph': loadGraph(); break;
     }
   });
 });
@@ -754,11 +783,22 @@ async function loadDashboard() {
     ).join('');
     document.getElementById('dash-recent-subs').innerHTML = subRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
 
-    // Recent changes
-    let chRows = (d.recent_changes || []).map(c =>
-      `<tr><td>${esc(c.url)}</td><td style="color:var(--orange)">${(c.fields||[]).join(', ')}</td><td>${fmtTime(c.changed_at)}</td></tr>`
-    ).join('');
-    document.getElementById('dash-changes').innerHTML = chRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
+    // Recent changes (unified: new discoveries + property changes)
+    try {
+      const chRes = await fetch(aq(API + '/changes'));
+      const chJson = await chRes.json();
+      if (chJson.ok) {
+        const cd = chJson.data;
+        let rows = '';
+        (cd.new_nodes || []).slice(0, 15).forEach(n => {
+          rows += `<tr><td><span class="badge ok">NEW</span> ${esc(n.type)}</td><td>${esc(n.value||'')}</td><td>${fmtTime(n.discovered_at)}</td></tr>`;
+        });
+        (cd.property_changes || []).slice(0, 10).forEach(c => {
+          rows += `<tr><td><span class="badge warn">CHG</span> ${(c.fields||[]).join(', ')}</td><td>${esc(c.value||'')}</td><td>${fmtTime(c.changed_at)}</td></tr>`;
+        });
+        document.getElementById('dash-changes').innerHTML = rows || '<tr><td colspan="3" style="color:var(--muted)">None in last 24h</td></tr>';
+      }
+    } catch(e) { /* ignore */ }
   } catch(e) {
     toast(e.message, false);
   }
@@ -2194,6 +2234,198 @@ function scanAllStop() {
 // ============================================================
 // Agent Page
 // ============================================================
+// ============================================================
+// Graph Visualization
+// ============================================================
+let _graphNetwork = null;
+let _graphRawData = null;
+
+const _graphColors = {
+  Asset:'#58a6ff', RootDomain:'#3fb950', Subdomain:'#a371f7',
+  IP:'#d2991d', Port:'#f85149', HTTPEndpoint:'#f0883e',
+  Service:'#6e7681', Vulnerability:'#da3633', DirectoryEntry:'#8b949e',
+  ICPRecord:'#79c0ff', File:'#8b949e',
+};
+const _graphShapes = {
+  Asset:'diamond', RootDomain:'dot', Subdomain:'dot',
+  IP:'square', Port:'triangle', HTTPEndpoint:'star',
+  Vulnerability:'triangleDown',
+};
+const _graphLevels = {
+  Asset:0, ICPRecord:1, RootDomain:1, Subdomain:2, IP:3,
+  Port:4, Service:4, HTTPEndpoint:5, DirectoryEntry:6, File:6, Vulnerability:6,
+};
+const _graphTypeNames = {
+  Asset:'Asset', ICPRecord:'ICP', RootDomain:'域名', Subdomain:'子域名',
+  IP:'IP', Port:'端口', Service:'服务', HTTPEndpoint:'端点',
+  DirectoryEntry:'目录', File:'文件', Vulnerability:'漏洞',
+};
+let _graphHiddenTypes = new Set(['Service']);
+
+function _initGraphFilters(types) {
+  const box = document.getElementById('graph-type-filters');
+  box.innerHTML = types.map(t => {
+    const checked = !_graphHiddenTypes.has(t);
+    return `<label style="font-size:10px;cursor:pointer;display:inline-flex;align-items:center;gap:2px;padding:2px 6px;border-radius:4px;background:var(--surface);border:1px solid var(--border)">
+      <input type="checkbox" ${checked?'checked':''} onchange="_toggleGraphType('${t}',this.checked)" style="margin:0;width:12px;height:12px">
+      <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${_graphColors[t]||'#6e7681'}"></span>
+      ${_graphTypeNames[t]||t}</label>`;
+  }).join('');
+}
+
+function _toggleGraphType(type, show) {
+  if (show) _graphHiddenTypes.delete(type); else _graphHiddenTypes.add(type);
+  if (_graphRawData) _renderGraph(_graphRawData);
+}
+
+function _buildGraphOptions(layout) {
+  const base = {
+    interaction: {hover:true, tooltipDelay:80, zoomView:true, dragView:true},
+    nodes: {size:14, borderWidth:1},
+    edges: {arrows:'to', font:{size:8, color:'#6e7681', strokeWidth:0}, color:{color:'#30363d', highlight:'#58a6ff'}},
+  };
+  if (layout === 'hierarchical') {
+    base.layout = {hierarchical:{direction:'UD', sortMethod:'directed', shakeTowards:'roots', levelSeparation:140, nodeSpacing:80, treeSpacing:120, edgeMinimization:true, parentCentralization:true, blockShifting:true}};
+    base.physics = {hierarchicalRepulsion:{nodeDistance:200, springLength:150}, stabilization:{iterations:150}};
+    base.edges.smooth = {type:'cubicBezier', forceDirection:'vertical', roundness:0.5};
+  } else if (layout === 'radial') {
+    base.layout = {hierarchical:{direction:'DU', sortMethod:'directed', shakeTowards:'leaves', levelSeparation:160, nodeSpacing:80, treeSpacing:120, edgeMinimization:true, parentCentralization:true, blockShifting:true}};
+    base.physics = {hierarchicalRepulsion:{nodeDistance:200}, stabilization:{iterations:150}};
+    base.edges.smooth = {type:'cubicBezier', forceDirection:'vertical', roundness:0.5};
+  } else {
+    base.physics = {solver:'forceAtlas2Based', forceAtlas2Based:{gravitationalConstant:-40, springLength:100, damping:0.5}, stabilization:{iterations:120}};
+    base.edges.smooth = {type:'continuous'};
+  }
+  return base;
+}
+
+function _renderGraph(data) {
+  const layout = document.getElementById('graph-layout-sel').value;
+  const info = document.getElementById('graph-info');
+  info.style.display = 'none';
+
+  const seen = new Set();
+  const dedupedNodes = data.nodes.filter(n => { if(seen.has(n.id)) return false; seen.add(n.id); return true; });
+
+  // Merge Service info into Port labels
+  const serviceByPort = {};
+  const serviceIds = new Set(dedupedNodes.filter(n => (n.labels||[])[0]==='Service').map(n=>n.id));
+  data.edges.forEach(e => {
+    if (serviceIds.has(e.to_id)) {
+      const svc = dedupedNodes.find(n => n.id === e.to_id);
+      if (svc) serviceByPort[e.from_id] = svc.value || '';
+    }
+  });
+
+  const isHierarchical = (layout === 'hierarchical' || layout === 'radial');
+
+  const allNodes = dedupedNodes.map(n => {
+    const lbl = (n.labels||[])[0]||'Unknown';
+    let displayLabel = (n.value||n.id||'').substring(0, 40);
+    if (lbl === 'Port' && serviceByPort[n.id]) displayLabel += '\n' + serviceByPort[n.id];
+    const node = {
+      id: n.id,
+      label: displayLabel,
+      color: _graphColors[lbl]||'#6e7681',
+      shape: _graphShapes[lbl]||'dot',
+      title: (_graphTypeNames[lbl]||lbl) + ': ' + (n.value||n.id),
+      font: {color:'#c9d1d9', size:10},
+      _lbl: lbl, _props: n,
+    };
+    if (isHierarchical) node.level = _graphLevels[lbl] ?? 7;
+    return node;
+  });
+
+  const visibleIds = new Set(allNodes.filter(n => !_graphHiddenTypes.has(n._lbl)).map(n => n.id));
+  const nodes = allNodes.filter(n => visibleIds.has(n.id));
+  const edges = data.edges
+    .filter(e => visibleIds.has(e.from_id) && visibleIds.has(e.to_id))
+    .map(e => ({from: e.from_id, to: e.to_id, label: e.type}));
+
+  // legend
+  const legend = document.getElementById('graph-legend');
+  const types = [...new Set(allNodes.map(n=>n._lbl))];
+  legend.innerHTML = types.map(t => {
+    const cnt = allNodes.filter(n=>n._lbl===t).length;
+    const visCnt = nodes.filter(n=>n._lbl===t).length;
+    const dim = _graphHiddenTypes.has(t) ? 'opacity:0.4' : '';
+    return `<span style="${dim}"><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${_graphColors[t]||'#6e7681'};margin-right:4px"></span>${_graphTypeNames[t]||t} ${visCnt}/${cnt}</span>`;
+  }).join('');
+
+  // init filters once
+  _initGraphFilters(types);
+
+  const container = document.getElementById('graph-container');
+  if (_graphNetwork) _graphNetwork.destroy();
+  const opts = _buildGraphOptions(layout);
+  _graphNetwork = new vis.Network(container, {nodes, edges}, opts);
+
+  if (layout === 'radial') {
+    _graphNetwork.once('stabilizationIterationsDone', function() {
+      _graphNetwork.setOptions({layout:{hierarchical:false}});
+      const positions = _graphNetwork.getPositions();
+      const center = positions[Object.keys(positions)[0]] || {x:0,y:0};
+      Object.keys(positions).forEach(id => {
+        const p = positions[id];
+        const dx = p.x - center.x, dy = p.y - center.y;
+        const angle = Math.atan2(dy, dx);
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        _graphNetwork.moveNode(id, Math.cos(angle)*dist, Math.sin(angle)*dist);
+      });
+    });
+  }
+
+  _graphNetwork.on('dragEnd', function(params) {
+    if (params.nodes.length) {
+      params.nodes.forEach(id => {
+        _graphNetwork.body.nodes[id].options.fixed = {x:true, y:true};
+      });
+    }
+  });
+
+  _graphNetwork.on('doubleClick', function(params) {
+    if (params.nodes.length) {
+      params.nodes.forEach(id => {
+        _graphNetwork.body.nodes[id].options.fixed = {x:false, y:false};
+      });
+    }
+  });
+
+  _graphNetwork.on('click', function(params) {
+    if (params.nodes.length) {
+      const node = nodes.find(n => n.id === params.nodes[0]);
+      if (node && node._props) {
+        const p = node._props;
+        const lbl = (p.labels||[])[0]||'';
+        let html = '<b>' + esc(_graphTypeNames[lbl]||lbl) + '</b><br>';
+        html += '<span style="word-break:break-all">' + esc(p.value||p.id) + '</span>';
+        if (p.created_at) html += '<br><span style="color:var(--muted)">Created: ' + fmtTime(p.created_at) + '</span>';
+        html += '<br><span style="color:var(--muted)">ID: ' + esc(p.id||'') + '</span>';
+        info.innerHTML = html;
+        info.style.display = 'block';
+      }
+    } else {
+      info.style.display = 'none';
+    }
+  });
+}
+
+async function loadGraph() {
+  const loading = document.getElementById('graph-loading');
+  loading.style.display = 'block';
+  try {
+    const res = await fetch(aq(API + '/graph/data'));
+    const json = await res.json();
+    if (!json.ok) { toast(json.error||'Failed','err'); loading.style.display='none'; return; }
+    _graphRawData = json.data;
+    _renderGraph(_graphRawData);
+  } catch(e) { toast(e.message, false); }
+  loading.style.display = 'none';
+}
+
+// ============================================================
+// Agent
+// ============================================================
 let _agentSessionId = null;
 let _agentPoll = null;
 
@@ -2248,20 +2480,27 @@ function pollAgent() {
   _agentPoll = setInterval(()=>{
     if(!_agentSessionId) return;
     fetch(`/api/agent/status?session_id=${_agentSessionId}`).then(r=>r.json()).then(d=>{
-      if(d.status==='done'){
+      const out = document.getElementById('agent-output');
+      if(d.status==='running'){
+        let txt = '';
+        if(d.logs && d.logs.length) txt += d.logs.map(l=>'[status] '+l).join('\n')+'\n\n';
+        if(d.output_buf) txt += d.output_buf;
+        if(txt) out.textContent = txt;
+        out.scrollTop = out.scrollHeight;
+      } else if(d.status==='done'){
         clearInterval(_agentPoll);
         document.getElementById('agent-status').innerHTML = `<span class="badge ok">done</span> ${_agentSessionId} (${d.tool_calls||0} tool calls)`;
-        document.getElementById('agent-output').textContent = d.result||'(no output)';
+        out.textContent = d.result||'(no output)';
         document.getElementById('btn-expand').disabled = false;
         refreshAgentSessions();
       } else if(d.status==='error'){
         clearInterval(_agentPoll);
         document.getElementById('agent-status').innerHTML = `<span class="badge err">error</span> ${_agentSessionId}`;
-        document.getElementById('agent-output').textContent = d.error||'Unknown error';
+        out.textContent = d.error||'Unknown error';
         refreshAgentSessions();
       }
     });
-  }, 2000);
+  }, 1500);
 }
 
 // ============================================================

@@ -45,6 +45,9 @@
 - 右键 Ad-hoc 工具执行闭环：支持工具搜索、命令预览、单工具直接执行 ✅
 - LLM Agent 图分析模块：graph_tools + 两阶段门控 + CLI/Web 入口 ✅
 - Scan All Unscanned：按资产串行批量扫描，Dashboard 一键触发 ✅
+- 图可视化：vis.js 力导向图，展示 Asset 下全部节点和关系，按类型着色，点击查看属性 ✅
+- 变更检测：统一 /api/changes 端点，新节点发现 + HTTPEndpoint 属性变更，Dashboard 24h 变更摘要 ✅
+- Agent 实时输出：Web Agent 页面运行时显示 status logs + streaming output ✅
 
 ## 待做
 - 攻击面批量操作（勾选父子联动 + 批量删除/导出）← 已回退
