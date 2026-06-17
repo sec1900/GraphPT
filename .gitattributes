@@ -3,3 +3,4 @@ tools/**/*.jar filter=lfs diff=lfs merge=lfs -text
 tools/**/*.dll filter=lfs diff=lfs merge=lfs -text
 tools/**/*.so filter=lfs diff=lfs merge=lfs -text
 tools/**/*.bin filter=lfs diff=lfs merge=lfs -text
+res/knowledge/web_fingerprint_ehole.json filter=lfs diff=lfs merge=lfs -text
