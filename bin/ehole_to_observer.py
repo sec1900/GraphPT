@@ -157,6 +157,30 @@ def build_probe_json(ward: str, yaml_dir: Path, probe_out: Path) -> bool:
     return probe_out.is_file()
 
 
+def merge_libraries(probe_out: Path, merge_with: Path) -> int:
+    """把另一个 observer_ward json 库（如官方库）合并进 probe_out。
+
+    两个库都是规则数组，直接拼接（id 去重，已存在的 id 跳过）。
+    返回合并后总规则数。
+    """
+    base = json.loads(probe_out.read_text(encoding="utf-8"))
+    extra = json.loads(merge_with.read_text(encoding="utf-8"))
+    if not isinstance(base, list) or not isinstance(extra, list):
+        raise ValueError("两个库都必须是规则数组")
+
+    seen_ids = {r.get("id") for r in base if isinstance(r, dict)}
+    added = 0
+    for r in extra:
+        if isinstance(r, dict) and r.get("id") not in seen_ids:
+            base.append(r)
+            seen_ids.add(r.get("id"))
+            added += 1
+
+    probe_out.write_text(json.dumps(base, ensure_ascii=False), encoding="utf-8")
+    print(f"[*] 合并 {merge_with.name}: +{added} 条（去重后）")
+    return len(base)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="EHole 指纹库 → observer_ward 转换器")
     ap.add_argument("input", help="EHole 聚合 json 路径")
@@ -167,6 +191,8 @@ def main() -> int:
                     help="observer_ward 可执行文件路径")
     ap.add_argument("--probe-out", default="web_fingerprint_ehole.json",
                     help="--build 时输出的单 json 路径")
+    ap.add_argument("--merge-with", default="",
+                    help="--build 后把另一个 observer_ward json 库合并进来（如官方 web_fingerprint_v4.json）")
     args = ap.parse_args()
 
     in_path = Path(args.input)
@@ -193,6 +219,16 @@ def main() -> int:
         else:
             print("[!] 合并失败")
             return 2
+
+        if args.merge_with:
+            mw = Path(args.merge_with)
+            if mw.is_file():
+                total = merge_libraries(probe_out, mw)
+                size_mb = probe_out.stat().st_size / 1024 / 1024
+                print(f"[+] 最终库: {total} 条 ({size_mb:.1f} MB)")
+            else:
+                print(f"[!] --merge-with 文件不存在: {mw}")
+                return 3
 
     return 0
 

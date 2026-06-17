@@ -31,20 +31,22 @@ Agent 通过读取 `res/knowledge/payloads/<category>.txt` 获取对应领域的
 
 | 文件 | 规则数 | 内容 |
 |---|---|---|
-| `web_fingerprint_ehole.json` | 33105 | EHole/TideFinger 指纹转换的 observer_ward 指纹库(git-lfs) |
+| `web_fingerprint_ehole.json` | 36230 | EHole(33105) + FingerprintHub 官方(3125) 合并的 observer_ward 指纹库(git-lfs) |
 
 `web_fingerprint_ehole.json` 由 `bin/ehole_to_observer.py` 从 EHole 聚合格式
-转换而来,供 observer_ward 通过 `-p` 加载:
+转换、并合并 observer_ward 官方库而来,供 observer_ward 通过 `-p` 加载
+(`tools/observer_ward/tool.yaml` 已默认带 `-p` 指向它):
 
 ```bash
 observer_ward -t <url> -p res/knowledge/web_fingerprint_ehole.json --format json
 ```
 
-EHole 源更新时重新生成:
+EHole 源更新时重新生成(--merge-with 拼入官方库):
 
 ```bash
-python bin/ehole_to_observer.py <ehole.json> -o <临时yaml目录>
-observer_ward --probe-dir <临时yaml目录> -p res/knowledge/web_fingerprint_ehole.json
+python bin/ehole_to_observer.py <ehole.json> -o <临时yaml目录> --build \
+       --probe-out res/knowledge/web_fingerprint_ehole.json \
+       --merge-with %APPDATA%/observer_ward/web_fingerprint_v4.json
 ```
 
 method 映射:body/header/title/url → word matcher(多关键字 AND),
