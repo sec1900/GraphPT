@@ -1,10 +1,12 @@
 """指纹 tech 名 → nuclei tag 匹配。
 
-observer_ward 产出的 tech 名（如 "Yonyou-Seeyon-OA", "Swagger"）切成英文
-token，与 nuclei 模板库实际拥有的 tag 集合求交，命中的 token 即可作为
-`nuclei -tags` 的精准筛选条件。
+observer_ward 产出的 tech 名（如 "Yonyou-Seeyon-OA", "Swagger", "致远OA"）切成
+token（英文单词 + 中文拼音滑窗），与 nuclei 模板库实际拥有的 tag 集合求交，
+命中的 token 即可作为 `nuclei -tags` 的精准筛选条件。中文厂商名靠拼音对上
+nuclei 的拼音 tag（华为→huawei、致远→zhiyuan），需 pypinyin（软依赖，缺失则
+中文名走盲扫兜底）。
 
-未命中任何 tag 的端点（如纯中文指纹名"致远OA"）由调用方走盲扫兜底。
+未命中任何 tag 的端点由调用方走盲扫兜底。
 
 nuclei tag 集合通过 `nuclei -tgl` 获取，进程内缓存（tag 集合随模板库更新，
 单次运行内稳定）。
@@ -67,17 +69,45 @@ def load_nuclei_tags(nuclei_bin: str, *, force: bool = False) -> set[str]:
     return tags
 
 
+def _pinyin_tokens(name: str) -> list[str]:
+    """中文段 → 拼音滑窗 token（2-4 字组合，全拼连写，长度>=4）。
+
+    用于把国产厂商中文名（华为/大华/致远）对上 nuclei 的拼音 tag。
+    pypinyin 未安装时返回空（优雅降级，中文名走盲扫兜底）。
+    滑窗覆盖品牌出现在长名中间的情况（如"用友致远a6..."里的"致远"）。
+    """
+    try:
+        from pypinyin import lazy_pinyin
+    except ImportError:
+        return []
+
+    tokens: list[str] = []
+    for seg in re.findall(r"[一-鿿]+", name):
+        chars = list(seg)
+        for size in (2, 3, 4):
+            for i in range(len(chars) - size + 1):
+                py = "".join(lazy_pinyin("".join(chars[i:i + size])))
+                # 长度>=4 过滤掉单/双字拼音误撞通用词（如"空"→kong）
+                if len(py) >= 4 and py not in tokens:
+                    tokens.append(py)
+    return tokens
+
+
 def tokenize_tech(name: str) -> list[str]:
-    """把一个 tech 名切成小写英文 token（长度>=3，去停用词）。
+    """把一个 tech 名切成 token（英文 + 中文拼音），用于匹配 nuclei tag。
 
     'Yonyou-Seeyon-OA' → ['yonyou', 'seeyon']（oa 是停用词被去掉）
-    '致远OA' → []（无可用英文 token）
+    '致远OA' → ['zhiyuan']（中文转拼音滑窗）
+    '华为防火墙' → ['huawei', 'huaweifang', ...]（滑窗组合）
     """
     tokens: list[str] = []
     for t in re.findall(r"[A-Za-z][A-Za-z0-9]{2,}", name):
         low = t.lower()
         if low not in _STOPWORDS and low not in tokens:
             tokens.append(low)
+    for py in _pinyin_tokens(name):
+        if py not in tokens:
+            tokens.append(py)
     return tokens
 
 
