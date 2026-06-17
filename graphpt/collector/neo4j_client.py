@@ -71,6 +71,7 @@ CREATE CONSTRAINT port_id IF NOT EXISTS FOR (n:Port) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT service_id IF NOT EXISTS FOR (n:Service) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT httpendpoint_id IF NOT EXISTS FOR (n:HTTPEndpoint) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT file_id IF NOT EXISTS FOR (n:File) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT apiendpoint_id IF NOT EXISTS FOR (n:ApiEndpoint) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT vulnerability_id IF NOT EXISTS FOR (n:Vulnerability) REQUIRE n.id IS UNIQUE;
 
 // 索引 — 加速查询
@@ -79,6 +80,7 @@ CREATE INDEX subdomain_value IF NOT EXISTS FOR (n:Subdomain) ON (n.value);
 CREATE INDEX ip_value IF NOT EXISTS FOR (n:IP) ON (n.value);
 CREATE INDEX httpendpoint_url IF NOT EXISTS FOR (n:HTTPEndpoint) ON (n.url);
 CREATE INDEX httpendpoint_status IF NOT EXISTS FOR (n:HTTPEndpoint) ON (n.crawl_status);
+CREATE INDEX apiendpoint_path IF NOT EXISTS FOR (n:ApiEndpoint) ON (n.path);
 CREATE INDEX port_number IF NOT EXISTS FOR (n:Port) ON (n.number);
 """
 
@@ -444,6 +446,10 @@ class GraphWriter:
         asset_id: str = "",
         source: str = "",
         url_fragment: str = "",
+        products: list[str] | None = None,
+        vendors: list[str] | None = None,
+        fingerprint_severity: str = "",
+        favicon_hash: str = "",
     ) -> dict[str, Any]:
         """幂等写入 HTTPEndpoint 节点。
 
@@ -503,6 +509,17 @@ class GraphWriter:
                     e.url_fragment = $url_fragment, e.last_seen_at = $now
                 WITH e, coalesce(e.sources, []) AS _cur
                 SET e.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
+                WITH e, coalesce(e.tech, []) AS _tech
+                SET e.tech = _tech + [x IN $tech WHERE NOT x IN _tech]
+                WITH e, coalesce(e.products, []) AS _prod
+                SET e.products = _prod + [x IN $products WHERE NOT x IN _prod]
+                WITH e, coalesce(e.vendors, []) AS _vend
+                SET e.vendors = _vend + [x IN $vendors WHERE NOT x IN _vend]
+                WITH e
+                SET e.fingerprint_severity = CASE WHEN $fingerprint_severity <> ''
+                      THEN $fingerprint_severity ELSE e.fingerprint_severity END,
+                    e.favicon_hash = CASE WHEN $favicon_hash <> ''
+                      THEN $favicon_hash ELSE e.favicon_hash END
                 WITH e
                 SET e.changed_at = CASE WHEN size($changed_fields) > 0 THEN $now ELSE e.changed_at END,
                     e.changed_fields = CASE WHEN size($changed_fields) > 0
@@ -524,6 +541,10 @@ class GraphWriter:
                 changed_fields=changed_fields,
                 source=source,
                 url_fragment=url_fragment,
+                products=products or [],
+                vendors=vendors or [],
+                fingerprint_severity=fingerprint_severity,
+                favicon_hash=favicon_hash,
                 now=now,
             )
             # 建立关系链
@@ -708,6 +729,106 @@ class GraphWriter:
             )
             return {"id": file_id}
 
+    def write_api_endpoint(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        parent_id: str = "",
+        file_id: str = "",
+        status_code: int = 0,
+        content_type: str = "",
+        params: list[str] | None = None,
+        param_source: str = "",
+        api_signals: list[str] | None = None,
+        from_js: str = "",
+        source: str = "",
+    ) -> dict[str, Any]:
+        """幂等写入 ApiEndpoint 节点（katana 爬取发现的接口）。
+
+        设计原则：全量记录爬到的接口，不做激进过滤；命中的判定信号存入
+        api_signals，供后续 LLM 读图分析。遵守项目脱敏规范——params 只存
+        参数名，绝不存参数值。
+
+        关系：
+          - HTTPEndpoint -[:EXPOSES_API]-> ApiEndpoint（接口所属站点）
+          - File -[:DEFINES_API]-> ApiEndpoint（接口在某 JS 文件中被发现）
+
+        参数：
+          - url: 接口完整 URL（normalize 去 fragment 后作为身份的一部分）
+          - method: HTTP 方法（GET/POST/...）
+          - parent_id: 所属 HTTPEndpoint 的 id
+          - file_id: 发现该接口的 File（JS）节点 id（可选）
+          - params: 参数名列表，仅名称不含值（脱敏）
+          - param_source: 参数位置 query | body | form
+          - api_signals: 命中的接口判定信号 is_api_path|is_json|non_get|from_js
+          - from_js: 出处 JS 文件 URL（溯源用，前端展示友好）
+        """
+        import hashlib
+
+        normalized = normalize_url(url) or url
+        path = ""
+        try:
+            from urllib.parse import urlsplit
+
+            path = urlsplit(normalized).path or normalized
+        except Exception:
+            path = normalized
+
+        method = (method or "GET").upper()
+        api_id = f"api:{hashlib.md5(f'{method}:{normalized}'.encode()).hexdigest()[:16]}"
+        now = _now_iso()
+        param_list = sorted(set(params or []))
+        signal_list = sorted(set(api_signals or []))
+
+        with self._driver.session() as session:
+            session.run(
+                """
+                MERGE (a:ApiEndpoint {id: $api_id})
+                  ON CREATE SET
+                    a.url = $url, a.path = $path, a.method = $method,
+                    a.status_code = $status_code, a.content_type = $content_type,
+                    a.params = $params, a.param_source = $param_source,
+                    a.api_signals = $api_signals, a.from_js = $from_js,
+                    a.sources = [$source], a.first_seen_at = $now, a.created_at = $now
+                  ON MATCH SET
+                    a.status_code = $status_code, a.content_type = $content_type,
+                    a.param_source = CASE WHEN $param_source <> '' THEN $param_source ELSE a.param_source END,
+                    a.from_js = CASE WHEN $from_js <> '' THEN $from_js ELSE a.from_js END,
+                    a.last_seen_at = $now
+                WITH a, coalesce(a.params, []) AS _p, coalesce(a.api_signals, []) AS _s
+                SET a.params = _p + [x IN $params WHERE NOT x IN _p],
+                    a.api_signals = _s + [x IN $api_signals WHERE NOT x IN _s]
+                WITH a, coalesce(a.sources, []) AS _cur
+                SET a.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
+                """,
+                api_id=api_id, url=normalized, path=path, method=method,
+                status_code=status_code, content_type=content_type,
+                params=param_list, param_source=param_source,
+                api_signals=signal_list, from_js=from_js, source=source, now=now,
+            )
+            # 关系：所属站点
+            if parent_id:
+                session.run(
+                    """
+                    MATCH (a:ApiEndpoint {id: $api_id})
+                    MATCH (parent) WHERE parent.id = $parent_id
+                    MERGE (parent)-[:EXPOSES_API]->(a)
+                    """,
+                    api_id=api_id, parent_id=parent_id,
+                )
+            # 关系：出处 JS 文件
+            if file_id:
+                session.run(
+                    """
+                    MATCH (a:ApiEndpoint {id: $api_id})
+                    MATCH (f:File {id: $file_id})
+                    MERGE (f)-[:DEFINES_API]->(a)
+                    """,
+                    api_id=api_id, file_id=file_id,
+                )
+            return {"id": api_id}
+
     def write_secret(
         self,
         file_id: str,
@@ -784,6 +905,10 @@ class GraphWriter:
                     asset_id=asset_id or f.get("asset_id", ""),
                     source=f.get("source", ""),
                     url_fragment=f.get("url_fragment", ""),
+                    products=f.get("products", []),
+                    vendors=f.get("vendors", []),
+                    fingerprint_severity=f.get("fingerprint_severity", ""),
+                    favicon_hash=f.get("favicon_hash", ""),
                 )
             elif ftype == "vulnerability":
                 result = self.write_vulnerability(
@@ -833,6 +958,20 @@ class GraphWriter:
                     content_hash=f.get("content_hash", ""),
                     source=f.get("source", ""),
                 )
+            elif ftype == "api_endpoint":
+                result = self.write_api_endpoint(
+                    url=f.get("url", ""),
+                    method=f.get("method", "GET"),
+                    parent_id=f.get("parent_id", ""),
+                    file_id=f.get("file_id", ""),
+                    status_code=f.get("status_code", 0),
+                    content_type=f.get("content_type", ""),
+                    params=f.get("params", []),
+                    param_source=f.get("param_source", ""),
+                    api_signals=f.get("api_signals", []),
+                    from_js=f.get("from_js", ""),
+                    source=f.get("source", ""),
+                )
             if result:
                 results.append(result)
         return results
@@ -853,9 +992,17 @@ class GraphWriter:
             """
             if asset_id:
                 query += """
-                    AND EXISTS {
-                        MATCH (e)<-[:EXPOSES*1..5]-(:Port)-[:HAS_PORT]->(:IP)-[:RESOLVES_TO]->(:Subdomain)-[:HAS_SUB]->(:RootDomain)-[:HAS_ROOT]->(:Asset {id: $asset_id})
-                    }
+                    AND (
+                        EXISTS {
+                            MATCH (:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)
+                              -[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)
+                              -[:HAS_PORT]->(:Port)-[:EXPOSES]->(e)
+                        }
+                        OR EXISTS {
+                            MATCH (:Asset {id: $asset_id})-[:HAS_IP]->(:IP)
+                              -[:HAS_PORT]->(:Port)-[:EXPOSES]->(e)
+                        }
+                    )
                 """
             query += """
                 RETURN e.id AS id, e.url AS url, e.crawl_status AS status,

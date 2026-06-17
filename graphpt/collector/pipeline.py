@@ -369,6 +369,28 @@ _BATCH_TARGETS: dict[str, dict[str, Any]] = {
         """,
         "mapping": {"url": "{urls_file}"},
     },
+    "observer_ward": {
+        "query": """
+            MATCH (a:Asset {id: $asset_id})
+            CALL {
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
+            }
+            WITH DISTINCT ep
+            WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+            RETURN ep.url AS url, ep.id AS parent_id
+        """,
+        "mapping": {"url": "{url}", "parent_id": "{parent_id}"},
+    },
     "katana": {
         "query": """
             MATCH (a:Asset {id: $asset_id})
