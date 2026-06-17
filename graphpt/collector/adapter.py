@@ -1274,8 +1274,10 @@ class ObserverWardAdapter(BaseAdapter):
                 if not url:
                     continue
 
-                # tech 名 + product/vendor/severity 从 fingerprints 提取
-                tech: list[str] = [str(n) for n in (result.get("name") or []) if n]
+                # tech 名优先取 fingerprints 里的干净 info.name；
+                # result.name[] / template 用的是规则 id（可能带 -序号 后缀），
+                # 仅在没有 fingerprints 时作回退并剥掉后缀。
+                tech: list[str] = []
                 products: list[str] = []
                 vendors: list[str] = []
                 severity = ""
@@ -1287,12 +1289,12 @@ class ObserverWardAdapter(BaseAdapter):
                             continue
                         info = mr.get("info") if isinstance(mr.get("info"), dict) else {}
                         meta = info.get("metadata") if isinstance(info.get("metadata"), dict) else {}
+                        clean = str(info.get("name") or "").strip()
                         prod = str(meta.get("product") or "").strip()
                         vend = str(meta.get("vendor") or "").strip()
                         sev = str(info.get("severity") or "").strip()
-                        tmpl = str(mr.get("template") or "").strip()
-                        if tmpl and tmpl not in tech:
-                            tech.append(tmpl)
+                        if clean and clean not in tech:
+                            tech.append(clean)
                         if prod and prod not in products:
                             products.append(prod)
                         # vendor "00_unknown" 是占位，忽略
@@ -1301,9 +1303,12 @@ class ObserverWardAdapter(BaseAdapter):
                         if sev and not severity:
                             severity = sev
 
-                # 去重保序 tech
-                seen: set[str] = set()
-                tech = [t for t in tech if not (t in seen or seen.add(t))]
+                # 回退：无 fingerprints 时用 result.name[]，剥掉 EHole 规则 id 的 -序号 后缀
+                if not tech:
+                    for n in (result.get("name") or []):
+                        name = re.sub(r"-\d+$", "", str(n)).strip()
+                        if name and name not in tech:
+                            tech.append(name)
 
                 findings.append({
                     "type": "http_endpoint",
