@@ -20,9 +20,11 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
+from graphpt.common.asset_identity import normalize_host_port, normalize_url
 from graphpt.collector.adapter import ADAPTER_MAP
 from graphpt.collector.app import app
 from graphpt.collector.neo4j_client import get_graph_writer
@@ -72,6 +74,73 @@ def _target_labels_from_findings(findings: list[dict[str, Any]]) -> set[str]:
     return labels
 
 
+def _looks_like_ip(value: str) -> bool:
+    from ipaddress import ip_address
+
+    try:
+        ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _scan_target_node_ids(asset_id: str, tool: str, target_label: str) -> list[str]:
+    """把 ScanRun target 字符串映射到图节点 id，用于建立 RAN 关系。"""
+    label = str(target_label or "").strip()
+    node_ids: list[str] = []
+
+    def add(node_id: str) -> None:
+        if node_id and node_id not in node_ids:
+            node_ids.append(node_id)
+
+    if tool == "enscan" and asset_id:
+        add(asset_id)
+    if not label:
+        return node_ids
+
+    known_prefixes = ("ep:", "sub:", "ip:", "root:", "port:", "vuln:", "file:", "dir:")
+    if label.startswith(known_prefixes):
+        add(label)
+        return node_ids
+
+    if "|" in label:
+        host, _, _ports = label.partition("|")
+        host = host.strip()
+        if host:
+            add(f"ip:{host}")
+        return node_ids
+
+    if "://" in label:
+        normalized = normalize_url(label)
+        if normalized:
+            add(f"ep:GET:{normalized}")
+            return node_ids
+
+    host_port = normalize_host_port(label)
+    if host_port:
+        try:
+            parsed = urlsplit(f"//{host_port}")
+            host = parsed.hostname or ""
+            port = parsed.port
+        except ValueError:
+            host = ""
+            port = None
+        if host and port:
+            if _looks_like_ip(host):
+                add(f"port:ip:{host}:{port}/tcp")
+                add(f"ip:{host}")
+            else:
+                add(f"sub:{host}")
+        return node_ids
+
+    if _looks_like_ip(label):
+        add(f"ip:{label}")
+    elif "." in label:
+        add(f"root:{label}")
+        add(f"sub:{label}")
+    return node_ids
+
+
 def _unresolved_placeholders(command: str) -> list[str]:
     return sorted(set(re.findall(r"\{[A-Za-z_]\w*\}", command or "")))
 
@@ -98,6 +167,30 @@ def _batch_placeholder_in(command: str) -> str | None:
         if placeholder in command:
             return placeholder
     return None
+
+
+def _batch_target_value(target: dict[str, Any], batch_placeholder: str) -> Any:
+    if batch_placeholder in target:
+        return target[batch_placeholder]
+    bare_key = batch_placeholder.strip("{}")
+    if bare_key in target:
+        return target[bare_key]
+    for key, value in target.items():
+        if str(key).startswith("__"):
+            continue
+        return value
+    return ""
+
+
+def _batch_target_metadata(target: dict[str, Any], batch_placeholder: str) -> dict[str, Any]:
+    bare_key = batch_placeholder.strip("{}")
+    metadata: dict[str, Any] = {}
+    for key, value in target.items():
+        skey = str(key)
+        if skey.startswith("__") or skey in (batch_placeholder, bare_key):
+            continue
+        metadata[skey] = value
+    return metadata
 
 
 def _load_tools_config() -> dict[str, Any]:
@@ -182,6 +275,14 @@ _BATCH_TARGETS: dict[str, dict[str, Any]] = {
         "mapping": {"domain": "{targets_file}"},
     },
     "subfinder": {
+        "query": """
+            MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
+            WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = rd.value }
+            RETURN rd.value AS domain
+        """,
+        "mapping": {"domain": "{targets_file}"},
+    },
+    "urlfinder": {
         "query": """
             MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
             WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = rd.value }
@@ -282,27 +383,9 @@ _BATCH_TARGETS: dict[str, dict[str, Any]] = {
             }
             WITH DISTINCT ep
             WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
-            RETURN ep.url AS url
+            RETURN ep.url AS url, ep.id AS parent_id
         """,
-        "mapping": {"url": "{targets_file}"},
-    },
-    "dirbuster": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})
-            CALL {
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-            }
-            WITH DISTINCT ep
-            WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
-            RETURN ep.url AS url
-        """,
-        "mapping": {"url": "{url}"},
+        "mapping": {"url": "{url}", "parent_id": "{parent_id}"},
     },
     "ffuf": {
         "query": """
@@ -318,9 +401,9 @@ _BATCH_TARGETS: dict[str, dict[str, Any]] = {
             }
             WITH DISTINCT ep
             WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
-            RETURN ep.url AS url
+            RETURN ep.url AS url, ep.id AS parent_id
         """,
-        "mapping": {"url": "{url}"},
+        "mapping": {"url": "{url}", "parent_id": "{parent_id}"},
     },
     "gobuster": {
         "query": """
@@ -336,9 +419,9 @@ _BATCH_TARGETS: dict[str, dict[str, Any]] = {
             }
             WITH DISTINCT ep
             WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
-            RETURN ep.url AS url
+            RETURN ep.url AS url, ep.id AS parent_id
         """,
-        "mapping": {"url": "{url}"},
+        "mapping": {"url": "{url}", "parent_id": "{parent_id}"},
     },
     "nuclei": {
         "query": """
@@ -641,19 +724,33 @@ class PipelineExecutor:
     def _mark_scanned(self, tool: str, target_label: str, findings_count: int = 0) -> None:
         """标记一个目标已被某工具扫描。"""
         try:
-            from graphpt.collector.neo4j_client import get_graph_writer
             w = get_graph_writer()
             now = _now_iso()
             import hashlib
             label = target_label or "default"
             run_id = f"scan:target:{hashlib.md5(f'{tool}:{label}'.encode()).hexdigest()[:16]}"
+            target_node_ids = _scan_target_node_ids(self.asset_id, tool, label)
             with w._driver.session() as s:
                 s.run(
                     "MERGE (sr:ScanRun {id: $rid}) "
                     "SET sr.tool = $tool, sr.target = $target, "
-                    "    sr.findings_count = $fc, sr.last_run_at = $now, sr.created_at = coalesce(sr.created_at, $now)",
+                    "    sr.findings_count = $fc, sr.last_run_at = $now, sr.finished_at = $now, "
+                    "    sr.started_at = coalesce(sr.started_at, $now), "
+                    "    sr.created_at = coalesce(sr.created_at, $now)",
                     rid=run_id, tool=tool, target=label, fc=findings_count, now=now,
                 )
+                if target_node_ids:
+                    s.run(
+                        """
+                        MATCH (sr:ScanRun {id: $rid})
+                        UNWIND $node_ids AS node_id
+                        MATCH (n)
+                        WHERE n.id = node_id
+                        MERGE (sr)-[:RAN]->(n)
+                        """,
+                        rid=run_id,
+                        node_ids=target_node_ids,
+                    )
         except Exception:
             pass
 
@@ -758,32 +855,57 @@ class PipelineExecutor:
         # 判断模式：{targets_file}/{domains_file}/{urls_file} → 批量文件，否则迭代
         batch_ph = _batch_placeholder_in(cmd_template)
 
-        batch_tmp_path = ""
         batch_ctx_key = ""
-        batch_target_labels: list[str] = []
+        batch_tmp_paths: list[str] = []
         if batch_ph:
             # ---- 批量模式：所有目标写入临时文件，工具一把梭 ----
-            all_values = []
-            for tgt in targets:
-                val = tgt.get(list(tgt.keys())[0], "") if tgt else ""
+            batch_ctx_key = batch_ph.strip("{}")
+
+            def _values_from_target(target: dict[str, Any]) -> list[str]:
+                val = _batch_target_value(target, batch_ph) if target else ""
                 if isinstance(val, list):
-                    all_values.extend(str(v) for v in val)
-                elif val:
-                    all_values.append(str(val))
-            batch_target_labels = list(dict.fromkeys(all_values))
-            if not all_values:
+                    return [str(v) for v in val if v]
+                return [str(val)] if val else []
+
+            def _batch_run(values: list[str], metadata: dict[str, Any] | None = None) -> dict[str, Any] | None:
+                unique_values = list(dict.fromkeys(values))
+                if not unique_values:
+                    return None
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".txt", delete=False,
+                    encoding="utf-8", prefix="graphpt_tgts_"
+                ) as tmp:
+                    for v in unique_values:
+                        tmp.write(v + "\n")
+                    batch_tmp_paths.append(tmp.name)
+                return {
+                    **(metadata or {}),
+                    "__batch__": tmp.name,
+                    "__batch_labels__": unique_values,
+                }
+
+            has_metadata = any(_batch_target_metadata(tgt, batch_ph) for tgt in targets if tgt)
+            batch_targets: list[dict[str, Any]] = []
+            if has_metadata:
+                for tgt in targets:
+                    run_target = _batch_run(
+                        _values_from_target(tgt),
+                        _batch_target_metadata(tgt, batch_ph),
+                    )
+                    if run_target:
+                        batch_targets.append(run_target)
+            else:
+                all_values = []
+                for tgt in targets:
+                    all_values.extend(_values_from_target(tgt))
+                run_target = _batch_run(all_values)
+                if run_target:
+                    batch_targets.append(run_target)
+
+            if not batch_targets:
                 return {"stage": index, "name": stage_name, "tool": tool, "status": "ok",
                         "findings": 0, "note": "no targets"}
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", delete=False,
-                encoding="utf-8", prefix="graphpt_tgts_"
-            ) as tmp:
-                for v in all_values:
-                    tmp.write(v + "\n")
-                batch_ctx_key = batch_ph.strip("{}")
-                self.ctx[batch_ctx_key] = tmp.name
-                batch_tmp_path = tmp.name
-            targets = [{"__batch__": tmp.name}]  # 只跑一轮
+            targets = batch_targets
 
         total_findings = 0
         total_written = 0
@@ -802,6 +924,8 @@ class PipelineExecutor:
         for tgt in targets:
             # 将目标数据填入 ctx。
             self.ctx.pop("parent_id", None)
+            if batch_ph is not None:
+                self.ctx[batch_ctx_key] = str(tgt.get("__batch__", ""))
             self._apply_target_to_ctx(self.ctx, tgt)
 
             # 仅非批量模式才从上下文临时生成 urls_file，避免覆盖 httpx 的批量输入文件。
@@ -904,8 +1028,13 @@ class PipelineExecutor:
                                 self.ctx["_last_output_file"] = str(json_files[0])
                     except Exception:
                         pass
-                    findings = adapter.parse(raw_input, asset_id=self.asset_id,
-                                             parent_id=self.ctx.get("parent_id", ""))
+                    parse_ctx = dict(self.ctx)
+                    parse_ctx.update(
+                        asset_id=self.asset_id,
+                        parent_id=self.ctx.get("parent_id", ""),
+                        target_url=self.ctx.get("url", ""),
+                    )
+                    findings = adapter.parse(raw_input, **parse_ctx)
                 except Exception as exc:
                     errors.append({
                         "tool": tool,
@@ -941,6 +1070,7 @@ class PipelineExecutor:
 
             # 标记已扫描：批量模式按原始目标逐条标记，不能用临时文件路径。
             if batch_ph is not None:
+                batch_target_labels = [str(label) for label in tgt.get("__batch_labels__", []) if label]
                 finding_labels = _target_labels_from_findings(findings)
                 labels_to_mark = (
                     [label for label in batch_target_labels if label in finding_labels]
@@ -958,11 +1088,12 @@ class PipelineExecutor:
 
         if batch_ctx_key:
             self.ctx.pop(batch_ctx_key, None)
-        if batch_tmp_path and os.path.isfile(batch_tmp_path):
-            try:
-                os.unlink(batch_tmp_path)
-            except OSError:
-                pass
+        for batch_tmp_path in batch_tmp_paths:
+            if batch_tmp_path and os.path.isfile(batch_tmp_path):
+                try:
+                    os.unlink(batch_tmp_path)
+                except OSError:
+                    pass
 
         if errors and total_findings == 0 and total_written == 0:
             status = "error"
@@ -998,6 +1129,8 @@ class PipelineExecutor:
     @staticmethod
     def _apply_target_to_ctx(ctx: dict[str, Any], target: dict[str, Any]) -> None:
         for ph, val in target.items():
+            if str(ph).startswith("__"):
+                continue
             key = str(ph).strip("{}")
             if isinstance(val, list):
                 ctx[key + "s"] = val

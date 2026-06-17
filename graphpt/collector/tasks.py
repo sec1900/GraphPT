@@ -1,37 +1,22 @@
 """采集任务定义。
 
-每个任务：
-  1. 执行工具 → 获取原始结果
-  2. 适配器转换 → Finding 对象
-  3. GraphWriter 写入 Neo4j（幂等 MERGE + 变化感知 diff）
+每个任务负责选择入口目标，实际工具执行、适配器转换和入图统一交给 PipelineExecutor。
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
 import os
-import re
 import shutil
-import socket
-import subprocess
 import sys
-import tempfile
-import time
 from pathlib import Path
 
 import yaml
 
-from graphpt.collector.adapter import NmapAdapter, SubfinderAdapter
 from graphpt.collector.app import app
 from graphpt.collector.neo4j_client import (
     get_graph_writer,
-    list_ips_without_ports,
     list_root_domains,
-    list_subdomains_for_fingerprint,
-    list_subdomains_without_ip,
     list_unverified_nodes,
-    seed_root_domains,
 )
 
 
@@ -91,9 +76,6 @@ def _find_tool(name: str) -> str | None:
 
 # ---- 命令配置 ----
 
-_config_cache: dict | None = None
-_config_mtime: float = 0.0
-
 
 def _load_all_tools_config() -> dict[str, dict]:
     """扫描 tools/*/tool.yaml，按目录名作为工具名构建配置字典。"""
@@ -107,60 +89,6 @@ def _load_all_tools_config() -> dict[str, dict]:
         except (OSError, yaml.YAMLError):
             continue
     return tools
-
-
-def _get_tools_max_mtime() -> float:
-    """获取所有 tool.yaml 中最新的 mtime。"""
-    max_mtime = 0.0
-    for tool_yaml in _PROJECT_TOOLS_DIR.glob("*/tool.yaml"):
-        try:
-            mt = tool_yaml.stat().st_mtime
-            if mt > max_mtime:
-                max_mtime = mt
-        except OSError:
-            continue
-    return max_mtime
-
-
-def _load_config() -> dict:
-    """从 tools/*/tool.yaml 加载工具配置（热加载）。"""
-    global _config_cache, _config_mtime
-    mtime = _get_tools_max_mtime()
-    if _config_cache is not None and mtime == _config_mtime:
-        return _config_cache
-    _config_cache = {"tools": _load_all_tools_config()}
-    _config_mtime = mtime
-    return _config_cache
-
-
-def _build_command(tool_name: str, **kwargs: str) -> list[str]:
-    """从 tools/<name>/tool.yaml 读取命令模板，替换 {占位符}。"""
-    config = _load_config()
-    tools = config.get("tools", {})
-    tool_cfg = tools.get(tool_name, {}) if isinstance(tools, dict) else {}
-    template = tool_cfg.get("command", "")
-
-    if not template:
-        raise RuntimeError(
-            f"no command for tool={tool_name} in tools/{tool_name}/tool.yaml"
-        )
-
-    bin_path = _find_tool(tool_name)
-    if not bin_path:
-        raise RuntimeError(f"tool_not_found: {tool_name}")
-
-    kwargs.setdefault("bin", bin_path)
-    kwargs["bin"] = bin_path
-
-    def _sub(m: re.Match) -> str:
-        key = m.group(1)
-        val = kwargs.get(key, m.group(0))
-        if key == "bin" and " " in val:
-            return f'"{val}"'
-        return val
-
-    expanded = re.sub(r"\{(\w+)\}", _sub, template)
-    return _split_command(expanded)
 
 
 def _split_command(s: str) -> list[str]:
@@ -270,337 +198,230 @@ def _seed_asset_from_targets(asset_id: str) -> dict[str, int]:
     return counts
 
 
+def _run_single_tool_pipeline(
+    tool: str,
+    targets: list[dict[str, object]] | None = None,
+    *,
+    asset_id: str,
+    stage_name: str = "",
+    params: dict[str, str] | None = None,
+) -> dict:
+    """通过 PipelineExecutor 运行单工具任务，避免任务层维护第二套扫描逻辑。"""
+    from graphpt.collector.pipeline import PipelineExecutor, _tool_command
+    target_overrides = {tool: targets} if targets else None
+
+    executor = PipelineExecutor(
+        {"stages": [{"name": stage_name or tool, "tool": tool, "command": _tool_command(tool)}]},
+        asset_id=asset_id,
+        params=params,
+        target_overrides=target_overrides,
+    )
+    result = executor.execute()
+    return {
+        "status": result.get("status", "error"),
+        "tool": tool,
+        "targets": len(targets or []),
+        "result": result,
+    }
+
+
+def _run_inline_pipeline(
+    stages: list[dict[str, str]],
+    target_overrides: dict[str, list[dict[str, object]]],
+    *,
+    asset_id: str,
+    params: dict[str, str] | None = None,
+) -> dict:
+    from graphpt.collector.pipeline import PipelineExecutor, _tool_command
+
+    pipeline_def = {
+        "stages": [
+            {**stage, "command": _tool_command(stage["tool"])}
+            for stage in stages
+        ]
+    }
+    executor = PipelineExecutor(
+        pipeline_def,
+        asset_id=asset_id,
+        params=params,
+        target_overrides=target_overrides,
+    )
+    return executor.execute()
+
+
+def _pipeline_counts(result: dict) -> tuple[int, int]:
+    findings = 0
+    written = 0
+    for stage in result.get("stages", []):
+        if not isinstance(stage, dict):
+            continue
+        if stage.get("type") == "parallel":
+            for detail in stage.get("details", []):
+                if isinstance(detail, dict):
+                    findings += int(detail.get("findings") or 0)
+                    written += int(detail.get("written") or 0)
+        else:
+            findings += int(stage.get("findings") or 0)
+            written += int(stage.get("written") or 0)
+    return findings, written
+
+
+# ---- 被动情报源 (纯 API, 无需外部二进制) ----
+
+def _query_crtsh(domain: str, *, timeout: float = 30.0) -> list[str]:
+    """查询 crt.sh 证书透明日志, 返回该根域名下发现的子域名列表(去重, 已规范化)。
+
+    crt.sh 公开 JSON 接口: https://crt.sh/?q=%25.<domain>&output=json
+    不直接访问目标, 属被动收集。
+    """
+    import json
+    import urllib.request
+    import urllib.error
+
+    url = f"https://crt.sh/?q=%25.{domain}&output=json"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (GraphPT passive recon)"})
+    subs: set[str] = set()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        records = json.loads(raw)
+    except (urllib.error.URLError, json.JSONDecodeError, ValueError, TimeoutError):
+        return []
+
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        # name_value 可能含多行(SAN), 每行一个域名
+        for name in str(rec.get("name_value", "")).splitlines():
+            name = name.strip().strip(".").lower()
+            # 过滤通配符、空、非该域名
+            if not name or name.startswith("*"):
+                continue
+            if name == domain or name.endswith("." + domain):
+                subs.add(name)
+    return sorted(subs)
+
+
 # ---- L1 采集 ----
 
 @app.task(bind=True, max_retries=3, default_retry_delay=60)
-def subdomain_enum(self, asset_id: str | None = None):
-    """子域名枚举 — 定时 / 事件触发。
+def passive_recon(self, asset_id: str | None = None):
+    """被动信息收集 — enscan + crt.sh + urlfinder。
 
-    流程：
-      1. 从 Neo4j 获取当前资产已登记的根域名
-      2. 若无根域名，从 targets.yaml 种子填充
-      3. 逐根域名调用 subfinder -d <domain> -oJ
-      4. 解析 JSON 输出 → 写入 Neo4j
-      5. 新发现子域名 → 级联触发 on_new_subdomain
+    全程不直接访问目标主机, 仅查询第三方公开数据源。
+    阶段1: enscan 从企业名发现根域名(走 pipeline 入图)
+    阶段2: crt.sh API 从每个根域名发现子域名(直接入图)
+    阶段3: urlfinder 从每个根域名被动收集历史 URL → HTTPEndpoint / File(走 pipeline 入图)
     """
     asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
 
-    # 1. 获取根域名（首次运行从 targets.yaml 种子填充）
+    # 阶段1: enscan — 企业名 → 根域名/ICP/分支 (被动 OSINT)
+    self.update_state(state="PROGRESS", meta={"stage": "enscan"})
+    enscan_result = _run_single_tool_pipeline(
+        "enscan",
+        asset_id=asset_id,
+        stage_name="company_to_root_domain",
+    )
+    f_enscan, w_enscan = _pipeline_counts(enscan_result["result"])
+
+    # 阶段2: crt.sh — 根域名 → 子域名 (证书透明日志, 纯 API)
     domains = list_root_domains(asset_id)
-    if not domains:
-        seeded = _seed_asset_from_targets(asset_id)
-        if seeded.get("domains") or seeded.get("subdomains"):
-            self.update_state(state="PROGRESS", meta={"seeded": seeded})
-            domains = list_root_domains(asset_id)
-
-    if not domains:
-        return {
-            "status": "skipped",
-            "reason": "no_root_domains",
-            "hint": "在 Neo4j 中建立 RootDomain 节点，或在工作区放置 targets.yaml",
-        }
-
-    # 2. 构建命令
     writer = get_graph_writer()
-    adapter = SubfinderAdapter()
-    all_findings: list[dict] = []
-    new_subdomains: list[dict] = []
-
-    # 3. 逐根域名运行 subfinder（命令来自 tools/subfinder/tool.yaml）
+    crt_found = 0
+    crt_written = 0
+    crt_detail: dict[str, int] = {}
     for domain in domains:
-        self.update_state(state="PROGRESS", meta={"domain": domain, "stage": "subfinder"})
+        self.update_state(state="PROGRESS", meta={"stage": "crt.sh", "domain": domain})
+        subs = _query_crtsh(domain)
+        crt_found += len(subs)
+        for sub in subs:
+            r = writer.write_subdomain(sub, asset_id, root_domain=domain, source="crt.sh")
+            if r.get("created"):
+                crt_written += 1
+        crt_detail[domain] = len(subs)
 
-        cmd = _build_command("subfinder", domain=domain)
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                timeout=300,
-                text=True,
-                env={**os.environ, "HOME": os.environ.get("USERPROFILE", os.path.expanduser("~"))},
-            )
-        except subprocess.TimeoutExpired:
-            continue
-
-        if proc.returncode != 0 and not proc.stdout.strip():
-            continue
-
-        # 4. 解析输出
-        findings = adapter.parse(
-            proc.stdout,
-            root_domain=domain,
-            asset_id=asset_id,
-        )
-        if not findings:
-            continue
-
-        # 5. 批量写入（跟踪新建子域名）
-        results = writer.write_batch(findings, asset_id=asset_id)
-        for finding, result in zip(findings, results):
-            all_findings.append(finding)
-            if result.get("created"):
-                new_subdomains.append(finding)
-
-    # 6. 级联触发新子域名
-    cascaded = 0
-    for f in new_subdomains:
-        on_new_subdomain.delay(f["value"], asset_id)
-        cascaded += 1
+    # 阶段3: urlfinder — 根域名 → 历史 URL (HTTPEndpoint / File, 走 pipeline 入图)
+    self.update_state(state="PROGRESS", meta={"stage": "urlfinder"})
+    urlfinder_result = _run_single_tool_pipeline(
+        "urlfinder",
+        asset_id=asset_id,
+        stage_name="root_domain_to_urls",
+    )
+    f_url, w_url = _pipeline_counts(urlfinder_result["result"])
 
     return {
         "status": "ok",
-        "domains_scanned": len(domains),
-        "findings": len(all_findings),
-        "new_subdomains": len(new_subdomains),
-        "cascaded": cascaded,
+        "mode": "passive",
+        "enscan": {"findings": f_enscan, "written": w_enscan},
+        "crtsh": {"domains": len(domains), "found": crt_found, "written": crt_written, "per_domain": crt_detail},
+        "urlfinder": {"findings": f_url, "written": w_url},
     }
 
 
 @app.task(bind=True, max_retries=3, default_retry_delay=60)
 def dns_resolve(self, asset_id: str | None = None):
-    """DNS 解析 — 定时 / 新域名事件触发。
-
-    流程：
-      1. 查询尚未解析 DNS 的 Subdomain
-      2. 逐个子域名 socket.getaddrinfo 解析
-      3. 写入 IP 节点（自动级联变化感知 diff）
-    """
+    """DNS 解析 — 定时 / 手动触发。"""
     asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
-    pending = list_subdomains_without_ip(asset_id)
-
-    if not pending:
-        return {"status": "skipped", "reason": "all_resolved"}
-
-    writer = get_graph_writer()
-    resolved = 0
-    failed = 0
-    ips_written: list[str] = []
-
-    for sub in pending:
-        subdomain = sub["value"]
-        sub_id = sub["id"]
-
-        ips: list[str] = []
-        for family in (socket.AF_INET, socket.AF_INET6):
-            try:
-                addrs = socket.getaddrinfo(subdomain, None, family=family, type=socket.SOCK_STREAM)
-                for addr in addrs:
-                    ip = addr[4][0]
-                    if ip not in ips:
-                        ips.append(ip)
-            except socket.gaierror:
-                continue
-
-        if ips:
-            for ip in ips:
-                result = writer.write_ip(ip, sub_id, asset_id=asset_id, source="dns_resolve")
-                ips_written.append(f"{subdomain} -> {ip}")
-            resolved += 1
-        else:
-            failed += 1
-
-    # 级联触发 web_fingerprint
-    if resolved > 0:
-        web_fingerprint.delay(asset_id=asset_id)
+    self.update_state(state="PROGRESS", meta={"stage": "dnsx"})
+    task_result = _run_single_tool_pipeline(
+        "dnsx",
+        asset_id=asset_id,
+        stage_name="subdomain_to_ip",
+    )
+    findings, written = _pipeline_counts(task_result["result"])
 
     return {
-        "status": "ok",
-        "pending": len(pending),
-        "resolved": resolved,
-        "failed": failed,
-        "samples": ips_written[:20],
+        "status": task_result["status"],
+        "mode": "pipeline",
+        "findings": findings,
+        "written": written,
+        "result": task_result["result"],
     }
 
 
 @app.task(bind=True, max_retries=3, default_retry_delay=60)
 def web_fingerprint(self, asset_id: str | None = None):
-    """Web 指纹 (L1) — 对所有已解析子域名做 HTTP/HTTPS 探测。
-
-    流程：
-      1. 查询已解析但尚无 HTTPEndpoint 的 Subdomain
-      2. 逐个子域名发送 HTTP GET（Python httpx）
-      3. 计算 body hash / 提取标题 / SSL 证书 / 响应头
-      4. 写入 HTTPEndpoint 节点
-    """
-    try:
-        import httpx
-    except ImportError:
-        raise RuntimeError("httpx_not_installed — pip install httpx")
-
+    """Web 指纹 — 通过 httpx 工具探测 HTTP 端点。"""
     asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
-    pending = list_subdomains_for_fingerprint(asset_id)
-
-    if not pending:
-        return {"status": "skipped", "reason": "all_fingerprinted"}
-
-    writer = get_graph_writer()
-    probed = 0
-    errors = 0
-    results: list[dict] = []
-
-    client = httpx.Client(
-        timeout=httpx.Timeout(15.0, connect=10.0),
-        limits=httpx.Limits(max_connections=10),
-        follow_redirects=True,
-        verify=False,
-        headers={"User-Agent": "GraphPT/1.0 (security-scanner)"},
+    self.update_state(state="PROGRESS", meta={"stage": "httpx"})
+    task_result = _run_single_tool_pipeline(
+        "httpx",
+        asset_id=asset_id,
+        stage_name="port_to_endpoint",
     )
-
-    for sub in pending:
-        subdomain = sub["value"]
-        for scheme in ("https", "http"):
-            url = f"{scheme}://{subdomain}"
-            try:
-                resp = client.get(url)
-                body = resp.text
-                body_hash = hashlib.sha256(body.encode("utf-8", errors="replace")).hexdigest()
-
-                # 提取标题
-                title = ""
-                try:
-                    from bs4 import BeautifulSoup
-
-                    soup = BeautifulSoup(body, "html.parser")
-                    t = soup.title
-                    if t and t.string:
-                        title = t.string.strip()[:200]
-                except ImportError:
-                    import re
-
-                    m = re.search(r"<title[^>]*>([^<]+)</title>", body, re.IGNORECASE)
-                    if m:
-                        title = m.group(1).strip()[:200]
-
-                # SSL 证书信息
-                ssl_cert_cn = ""
-                ssl_cert_issuer = ""
-                if scheme == "https":
-                    try:
-                        import ssl
-
-                        cert = resp.extensions.get("ssl_object") if hasattr(resp, "extensions") else None
-                        if cert is None and hasattr(resp, "_request"):
-                            # Fallback: extract from underlying connection
-                            pass
-                    except Exception:
-                        pass
-
-                result = writer.write_http_endpoint(
-                    url=url,
-                    method="GET",
-                    parent_id=f"sub:{subdomain}",
-                    status_code=resp.status_code,
-                    title=title,
-                    body_hash=body_hash,
-                    content_length=len(resp.content),
-                    response_headers=dict(resp.headers),
-                    ssl_cert_cn=ssl_cert_cn,
-                    ssl_cert_issuer=ssl_cert_issuer,
-                    tech=[],
-                    crawl_status="success" if resp.status_code < 500 else "error",
-                    asset_id=asset_id,
-                    source="web_fingerprint",
-                )
-                results.append({"url": url, "status": resp.status_code, "title": title})
-                probed += 1
-
-            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout):
-                # 连接失败 — 记录不成功的节点
-                writer.write_http_endpoint(
-                    url=url,
-                    method="GET",
-                    parent_id=f"sub:{subdomain}",
-                    status_code=0,
-                    title="",
-                    body_hash="",
-                    content_length=0,
-                    crawl_status="error",
-                    asset_id=asset_id,
-                    source="web_fingerprint",
-                )
-                errors += 1
-                break  # 一个 scheme 失败就不再试另一个
-            except Exception:
-                errors += 1
-                break
-
-    client.close()
+    findings, written = _pipeline_counts(task_result["result"])
 
     return {
-        "status": "ok",
-        "pending": len(pending),
-        "probed": probed,
-        "errors": errors,
-        "samples": results[:20],
+        "status": task_result["status"],
+        "mode": "pipeline",
+        "findings": findings,
+        "written": written,
+        "result": task_result["result"],
     }
 
 
 @app.task(bind=True, max_retries=3, default_retry_delay=120)
 def port_scan(self, asset_id: str | None = None):
-    """端口扫描 — 每天一次，低速率。
-
-    流程:
-      1. 查询尚未扫描端口的 IP
-      2. 逐 IP 调用 nmap -sV -T2 --top-ports 1000 -oX -
-      3. NmapAdapter 解析 XML → Port/Service Finding
-      4. 批量写入 Neo4j
-      5. 级联触发 web_fingerprint（新 web 端口）
-    """
+    """端口扫描 — 通过 naabu 发现端口，再通过 nmap/httpx 识别服务。"""
     asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
-    pending = list_ips_without_ports(asset_id)
-
-    if not pending:
-        return {"status": "skipped", "reason": "all_scanned"}
-
-    writer = get_graph_writer()
-    adapter = NmapAdapter()
-    scanned = 0
-    ports_found = 0
-    errors = 0
-
-    for ip_info in pending:
-        ip = ip_info["value"]
-        ip_id = ip_info["id"]
-
-        self.update_state(state="PROGRESS", meta={"ip": ip, "stage": "nmap"})
-
-        cmd = _build_command("nmap", ip=ip)
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                timeout=600,  # 低速率扫描可能很慢
-                text=True,
-            )
-        except subprocess.TimeoutExpired:
-            errors += 1
-            continue
-
-        if proc.returncode != 0 or not proc.stdout.strip():
-            errors += 1
-            continue
-
-        # 解析 XML
-        findings = adapter.parse(proc.stdout, parent_id=ip_id, asset_id=asset_id)
-        if not findings:
-            scanned += 1
-            continue
-
-        # 批量写入 Port + Service
-        results = writer.write_batch(findings, asset_id=asset_id)
-        scanned += 1
-        ports_found += len(results)
-
-    # 发现新端口后级联指纹
-    if ports_found > 0:
-        web_fingerprint.delay(asset_id=asset_id)
+    self.update_state(state="PROGRESS", meta={"stage": "port_discovery"})
+    result = _run_inline_pipeline(
+        [
+            {"name": "ip_to_port", "tool": "naabu"},
+            {"name": "port_analysis", "tool": "nmap"},
+            {"name": "port_to_endpoint", "tool": "httpx"},
+        ],
+        {},
+        asset_id=asset_id,
+    )
+    findings, written = _pipeline_counts(result)
 
     return {
-        "status": "ok",
-        "pending": len(pending),
-        "scanned": scanned,
-        "ports_found": ports_found,
-        "errors": errors,
+        "status": result.get("status", "error"),
+        "mode": "pipeline",
+        "findings": findings,
+        "written": written,
+        "result": result,
     }
 
 
@@ -650,19 +471,47 @@ def query_unverified(self, asset_id: str | None = None):
 
 @app.task(bind=True, max_retries=2, default_retry_delay=300, time_limit=600)
 def deep_crawl(self, url: str, asset_id: str):
-    """L2 浏览器深度爬取 — Agent 按需触发。
+    """L2 深度爬取 — Agent 按需触发。
 
-    使用 Playwright 渲染 SPA/登录页/管理后台：
-      - 拦截网络请求 → API/WebSocket 端点
-      - 提取 JS 中的数据
-      - 表单探测
+    使用 katana 对指定 Endpoint 做深度爬取：
+      - 发现新 URL → HTTPEndpoint
+      - 发现 JS/CSS/JSON 等引用文件 → File
 
     输入: url (目标URL), asset_id
     产出: HTTPEndpoint 子节点（API端点/WebSocket）+ File 节点（JS提取数据）
     """
-    writer = get_graph_writer()
-    # TODO: Playwright 浏览器自动化
-    pass
+    from graphpt.collector.adapter import _endpoint_id_from_url
+
+    target_url = str(url or "").strip()
+    if not target_url:
+        return {
+            "status": "skipped",
+            "reason": "empty_url",
+            "hint": "deep_crawl 需要一个非空 URL",
+        }
+
+    asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
+    parent_id = _endpoint_id_from_url(target_url)
+    self.update_state(state="PROGRESS", meta={"stage": "katana", "url": target_url})
+
+    task_result = _run_single_tool_pipeline(
+        "katana",
+        [{"{url}": target_url, "{parent_id}": parent_id}],
+        asset_id=asset_id,
+        stage_name="endpoint_to_links",
+    )
+    findings, written = _pipeline_counts(task_result["result"])
+
+    return {
+        "status": task_result["status"],
+        "mode": "pipeline",
+        "tool": "katana",
+        "url": target_url,
+        "parent_id": parent_id,
+        "findings": findings,
+        "written": written,
+        "result": task_result["result"],
+    }
 
 
 # ---- 事件触发（采集链级联）----
@@ -671,8 +520,8 @@ def deep_crawl(self, url: str, asset_id: str):
 def on_new_subdomain(self, subdomain: str, asset_id: str):
     """新子域名事件 → 级联触发 DNS 解析 + Web 指纹。"""
     chain = (
-        dns_resolve.s(asset_id=asset_id)
-        | web_fingerprint.s(asset_id=asset_id)
+        dns_resolve.si(asset_id=asset_id)
+        | web_fingerprint.si(asset_id=asset_id)
     )
     chain.apply_async()
 

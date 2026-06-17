@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -17,7 +18,7 @@ class Finding(dict):
     """一个采集发现，由工具适配器输出，GraphWriter 消费。
 
     必需字段：
-      - type: "subdomain" | "ip" | "port" | "http_endpoint" | "vulnerability" | "file"
+      - type: "subdomain" | "ip" | "port" | "http_endpoint" | "vulnerability" | "file" | "api_endpoint"
     根据 type 不同，附加不同字段（参见 GraphWriter.write_* 方法签名）。
     """
 
@@ -44,6 +45,13 @@ def register_adapter(tool_name: str, adapter_cls: type[BaseAdapter]) -> None:
 
 
 # ---- 内置适配器 ----
+
+
+def _endpoint_id_from_url(url: str, method: str = "GET") -> str:
+    from graphpt.common.asset_identity import normalize_url
+
+    normalized = normalize_url(url) or str(url or "").strip()
+    return f"ep:{method}:{normalized}" if normalized else ""
 
 
 class SubfinderAdapter(BaseAdapter):
@@ -340,15 +348,17 @@ class EnscanAdapter(BaseAdapter):
         return findings
 
 
-class DirbusterAdapter(BaseAdapter):
-    """dirbuster / ffuf / gobuster 文本输出适配器 → DirEntry Finding。"""
+class DirectoryTextAdapter(BaseAdapter):
+    """目录爆破文本输出适配器 → DirEntry Finding。"""
 
-    tool_name = "dirbuster"
+    tool_name = "directory_text"
+    _STATUS_RE = re.compile(r"\bStatus\s*[:=]\s*(\d{3})\b", re.IGNORECASE)
+    _SIZE_RE = re.compile(r"\bSize\s*[:=]\s*(\d+)\b", re.IGNORECASE)
 
     def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:
         text = raw_output.decode("utf-8", errors="replace") if isinstance(raw_output, bytes) else raw_output
-        endpoint_id = ctx.get("parent_id", "")
-        source = self.tool_name or ctx.get("tool_name", "dirbuster")
+        endpoint_id = ctx.get("parent_id", "") or _endpoint_id_from_url(str(ctx.get("target_url") or ""))
+        source = ctx.get("tool_name") or self.tool_name
         findings: list[dict[str, Any]] = []
 
         for line in text.strip().splitlines():
@@ -358,7 +368,7 @@ class DirbusterAdapter(BaseAdapter):
             # Common formats:
             # /path              (dirb)
             # /path    200  1234  (gobuster)
-            # /path   [Status: 200, Size: 1234]  (ffuf)
+            # /path    (Status: 200) [Size: 1234]  (gobuster)
             parts = line.split()
             if not parts:
                 continue
@@ -366,14 +376,16 @@ class DirbusterAdapter(BaseAdapter):
             if not path.startswith("/"):
                 continue
 
-            status_code = 0
-            size = 0
+            status_match = self._STATUS_RE.search(line)
+            size_match = self._SIZE_RE.search(line)
+            status_code = int(status_match.group(1)) if status_match else 0
+            size = int(size_match.group(1)) if size_match else 0
             ct = ""
             for p in parts[1:]:
-                p = p.strip("[],")
-                if p.isdigit() and 100 <= int(p) <= 599:
+                p = p.strip("[](),:")
+                if not status_code and p.isdigit() and 100 <= int(p) <= 599:
                     status_code = int(p)
-                elif p.isdigit():
+                elif not size and p.isdigit():
                     size = int(p)
                 elif "/" in p and not p.startswith("http"):
                     ct = p
@@ -391,10 +403,401 @@ class DirbusterAdapter(BaseAdapter):
         return findings
 
 
+class GobusterAdapter(DirectoryTextAdapter):
+    """gobuster 多模式文本输出适配器。"""
+
+    tool_name = "gobuster"
+    _FOUND_RE = re.compile(r"^Found:\s+(.+?)(?=\s*(?:\(|\[|\bStatus\s*[:=]|\bSize\s*[:=]|$))", re.IGNORECASE)
+    _IP_HINT_RE = re.compile(r"\[([0-9a-fA-F:.]+)\]")
+
+    @staticmethod
+    def _root_for_host(host: str, ctx: dict[str, Any]) -> str:
+        from graphpt.common.asset_identity import normalize_domain_name
+
+        root = normalize_domain_name(ctx.get("root_domain") or ctx.get("domain") or "")
+        if root:
+            return root
+        parts = host.split(".")
+        return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+    @classmethod
+    def _found_value(cls, line: str) -> str:
+        match = cls._FOUND_RE.search(line)
+        if not match:
+            return ""
+        return match.group(1).strip().strip(",;")
+
+    @classmethod
+    def _ip_hints(cls, line: str) -> list[str]:
+        from ipaddress import ip_address
+
+        from graphpt.common.asset_identity import normalize_ip_text
+
+        ips: list[str] = []
+        for match in cls._IP_HINT_RE.finditer(line):
+            ip = normalize_ip_text(match.group(1))
+            try:
+                ip_address(ip)
+            except ValueError:
+                continue
+            if ip not in ips:
+                ips.append(ip)
+        return ips
+
+    @staticmethod
+    def _vhost_base(ctx: dict[str, Any]) -> tuple[str, int]:
+        from urllib.parse import urlsplit
+
+        target_url = str(ctx.get("target_url") or ctx.get("url") or "").strip()
+        if target_url:
+            try:
+                parsed = urlsplit(target_url if "://" in target_url else f"http://{target_url}")
+                scheme = (parsed.scheme or "http").lower()
+                port = parsed.port or (443 if scheme == "https" else 80)
+                return scheme, port
+            except ValueError:
+                pass
+        return "http", 80
+
+    @classmethod
+    def _is_vhost_line(cls, line: str, ctx: dict[str, Any]) -> bool:
+        has_http_metadata = bool(cls._STATUS_RE.search(line) or cls._SIZE_RE.search(line))
+        has_only_ip_target = bool(ctx.get("ip")) and not bool(ctx.get("domain") or ctx.get("root_domain"))
+        return has_http_metadata or has_only_ip_target
+
+    @classmethod
+    def _dedupe(cls, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[tuple[str, str]] = set()
+        unique: list[dict[str, Any]] = []
+        for finding in findings:
+            ftype = str(finding.get("type") or "")
+            if ftype == "dir_entry":
+                identity = str(finding.get("parent_id", "")) + str(finding.get("path", ""))
+            elif ftype == "port":
+                identity = f"{finding.get('parent_id', '')}:{finding.get('port', '')}/{finding.get('protocol', '')}"
+            elif ftype == "ip":
+                identity = str(finding.get("parent_id", "")) + str(finding.get("value") or "")
+            else:
+                identity = str(finding.get("value") or finding.get("url") or "")
+            key = (ftype, identity)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(finding)
+        return unique
+
+    def _dns_findings(self, line: str, host_value: str, ctx: dict[str, Any]) -> list[dict[str, Any]]:
+        from graphpt.common.asset_identity import normalize_host_label
+
+        domain = normalize_host_label(ctx.get("domain") or ctx.get("root_domain") or "")
+        host = normalize_host_label(host_value)
+        if not host:
+            return []
+        if domain and "." not in host:
+            host = f"{host}.{domain}"
+
+        root_domain = self._root_for_host(host, ctx)
+        findings: list[dict[str, Any]] = [{
+            "type": "subdomain",
+            "value": host,
+            "root_domain": root_domain,
+            "source": "gobuster",
+            "asset_id": ctx.get("asset_id", ""),
+        }]
+        for ip in self._ip_hints(line):
+            findings.append({
+                "type": "ip",
+                "value": ip,
+                "parent_id": f"sub:{host}",
+                "source": "gobuster",
+                "asset_id": ctx.get("asset_id", ""),
+            })
+        return findings
+
+    def _vhost_findings(self, line: str, host_value: str, ctx: dict[str, Any]) -> list[dict[str, Any]]:
+        from graphpt.common.asset_identity import normalize_host_label, normalize_ip_text, normalize_url
+
+        domain = normalize_host_label(ctx.get("domain") or ctx.get("root_domain") or "")
+        host = normalize_host_label(host_value)
+        if not host:
+            return []
+        if domain and "." not in host:
+            host = f"{host}.{domain}"
+
+        scheme, port = self._vhost_base(ctx)
+        url = normalize_url(f"{scheme}://{host}") or f"{scheme}://{host}/"
+        status_match = self._STATUS_RE.search(line)
+        size_match = self._SIZE_RE.search(line)
+        status_code = int(status_match.group(1)) if status_match else 0
+        size = int(size_match.group(1)) if size_match else 0
+
+        findings: list[dict[str, Any]] = []
+        ip = normalize_ip_text(ctx.get("ip") or "")
+        parent_id = ""
+        if "." in host:
+            findings.append({
+                "type": "subdomain",
+                "value": host,
+                "root_domain": self._root_for_host(host, ctx),
+                "source": "gobuster",
+                "asset_id": ctx.get("asset_id", ""),
+            })
+            if ip:
+                findings.append({
+                    "type": "ip",
+                    "value": ip,
+                    "parent_id": f"sub:{host}",
+                    "source": "gobuster",
+                    "asset_id": ctx.get("asset_id", ""),
+                })
+
+        if ip:
+            findings.append({
+                "type": "port",
+                "parent_id": f"ip:{ip}",
+                "port": port,
+                "protocol": "tcp",
+                "service": "https" if scheme == "https" else "http",
+                "source": "gobuster",
+                "asset_id": ctx.get("asset_id", ""),
+            })
+            parent_id = f"port:ip:{ip}:{port}/tcp"
+
+        findings.append({
+            "type": "http_endpoint",
+            "parent_id": parent_id,
+            "url": url,
+            "method": "GET",
+            "status_code": status_code,
+            "content_length": size,
+            "title": host,
+            "source": "gobuster",
+            "asset_id": ctx.get("asset_id", ""),
+        })
+        return findings
+
+    def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:
+        text = raw_output.decode("utf-8", errors="replace") if isinstance(raw_output, bytes) else raw_output
+        findings = super().parse(text, **ctx)
+
+        for line in text.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            host_value = self._found_value(line)
+            if not host_value:
+                continue
+            if self._is_vhost_line(line, ctx):
+                findings.extend(self._vhost_findings(line, host_value, ctx))
+            else:
+                findings.extend(self._dns_findings(line, host_value, ctx))
+        return self._dedupe(findings)
+
+
+class FfufAdapter(BaseAdapter):
+    """ffuf JSONL 输出适配器 → DirEntry Finding。"""
+
+    tool_name = "ffuf"
+
+    @staticmethod
+    def _is_result_record(obj: dict[str, Any]) -> bool:
+        record_type = str(obj.get("type") or "").strip().lower()
+        if record_type and record_type not in {"result", "finding"}:
+            return False
+        return any(key in obj for key in ("url", "URL", "status", "status_code", "input"))
+
+    def _iter_records(self, text: str) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+
+        if isinstance(parsed, dict):
+            if isinstance(parsed.get("results"), list):
+                return [item for item in parsed["results"] if isinstance(item, dict) and self._is_result_record(item)]
+            return [parsed] if self._is_result_record(parsed) else []
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict) and self._is_result_record(item)]
+
+        for line in text.strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(obj, dict):
+                if isinstance(obj.get("result"), dict):
+                    obj = obj["result"]
+                if self._is_result_record(obj):
+                    records.append(obj)
+        return records
+
+    @staticmethod
+    def _path_from_record(obj: dict[str, Any]) -> str:
+        import re
+        from urllib.parse import urlsplit
+
+        from graphpt.common.asset_identity import normalize_url
+
+        def _collapse(p: str) -> str:
+            # 折叠重复斜杠：{url}/FUZZ 模板在 url 带尾斜杠时会产生 //path
+            return re.sub(r"/{2,}", "/", p)
+
+        url = str(obj.get("url") or obj.get("URL") or "").strip()
+        if url:
+            normalized = normalize_url(url) or url
+            try:
+                parsed = urlsplit(normalized)
+            except ValueError:
+                return ""
+            path = _collapse(parsed.path or "/")
+            return f"{path}?{parsed.query}" if parsed.query else path
+
+        fuzz_value = ""
+        input_values = obj.get("input")
+        if isinstance(input_values, dict):
+            fuzz_value = str(input_values.get("FUZZ") or next(iter(input_values.values()), "") or "")
+        elif input_values:
+            fuzz_value = str(input_values)
+        fuzz_value = fuzz_value.strip()
+        if not fuzz_value:
+            return ""
+        return _collapse(fuzz_value if fuzz_value.startswith("/") else f"/{fuzz_value}")
+
+    @staticmethod
+    def _int_field(obj: dict[str, Any], *keys: str) -> int:
+        for key in keys:
+            value = obj.get(key)
+            if value in (None, ""):
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+        return 0
+
+    def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:
+        text = raw_output.decode("utf-8", errors="replace") if isinstance(raw_output, bytes) else raw_output
+        endpoint_id = ctx.get("parent_id", "") or _endpoint_id_from_url(str(ctx.get("target_url") or ""))
+        findings: list[dict[str, Any]] = []
+
+        for obj in self._iter_records(text):
+            path = self._path_from_record(obj)
+            if not path:
+                continue
+            parent_id = endpoint_id or _endpoint_id_from_url(str(obj.get("url") or obj.get("URL") or ""))
+
+            findings.append({
+                "type": "dir_entry",
+                "parent_id": parent_id,
+                "path": path,
+                "method": obj.get("method", "GET"),
+                "status_code": self._int_field(obj, "status", "status_code"),
+                "content_type": obj.get("content-type") or obj.get("content_type") or "",
+                "size": self._int_field(obj, "length", "content_length", "size"),
+                "source": "ffuf",
+            })
+        return findings
+
+
 class KatanaAdapter(BaseAdapter):
-    """katana JSON 输出适配器 → File / HTTPEndpoint Finding。"""
+    """katana JSON 输出适配器 → File / HTTPEndpoint / ApiEndpoint Finding。
+
+    兼容两种 katana 输出格式：
+      - 精简格式（仅 -jsonl）：每行顶层有 URL / method / status_code 等
+      - 明细格式（-or -om）：每行有嵌套 request / response 对象，可提取参数
+
+    对每个非静态资源 URL，除产出原有 file / http_endpoint 外，额外产出
+    api_endpoint finding（全量记录，命中信号存 api_signals 交后续 LLM 判断）。
+    """
 
     tool_name = "katana"
+
+    # 接口路径关键词
+    _API_PATH_KEYWORDS = (
+        "/api/", "/rest/", "/graphql", "/gateway/", "/service/", "/services/",
+        "/v1/", "/v2/", "/v3/", "/open/", "/openapi", "/rpc/", "/ajax/",
+    )
+    # 静态资源扩展名（不作为接口，但 .js/.json 等仍按 file 处理）
+    _STATIC_EXTS = (
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".bmp",
+        ".woff", ".woff2", ".ttf", ".eot", ".otf",
+        ".css", ".scss", ".less", ".mp4", ".mp3", ".pdf", ".zip",
+    )
+    _FILE_EXTS = (".js", ".css", ".json", ".xml", ".map")
+
+    @staticmethod
+    def _extract_param_names(endpoint_url: str, raw_request: str) -> tuple[list[str], str]:
+        """从 URL query 和请求体中提取参数名（只取名，不取值，脱敏）。
+
+        返回 (参数名列表, 参数位置 query|body|form|'')。
+        """
+        from urllib.parse import urlsplit, parse_qs
+
+        names: list[str] = []
+        source = ""
+
+        # 1) URL query 参数
+        try:
+            qs = urlsplit(endpoint_url).query
+            if qs:
+                names.extend(parse_qs(qs, keep_blank_values=True).keys())
+                source = "query"
+        except Exception:
+            pass
+
+        # 2) 请求体参数（从 raw request 的 body 部分解析，只要键名）
+        if raw_request and "\r\n\r\n" in raw_request:
+            body = raw_request.split("\r\n\r\n", 1)[1].strip()
+        elif raw_request and "\n\n" in raw_request:
+            body = raw_request.split("\n\n", 1)[1].strip()
+        else:
+            body = ""
+        if body:
+            parsed_body = False
+            if body[:1] in ("{", "["):
+                try:
+                    obj = json.loads(body)
+                    if isinstance(obj, dict):
+                        names.extend(str(k) for k in obj.keys())
+                        source = source or "body"
+                        parsed_body = True
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            if not parsed_body and "=" in body:
+                # form-urlencoded：a=1&b=2 → 取键名
+                try:
+                    names.extend(parse_qs(body, keep_blank_values=True).keys())
+                    source = source or "form"
+                except Exception:
+                    pass
+
+        # 去重保序
+        seen: set[str] = set()
+        uniq = [n for n in names if n and not (n in seen or seen.add(n))]
+        return uniq, source
+
+    def _classify_signals(
+        self, url: str, method: str, content_type: str,
+        params: list[str], from_js: str,
+    ) -> list[str]:
+        """计算命中的接口判定信号（供 LLM 后续读图分析，不做硬过滤）。"""
+        signals: list[str] = []
+        low = url.lower()
+        if any(kw in low for kw in self._API_PATH_KEYWORDS):
+            signals.append("is_api_path")
+        if "json" in (content_type or "").lower() or low.split("?", 1)[0].endswith(".json"):
+            signals.append("is_json")
+        if method.upper() not in ("GET", "HEAD", "OPTIONS"):
+            signals.append("non_get")
+        if from_js:
+            signals.append("from_js")
+        if params:
+            signals.append("has_params")
+        return signals
 
     def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:
         import json as _json
@@ -402,7 +805,7 @@ class KatanaAdapter(BaseAdapter):
         from graphpt.common.asset_identity import normalize_url
 
         text = raw_output.decode("utf-8", errors="replace") if isinstance(raw_output, bytes) else raw_output
-        endpoint_id = ctx.get("parent_id", "")
+        endpoint_id = ctx.get("parent_id", "") or _endpoint_id_from_url(str(ctx.get("target_url") or ""))
         findings: list[dict[str, Any]] = []
 
         for line in text.strip().splitlines():
@@ -413,45 +816,116 @@ class KatanaAdapter(BaseAdapter):
             except (_json.JSONDecodeError, ValueError):
                 continue
 
-            url = obj.get("URL", obj.get("url", obj.get("endpoint", "")))
+            # 兼容明细格式（-or -om）：request/response 嵌套对象
+            req = obj.get("request") if isinstance(obj.get("request"), dict) else {}
+            resp = obj.get("response") if isinstance(obj.get("response"), dict) else {}
+
+            url = (
+                req.get("endpoint")
+                or obj.get("URL") or obj.get("url") or obj.get("endpoint", "")
+            )
             if not url:
                 continue
+            method = (req.get("method") or obj.get("method") or "GET").upper()
+            status_code = resp.get("status_code", obj.get("status_code", 0)) or 0
+            resp_headers = resp.get("headers", {}) or {}
+            # katana header key 为 Content-Type（大写连字符），做大小写兼容查找
+            ct = (
+                resp_headers.get("Content-Type")
+                or resp_headers.get("content-type")
+                or resp_headers.get("content_type")
+                or obj.get("content_type") or obj.get("content-type", "")
+                or ""
+            )
+            content_length = resp.get("content_length", obj.get("content_length", 0)) or 0
+            # 出处：katana 在 request.source 标明从哪个 JS/HTML 发现（tag=js 表示 JS 提取）
+            src_origin = str(req.get("source") or obj.get("source") or "")
+            req_tag = str(req.get("tag") or "")
+            from_js = src_origin if (src_origin.lower().endswith(".js") or req_tag == "js") else ""
+
             normalized_url = normalize_url(url) or url
             current_endpoint_id = endpoint_id or f"ep:GET:{normalized_url}"
-            ct = obj.get("content_type", obj.get("content-type", ""))
 
-            if ct and "javascript" in ct.lower():
-                # JS file → File finding
+            url_no_q = url.split("?", 1)[0].lower()
+
+            # JS/CSS/等资源 → File finding（保留原逻辑）
+            if (ct and "javascript" in ct.lower()) or url_no_q.endswith(self._FILE_EXTS):
+                file_url = url
                 findings.append({
                     "type": "file",
                     "parent_id": current_endpoint_id,
-                    "url": url,
-                    "content_type": ct,
-                    "size": obj.get("content_length", 0),
-                    "content_hash": hashlib.md5(url.encode()).hexdigest()[:16],
-                    "source": "katana",
-                })
-            elif url.endswith((".js", ".css", ".json", ".xml", ".map")):
-                findings.append({
-                    "type": "file",
-                    "parent_id": current_endpoint_id,
-                    "url": url,
+                    "url": file_url,
                     "content_type": ct or "application/octet-stream",
-                    "size": obj.get("content_length", 0),
-                    "content_hash": hashlib.md5(url.encode()).hexdigest()[:16],
+                    "size": content_length,
+                    "content_hash": hashlib.md5(file_url.encode()).hexdigest()[:16],
                     "source": "katana",
                 })
-            else:
-                # Just a URL → Endpoint finding
+                continue
+
+            # 纯静态资源（图片/字体/css/媒体）→ 跳过，不入接口
+            if url_no_q.endswith(self._STATIC_EXTS):
+                continue
+
+            # 其余 URL → http_endpoint（保留原逻辑） + api_endpoint（新增，全量记录）
+            findings.append({
+                "type": "http_endpoint",
+                "parent_id": current_endpoint_id,
+                "url": url,
+                "method": method,
+                "status_code": status_code,
+                "content_length": content_length,
+                "source": "katana",
+            })
+
+            params, param_source = self._extract_param_names(url, req.get("raw", "") or "")
+            signals = self._classify_signals(url, method, ct, params, from_js)
+            api_finding: dict[str, Any] = {
+                "type": "api_endpoint",
+                "parent_id": current_endpoint_id,
+                "url": url,
+                "method": method,
+                "status_code": status_code,
+                "content_type": ct,
+                "params": params,
+                "param_source": param_source,
+                "api_signals": signals,
+                "from_js": from_js,
+                "source": "katana",
+            }
+            # 若发现来源是 JS 文件，关联到对应 File 节点（与 write_file 的 id 算法一致）
+            if from_js:
+                api_finding["file_id"] = f"file:{hashlib.md5(from_js.encode()).hexdigest()[:16]}"
+            findings.append(api_finding)
+
+            # -fx 表单提取：response.forms 里每个表单 = 一个接口（含参数名 + 真实 method）
+            # 这是比从 raw 解析更可靠的参数源，且能拿到页面未直接爬取的 POST 接口
+            for form in (resp.get("forms") or []):
+                if not isinstance(form, dict):
+                    continue
+                action = str(form.get("action") or "").strip()
+                if not action:
+                    continue
+                f_method = str(form.get("method") or "GET").upper()
+                f_params = [str(p) for p in (form.get("parameters") or []) if p]
+                f_enctype = str(form.get("enctype") or "")
+                f_param_src = "form" if "form" in f_enctype or "urlencoded" in f_enctype else "body"
+                f_signals = self._classify_signals(action, f_method, "", f_params, "")
+                if "from_form" not in f_signals:
+                    f_signals.append("from_form")
                 findings.append({
-                    "type": "http_endpoint",
+                    "type": "api_endpoint",
                     "parent_id": current_endpoint_id,
-                    "url": url,
-                    "method": obj.get("method", "GET"),
-                    "status_code": obj.get("status_code", 0),
-                    "content_length": obj.get("content_length", 0),
+                    "url": action,
+                    "method": f_method,
+                    "status_code": 0,
+                    "content_type": "",
+                    "params": f_params,
+                    "param_source": f_param_src,
+                    "api_signals": sorted(set(f_signals)),
+                    "from_js": "",
                     "source": "katana",
                 })
+
         return findings
 
 
@@ -597,16 +1071,139 @@ class NaabuAdapter(BaseAdapter):
         return findings
 
 
+class UrlfinderAdapter(BaseAdapter):
+    """urlfinder JSONL 输出适配器 → Subdomain / HTTPEndpoint / File Finding。
+
+    urlfinder 纯被动收集历史 URL（Wayback/CommonCrawl/OTX），不实际抓取目标，
+    因此产出的 HTTPEndpoint 标记 crawl_status="not_fetched"，供后续 httpx/katana 探测。
+
+    每行 JSON: {"url":"https://x.example.com/a","input":"example.com","source":"waybackarchive"}
+
+    入图策略（findings 按列表顺序写入，故父节点先于子节点产出）：
+      1. 每个 URL 的 host → subdomain finding（确保 Subdomain 接入资产图）
+      2. .js/.css/.json/.xml/.map → 先产出该 host 根 HTTPEndpoint（File 的父），再产出 file
+      3. 其余 URL → http_endpoint，parent_id=sub:<host>，crawl_status=not_fetched
+    """
+
+    tool_name = "urlfinder"
+
+    # 与 katana adapter 一致：作为 File 处理的资源后缀
+    _FILE_EXTS = (".js", ".css", ".json", ".xml", ".map")
+    # 纯静态资源（图片/字体/媒体）→ 跳过，不入图
+    _STATIC_EXTS = (
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".bmp",
+        ".woff", ".woff2", ".ttf", ".eot", ".otf",
+        ".scss", ".less", ".mp4", ".mp3", ".pdf", ".zip",
+    )
+
+    def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:
+        import json as _json
+        import hashlib
+        from urllib.parse import urlsplit
+
+        text = raw_output.decode("utf-8", errors="replace") if isinstance(raw_output, bytes) else raw_output
+        asset_id = ctx.get("asset_id", "")
+        findings: list[dict[str, Any]] = []
+
+        seen_hosts: set[str] = set()
+        root_ep_ids: dict[str, str] = {}
+        seen_urls: set[str] = set()
+
+        for line in text.strip().splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                obj = _json.loads(line)
+            except (_json.JSONDecodeError, ValueError):
+                continue
+
+            url = str(obj.get("url") or "").strip()
+            if not url or url in seen_urls:
+                continue
+            seen_urls.add(url)
+
+            try:
+                parts = urlsplit(url if "://" in url else f"http://{url}")
+                host = (parts.hostname or "").strip(".").lower()
+            except ValueError:
+                continue
+            if not host:
+                continue
+
+            scheme = parts.scheme or "http"
+
+            # 1) host → subdomain（先于端点/文件产出，保证父节点存在）
+            if host not in seen_hosts:
+                seen_hosts.add(host)
+                labels = host.split(".")
+                root = ".".join(labels[-2:]) if len(labels) >= 2 else host
+                findings.append({
+                    "type": "subdomain",
+                    "value": host,
+                    "root_domain": root,
+                    "source": "urlfinder",
+                    "asset_id": asset_id,
+                })
+
+            sub_id = f"sub:{host}"
+            path_lower = (parts.path or "").lower()
+
+            # 2) 静态资源（图片/字体/媒体）→ 跳过
+            if path_lower.endswith(self._STATIC_EXTS):
+                continue
+
+            # 3) JS/CSS/JSON 等 → File（需挂在 HTTPEndpoint 下，用该 host 根端点作父）
+            if path_lower.endswith(self._FILE_EXTS):
+                root_ep_id = root_ep_ids.get(host)
+                if root_ep_id is None:
+                    root_url = f"{scheme}://{host}/"
+                    root_ep_id = _endpoint_id_from_url(root_url)
+                    root_ep_ids[host] = root_ep_id
+                    findings.append({
+                        "type": "http_endpoint",
+                        "url": root_url,
+                        "method": "GET",
+                        "parent_id": sub_id,
+                        "crawl_status": "not_fetched",
+                        "source": "urlfinder",
+                        "asset_id": asset_id,
+                    })
+                findings.append({
+                    "type": "file",
+                    "parent_id": root_ep_id,
+                    "url": url,
+                    "content_type": "",
+                    "size": 0,
+                    "content_hash": hashlib.md5(url.encode()).hexdigest()[:16],
+                    "source": "urlfinder",
+                })
+                continue
+
+            # 4) 其余 → http_endpoint，挂在对应 Subdomain 下
+            findings.append({
+                "type": "http_endpoint",
+                "url": url,
+                "method": "GET",
+                "parent_id": sub_id,
+                "crawl_status": "not_fetched",
+                "source": "urlfinder",
+                "asset_id": asset_id,
+            })
+
+        return findings
+
+
 register_adapter("subfinder", SubfinderAdapter)
 register_adapter("crt", CrtAdapter)
+register_adapter("urlfinder", UrlfinderAdapter)
 register_adapter("dnsx", DnsxAdapter)
 register_adapter("httpx", HttpxAdapter)
 register_adapter("nmap", NmapAdapter)
 register_adapter("naabu", NaabuAdapter)
 register_adapter("masscan", NmapAdapter)
 register_adapter("enscan", EnscanAdapter)
-register_adapter("dirbuster", DirbusterAdapter)
-register_adapter("ffuf", DirbusterAdapter)      # ffuf text output → same parser
-register_adapter("gobuster", DirbusterAdapter)  # gobuster text output → same parser
+register_adapter("ffuf", FfufAdapter)
+register_adapter("gobuster", GobusterAdapter)
 register_adapter("katana", KatanaAdapter)
 register_adapter("nuclei", NucleiAdapter)

@@ -6,6 +6,7 @@ from graphpt.collector.pipeline import (
     PipelineExecutor,
     expand_tool_stages,
     validate_pipeline_tools,
+    _scan_target_node_ids,
     _target_label,
     _unresolved_placeholders,
 )
@@ -91,6 +92,53 @@ def test_scan_target_is_preferred_for_scanrun_label():
     assert _target_label(target) == "192.0.2.10|80,443"
 
 
+def test_scan_target_node_ids_infer_graph_nodes():
+    assert _scan_target_node_ids("asset-1", "ffuf", "https://api.example.com/admin") == [
+        "ep:GET:https://api.example.com/admin",
+    ]
+    assert _scan_target_node_ids("asset-1", "nmap", "192.0.2.10|80,443") == ["ip:192.0.2.10"]
+    assert _scan_target_node_ids("asset-1", "httpx", "192.0.2.10:8080") == [
+        "port:ip:192.0.2.10:8080/tcp",
+        "ip:192.0.2.10",
+    ]
+    assert _scan_target_node_ids("asset-1", "subfinder", "example.com") == [
+        "root:example.com",
+        "sub:example.com",
+    ]
+    assert _scan_target_node_ids("asset-1", "enscan", "Example Inc") == ["asset-1"]
+
+
+def test_mark_scanned_links_scanrun_to_target_nodes(monkeypatch):
+    calls = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def run(self, query, **params):
+            calls.append((query, params))
+
+    class FakeWriter:
+        class Driver:
+            def session(self):
+                return FakeSession()
+
+        _driver = Driver()
+
+    monkeypatch.setattr("graphpt.collector.pipeline.get_graph_writer", lambda: FakeWriter())
+
+    executor = PipelineExecutor({"stages": []}, asset_id="asset-1")
+    executor._mark_scanned("ffuf", "https://api.example.com/admin", 2)
+
+    assert calls[0][1]["target"] == "https://api.example.com/admin"
+    assert calls[0][1]["fc"] == 2
+    assert calls[1][1]["node_ids"] == ["ep:GET:https://api.example.com/admin"]
+    assert "MERGE (sr)-[:RAN]->(n)" in calls[1][0]
+
+
 def test_pipeline_rejects_unresolved_placeholders(monkeypatch):
     executed = False
 
@@ -160,6 +208,53 @@ def test_failed_batch_pipeline_does_not_mark_targets(monkeypatch):
     assert result["status"] == "error"
     assert result["errors"][0]["kind"] == "nonzero_exit"
     assert marked == []
+
+
+def test_batch_pipeline_preserves_per_target_metadata(monkeypatch):
+    parsed_root_domains: list[str] = []
+    marked: list[str] = []
+
+    class DummyAdapter:
+        def parse(self, raw_output, **ctx):
+            parsed_root_domains.append(ctx["root_domain"])
+            return [{
+                "type": "subdomain",
+                "value": f"api.{ctx['root_domain']}",
+                "root_domain": ctx["root_domain"],
+            }]
+
+    def fake_run(cmd, **kwargs):
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("graphpt.collector.pipeline._find_tool", lambda tool: sys.executable)
+    monkeypatch.setattr("graphpt.collector.pipeline.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "graphpt.collector.pipeline.PipelineExecutor._query_targets",
+        lambda self, tool: [
+            {"{targets_file}": "example.com", "{root_domain}": "example.com"},
+            {"{targets_file}": "example.org", "{root_domain}": "example.org"},
+        ],
+    )
+    monkeypatch.setattr(
+        "graphpt.collector.pipeline.PipelineExecutor._mark_scanned",
+        lambda self, tool, target_label, findings_count=0: marked.append(target_label),
+    )
+    monkeypatch.setattr(
+        "graphpt.collector.pipeline.get_graph_writer",
+        lambda: SimpleNamespace(write_batch=lambda findings, *, asset_id="": findings),
+    )
+    monkeypatch.setitem(pipeline.ADAPTER_MAP, "dummy_batch", DummyAdapter)
+
+    executor = PipelineExecutor({"stages": []})
+    result = executor._run_tool(
+        "dummy_batch",
+        "{bin} -c \"import sys; sys.exit(0)\" -l {targets_file}",
+        0,
+    )
+
+    assert result["status"] == "ok"
+    assert parsed_root_domains == ["example.com", "example.org"]
+    assert marked == ["example.com", "example.org"]
 
 
 def test_pipeline_preview_resolves_commands_without_execution(monkeypatch):
@@ -310,6 +405,12 @@ def test_validate_pipeline_tools_reports_missing_config_and_binary(monkeypatch):
     assert errors[1]["tool"] == "missing_bin"
 
 
+def test_pipeline_target_selectors_do_not_register_missing_dirbuster():
+    assert "dirbuster" not in pipeline._BATCH_TARGETS
+    assert "ffuf" in pipeline._BATCH_TARGETS
+    assert "gobuster" in pipeline._BATCH_TARGETS
+
+
 def test_company_recon_preview_resolves_default_commands():
     definition = pipeline.PipelineManager().get("company_recon")
     assert definition is not None
@@ -326,7 +427,7 @@ def test_company_recon_preview_resolves_default_commands():
             "naabu": [{"{ip}": "127.0.0.1", "{parent_id}": "ip:127.0.0.1"}],
             "nmap": [{"{ip}": "127.0.0.1", "{ports}": [80], "{scan_target}": "127.0.0.1|80", "{parent_id}": "ip:127.0.0.1"}],
             "httpx": [{"{urls_file}": "127.0.0.1:80"}],
-            "katana": [{"{targets_file}": "http://127.0.0.1/"}],
+            "katana": [{"{url}": "http://127.0.0.1/"}],
             "ffuf": [{"{url}": "http://127.0.0.1"}],
             "gobuster": [{"{url}": "http://127.0.0.1"}],
             "nuclei": [{"{targets_file}": "http://127.0.0.1/"}],
@@ -342,5 +443,5 @@ def test_company_recon_preview_resolves_default_commands():
             commands.extend(detail["command"] for detail in stage["details"])
         else:
             commands.append(stage["command"])
-    assert any("gobuster" in command and "res/wordlists/common.txt" in command for command in commands)
+    assert any("gobuster" in command and "res/wordlists/web_dirs.txt" in command for command in commands)
     assert all(not _unresolved_placeholders(command) for command in commands)

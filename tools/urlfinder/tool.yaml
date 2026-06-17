@@ -1,0 +1,7 @@
+desc: "被动 URL 收集（Wayback/CommonCrawl/OTX 历史归档）"
+command: "{bin} -list {targets_file} -j -silent -max-time 3"
+use_on:
+  RootDomain:
+    desc: "从根域名被动收集历史 URL（rdn 作用域自动展开全部子域名）"
+    params:
+      targets_file: "{value}"
