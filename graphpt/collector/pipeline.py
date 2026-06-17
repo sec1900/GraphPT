@@ -43,6 +43,10 @@ def _target_label(target: dict[str, Any] | None) -> str:
     for key, value in target.items():
         if str(key).strip("{}") == "scan_target" and value:
             return str(value)
+    # url 是去重键（选择器按 ep.url 排除已扫端点），优先用它作标签
+    for key, value in target.items():
+        if str(key).strip("{}") == "url" and value:
+            return str(value)
     for key, value in target.items():
         if str(key).startswith("__"):
             continue
@@ -459,9 +463,11 @@ _BATCH_TARGETS: dict[str, dict[str, Any]] = {
             }
             WITH DISTINCT ep
             WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
-            RETURN ep.url AS url
+            RETURN ep.url AS url, ep.tech AS tech
         """,
-        "mapping": {"url": "{targets_file}"},
+        # 指纹驱动：每个端点的 tech 在 _query_targets 里切词匹配 nuclei tag，
+        # 命中则注入 -tags 精准扫，未命中则 {tags_arg} 为空 → 盲扫兜底。迭代模式。
+        "mapping": {"url": "{url}", "tech": "{tags_arg}"},
     },
 }
 
@@ -737,11 +743,29 @@ class PipelineExecutor:
                         val = r.get(col)
                         if val is not None:
                             tgt[placeholder] = val
+                    if tool == "nuclei":
+                        tgt["{tags_arg}"] = self._nuclei_tags_arg(tgt.get("{tags_arg}"))
                     if tgt:
                         targets.append(tgt)
                 return targets or [{}]
         except Exception as exc:
             raise RuntimeError(f"target_query_failed: {exc}") from exc
+
+    def _nuclei_tags_arg(self, tech: Any) -> str:
+        """指纹驱动：端点 tech[] 切词匹配 nuclei tag。
+
+        命中 → "-tags tag1,tag2"（精准扫）；未命中/无 tech → ""（盲扫兜底）。
+        nuclei 二进制缺失时 tag 集合为空，一律走盲扫兜底。
+        """
+        from graphpt.collector.nuclei_tags import load_nuclei_tags, match_tags
+
+        if not isinstance(tech, list):
+            tech = [tech] if tech else []
+        nuclei_bin = _find_tool("nuclei")
+        if not nuclei_bin:
+            return ""
+        tags = match_tags([str(t) for t in tech], load_nuclei_tags(nuclei_bin))
+        return f"-tags {','.join(tags)}" if tags else ""
 
     def _mark_scanned(self, tool: str, target_label: str, findings_count: int = 0) -> None:
         """标记一个目标已被某工具扫描。"""

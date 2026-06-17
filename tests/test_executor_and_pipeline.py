@@ -430,7 +430,7 @@ def test_company_recon_preview_resolves_default_commands():
             "katana": [{"{url}": "http://127.0.0.1/"}],
             "ffuf": [{"{url}": "http://127.0.0.1"}],
             "gobuster": [{"{url}": "http://127.0.0.1"}],
-            "nuclei": [{"{targets_file}": "http://127.0.0.1/"}],
+            "nuclei": [{"{url}": "http://127.0.0.1/", "{tags_arg}": ""}],
         },
     )
 
