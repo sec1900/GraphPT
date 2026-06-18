@@ -1100,7 +1100,7 @@ class NaabuAdapter(BaseAdapter):
             except (json.JSONDecodeError, ValueError):
                 continue
             port = obj.get("port")
-            host = str(obj.get("host") or "").strip()
+            host = str(obj.get("host") or obj.get("ip") or "").strip()
             if not port or not host:
                 continue
             findings.append({
