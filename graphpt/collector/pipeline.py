@@ -1054,7 +1054,7 @@ class PipelineExecutor:
                 continue
             cmd = _split_command(cmd_str)
             try:
-                proc = subprocess.run(cmd, capture_output=True, timeout=600,
+                proc = subprocess.run(cmd, capture_output=True, timeout=86400,
                                       text=True, encoding='utf-8', errors='replace',
                                       env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
             except subprocess.TimeoutExpired:
