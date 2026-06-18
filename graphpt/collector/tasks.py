@@ -544,3 +544,28 @@ def change_detection(self, asset_id: str | None = None):
     writer = get_graph_writer()
     changes = writer.detect_changes(asset_id=asset_id)
     return {"status": "ok", "changes": len(changes)}
+
+
+# ---- 节点驱动调度 ----
+
+@app.task(bind=True, max_retries=2, default_retry_delay=60)
+def scan_tool(self, tool: str, asset_id: str = "default"):
+    """单工具扫描任务（节点驱动调度器 advance_once 的派发单元）。
+
+    不传 targets —— PipelineExecutor 内部用 _query_targets(tool) 自选图中
+    未扫描目标（_BATCH_TARGETS 的 Cypher 已含 ScanRun 去重），执行 → 入图 →
+    _mark_scanned 写 ScanRun（防重复派发 + 防循环）。
+
+    与 passive_recon / port_scan 等任务的区别:那些按固定工具链跑，
+    scan_tool 跑单个工具，由调度器按依赖层动态选择派发哪些工具。
+    """
+    asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
+    result = _run_single_tool_pipeline(tool, asset_id=asset_id, stage_name=tool)
+    findings, written = _pipeline_counts(result.get("result", {}))
+    return {
+        "status": result.get("status", "error"),
+        "tool": tool,
+        "asset_id": asset_id,
+        "findings": findings,
+        "written": written,
+    }

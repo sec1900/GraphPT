@@ -42,6 +42,11 @@ app.conf.update(
 # 默认关闭，纯手动触发。设置 GRAPHPT_AUTO_SCAN=1 启用自动调度。
 if os.getenv("GRAPHPT_AUTO_SCAN", "").strip() in ("1", "true", "yes"):
     app.conf.beat_schedule = {
+        "passive_recon": {
+            "task": "graphpt.collector.tasks.passive_recon",
+            "schedule": crontab(minute=0, hour="*/12"),
+            "options": {"queue": "collect"},
+        },
         "subdomain_enum": {
             "task": "graphpt.collector.tasks.subdomain_enum",
             "schedule": crontab(minute=0, hour="*/6"),
