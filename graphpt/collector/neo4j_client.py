@@ -916,16 +916,44 @@ class GraphWriter:
 
     def write_secret(
         self,
-        file_id: str,
         secret_type: str,
         value_preview: str = "",
         *,
+        source_url: str = "",
+        file_id: str = "",
         line: int = 0,
     ) -> dict[str, Any]:
-        """写入 Secret/Key 节点，关联到 File。value_preview 只存脱敏预览。"""
-        import uuid
-        secret_id = f"secret:{uuid.uuid4().hex[:12]}"
+        """写入 Secret 节点，挂到来源 File/HTTPEndpoint。value_preview 只存脱敏预览。
+
+        去重铁律：secret_id 由 来源 + 类型 + 预览 + 行号 确定性派生，
+        重扫同一泄露不会堆出重复节点（幂等 MERGE）。
+
+        父节点匹配（二选一，优先 source_url）：
+          - source_url：按 url 匹配 File 或 HTTPEndpoint（secretfinder 全量扫用）
+          - file_id：按 id 匹配 File（兼容旧调用路径）
+        """
+        import hashlib
+
+        parent_key = source_url or file_id
+        digest = hashlib.md5(
+            f"{parent_key}|{secret_type}|{value_preview}|{line}".encode("utf-8")
+        ).hexdigest()[:12]
+        secret_id = f"secret:{digest}"
         now = _now_iso()
+
+        if source_url:
+            attach = """
+                WITH s
+                MATCH (p {url: $source_url})
+                WHERE p:File OR p:HTTPEndpoint
+                MERGE (p)-[:MAY_CONTAIN]->(s)
+            """
+        else:
+            attach = """
+                WITH s
+                MATCH (f:File {id: $file_id})
+                MERGE (f)-[:MAY_CONTAIN]->(s)
+            """
 
         with self._driver.session() as session:
             session.run(
@@ -934,12 +962,11 @@ class GraphWriter:
                   ON CREATE SET
                     s.type = $secret_type, s.value_preview = $value_preview,
                     s.line = $line, s.created_at = $now
-                WITH s
-                MATCH (f:File {id: $file_id})
-                MERGE (f)-[:MAY_CONTAIN]->(s)
-                """,
-                secret_id=secret_id, file_id=file_id, secret_type=secret_type,
-                value_preview=value_preview, line=line, now=now,
+                  ON MATCH SET s.last_seen_at = $now
+                """ + attach,
+                secret_id=secret_id, source_url=source_url, file_id=file_id,
+                secret_type=secret_type, value_preview=value_preview,
+                line=line, now=now,
             )
             return {"id": secret_id}
 
@@ -1070,9 +1097,10 @@ class GraphWriter:
                 )
             elif ftype == "secret":
                 result = self.write_secret(
+                    f.get("secret_type", ""),
+                    f.get("value_preview", ""),
+                    source_url=f.get("source_url", ""),
                     file_id=f.get("file_id", ""),
-                    secret_type=f.get("secret_type", ""),
-                    value_preview=f.get("value_preview", ""),
                     line=f.get("line", 0),
                 )
             if result:

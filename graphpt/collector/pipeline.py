@@ -469,28 +469,39 @@ _BATCH_TARGETS: dict[str, dict[str, Any]] = {
         # 命中则注入 -tags 精准扫，未命中则 {tags_arg} 为空 → 盲扫兜底。迭代模式。
         "mapping": {"url": "{url}", "tech": "{tags_arg}"},
     },
-    "jsfinder": {
-        # 消费图中已发现的 .js File 节点（katana/urlfinder 产出），批量分析。
-        # File 经 HTTPEndpoint-[:REFERENCES]->File 关系挂在端点下。
+    "secretfinder": {
+        # 全量敏感信息检测：消费图中所有 File（katana/urlfinder 产出）
+        # + 所有 HTTPEndpoint（httpx/katana 产出）。抓内容过筛，只留命中。
+        # File 经 HTTPEndpoint-[:REFERENCES]->File 挂在端点下；
+        # HTTPEndpoint 经 Port-[:EXPOSES]->HTTPEndpoint 挂在端口下。
         "query": """
             MATCH (a:Asset {id: $asset_id})
             CALL {
               WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(:HTTPEndpoint)-[:REFERENCES]->(f:File)
-              RETURN f
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
               UNION
               WITH a
-              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(:HTTPEndpoint)-[:REFERENCES]->(f:File)
-              RETURN f
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
               UNION
               WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(:HTTPEndpoint)-[:REFERENCES]->(f:File)
-              RETURN f
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
             }
-            WITH DISTINCT f
-            WHERE f.url ENDS WITH '.js'
-              AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = f.url }
-            RETURN f.url AS url
+            WITH DISTINCT ep
+            CALL {
+              WITH ep
+              RETURN ep.url AS url
+              UNION
+              WITH ep
+              MATCH (ep)-[:REFERENCES]->(f:File)
+              RETURN f.url AS url
+            }
+            WITH DISTINCT url
+            WHERE url IS NOT NULL AND url <> ''
+              AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = url }
+            RETURN url
         """,
         "mapping": {"url": "{urls_file}"},
     },

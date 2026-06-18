@@ -1372,21 +1372,20 @@ class ObserverWardAdapter(BaseAdapter):
         return findings
 
 
-class JsfinderAdapter(BaseAdapter):
-    """jsfinder JSONL 输出适配器 → http_endpoint / api_endpoint / subdomain / secret。
+class SecretfinderAdapter(BaseAdapter):
+    """secretfinder JSONL 输出适配器 → secret / http_endpoint / api_endpoint / subdomain。
 
-    jsfinder 抓取并分析 JS 文件，输出每行一个 JSON finding，均带 from_js（来源 JS url）。
-    File 节点 id 是确定性的 file:md5(url)[:16]，故 secret/api_endpoint 可由 from_js
-    反推 file_id 关联回对应 File 节点，无需查询。
+    secretfinder 抓取 File / HTTPEndpoint 内容做敏感信息检测（筛网式），
+    JS 来源额外提取 URL / API / 子域名。每行一个 JSON finding，均带 source_url。
 
     入图策略（findings 按列表顺序写入，父节点先于子节点）：
-      - subdomain：value=host，挂入资产图
-      - http_endpoint：从 JS 提取的隐藏 URL，crawl_status=not_fetched 供后续探测
-      - api_endpoint：API 风格 URL，带 params/api_signals/from_js + file_id（File-[:DEFINES_API]->）
-      - secret：脱敏后的敏感信息，file_id 关联（File-[:MAY_CONTAIN]->）
+      - secret：脱敏后的敏感信息，按 source_url 挂到 File 或 HTTPEndpoint（-[:MAY_CONTAIN]->）
+      - subdomain：value=host，挂入资产图（仅 JS 来源）
+      - http_endpoint：从 JS 提取的隐藏 URL，crawl_status=not_fetched（仅 JS 来源）
+      - api_endpoint：API 风格 URL，source_url 是 .js File，反推 file_id 关联（File-[:DEFINES_API]->）
     """
 
-    tool_name = "jsfinder"
+    tool_name = "secretfinder"
 
     @staticmethod
     def _file_id_from_url(url: str) -> str:
@@ -1414,9 +1413,20 @@ class JsfinderAdapter(BaseAdapter):
                 continue
 
             ftype = obj.get("type", "")
-            from_js = str(obj.get("from_js") or "").strip()
+            source_url = str(obj.get("source_url") or "").strip()
 
-            if ftype == "subdomain":
+            if ftype == "secret":
+                if not source_url:
+                    continue  # secret 必须有来源才能挂父
+                findings.append({
+                    "type": "secret",
+                    "source_url": source_url,
+                    "secret_type": obj.get("secret_type", ""),
+                    "value_preview": obj.get("value_preview", ""),
+                    "line": obj.get("line", 0),
+                })
+
+            elif ftype == "subdomain":
                 host = str(obj.get("value") or "").strip().strip(".").lower()
                 if not host or host in seen_hosts:
                     continue
@@ -1425,7 +1435,7 @@ class JsfinderAdapter(BaseAdapter):
                     "type": "subdomain",
                     "value": host,
                     "root_domain": obj.get("root_domain") or ".".join(host.split(".")[-2:]),
-                    "source": "jsfinder",
+                    "source": "secretfinder",
                     "asset_id": asset_id,
                 })
 
@@ -1441,7 +1451,7 @@ class JsfinderAdapter(BaseAdapter):
                     "method": obj.get("method", "GET"),
                     "parent_id": f"sub:{host}" if host else "",
                     "crawl_status": "not_fetched",
-                    "source": "jsfinder",
+                    "source": "secretfinder",
                     "asset_id": asset_id,
                 })
 
@@ -1453,24 +1463,12 @@ class JsfinderAdapter(BaseAdapter):
                     "type": "api_endpoint",
                     "url": url,
                     "method": obj.get("method", "GET"),
-                    "file_id": self._file_id_from_url(from_js),
+                    "file_id": self._file_id_from_url(source_url),
                     "params": obj.get("params", []),
                     "param_source": obj.get("param_source", ""),
                     "api_signals": obj.get("api_signals", []),
-                    "from_js": from_js,
-                    "source": "jsfinder",
-                })
-
-            elif ftype == "secret":
-                file_id = self._file_id_from_url(from_js)
-                if not file_id:
-                    continue  # secret 必须挂在 File 下，无 from_js 则跳过
-                findings.append({
-                    "type": "secret",
-                    "file_id": file_id,
-                    "secret_type": obj.get("secret_type", ""),
-                    "value_preview": obj.get("value_preview", ""),
-                    "line": obj.get("line", 0),
+                    "from_js": source_url,
+                    "source": "secretfinder",
                 })
 
         return findings
@@ -1491,4 +1489,4 @@ register_adapter("gobuster", GobusterAdapter)
 register_adapter("katana", KatanaAdapter)
 register_adapter("nuclei", NucleiAdapter)
 register_adapter("403bypass", BypassAdapter)
-register_adapter("jsfinder", JsfinderAdapter)
+register_adapter("secretfinder", SecretfinderAdapter)

@@ -1,41 +1,47 @@
 #!/usr/bin/env python3
-"""jsfinder — JS 静态分析工具（纯 Python，零外部依赖）。
+"""secretfinder — 全量敏感信息检测工具（纯 Python，零外部依赖）。
 
-GraphPT 节点驱动采集链的一环：消费图中已发现的 JS File 节点，
-自己抓取 JS 内容，提取隐藏 URL / API 接口 / 敏感信息 / 子域名，
-输出 JSONL 到 stdout，交 JsfinderAdapter 解析入图。
+GraphPT 节点驱动采集链的一环：消费图中已发现的 File / HTTPEndpoint 节点，
+自己抓取内容，做敏感信息检测（筛网式：抓取→内存里扫→只留命中→原文丢弃）。
+JS 文件额外做隐藏 URL / API 接口 / 子域名提取。
 
-被动边界：只 GET 由 -list 传入的 JS url（这些 url 是 katana/urlfinder 在
-授权目标上爬到、已入图的资源），不主动扩展抓取范围，不爆破。
+筛网铁律：响应体绝不落库。落库的只有命中的 Secret（脱敏）。几千端点也不炸——
+内存里只有正在处理的那批，落库量 = 真实泄露数，与扫描规模无关。
+
+被动边界：只 GET 由 -list 传入的 url（这些是 katana/httpx/urlfinder 在授权目标上
+发现、已入图的资源），不主动扩展抓取范围，不爆破。
 
 用法:
-    python jsfinder.py -list <urls_file>   # 每行一个 JS url
+    python secretfinder.py -list <urls_file> [--concurrency N] [--max-bytes N]
 
-输出（stdout，每行一个 JSON）:
-    {"type":"http_endpoint","url":"...","from_js":"..."}
-    {"type":"api_endpoint","url":"...","params":[...],"api_signals":[...],"from_js":"..."}
-    {"type":"subdomain","value":"...","from_js":"..."}
-    {"type":"secret","secret_type":"AWS Access Key","value_preview":"AKIA****...","line":12,"from_js":"..."}
+输出（stdout，每行一个 JSON，均带 source_url 标明来源）:
+    {"type":"secret","secret_type":"AWS Access Key","value_preview":"AKIA****","line":12,"source_url":"..."}
+    {"type":"http_endpoint","url":"...","source_url":"..."}            # 仅 JS 来源
+    {"type":"api_endpoint","url":"...","params":[...],"source_url":"..."}  # 仅 JS 来源
+    {"type":"subdomain","value":"...","source_url":"..."}             # 仅 JS 来源
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import ssl
 import sys
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
 
-# ---- 抓取参数 ----
+# ---- 抓取参数（可经 env / 命令行覆盖）----
 
 _TIMEOUT = 15.0
-_MAX_BYTES = 5 * 1024 * 1024  # 5MB 上限，防超大/恶意 JS
-_UA = "Mozilla/5.0 (GraphPT jsfinder; passive JS analysis)"
+_DEFAULT_MAX_BYTES = 2 * 1024 * 1024  # 2MB，防超大页面拖垮内存
+_DEFAULT_CONCURRENCY = 20
+_UA = "Mozilla/5.0 (GraphPT secretfinder; passive content analysis)"
 
 
 # ---- URL 提取正则（LinkFinder / JSFinder 经典模式）----
@@ -86,7 +92,7 @@ def _load_secret_rules() -> list[dict]:
 
     找不到规则文件或缺 yaml 库时返回空列表（降级为只提 URL/API，不报错）。
     """
-    # 定位 res/secrets_rules.yaml：tools/jsfinder/jsfinder.py → 上三级是项目根
+    # 定位 res/secrets_rules.yaml：tools/secretfinder/secretfinder.py → 上三级是项目根
     root = Path(__file__).resolve().parent.parent.parent
     rules_path = root / "res" / "secrets_rules.yaml"
     if not rules_path.is_file():
@@ -128,19 +134,19 @@ def _mask(value: str) -> str:
     return f"{value[:4]}{'*' * 6}{value[-4:]}"
 
 
-# ---- JS 抓取 ----
+# ---- 内容抓取 ----
 
 _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.check_hostname = False
 _SSL_CTX.verify_mode = ssl.CERT_NONE
 
 
-def _fetch(url: str) -> str:
-    """GET 抓取 JS 内容。失败返回空串。超时 + 大小上限 + 忽略 TLS 错误。"""
+def _fetch(url: str, max_bytes: int = _DEFAULT_MAX_BYTES) -> str:
+    """GET 抓取内容到内存。失败返回空串。超时 + 大小上限 + 忽略 TLS 错误。"""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _UA})
         with urllib.request.urlopen(req, timeout=_TIMEOUT, context=_SSL_CTX) as resp:
-            raw = resp.read(_MAX_BYTES)
+            raw = resp.read(max_bytes)
         return raw.decode("utf-8", errors="replace")
     except (urllib.error.URLError, TimeoutError, ValueError, OSError):
         return ""
@@ -209,15 +215,35 @@ def _param_names(url: str) -> list[str]:
             if not (k in seen or seen.add(k))]
 
 
-def analyze(content: str, js_url: str, rules: list[dict]) -> list[dict]:
-    """分析单个 JS 内容，产出 finding 列表（dict，未序列化）。"""
+def scan_secrets(content: str, source_url: str, rules: list[dict]) -> list[dict]:
+    """敏感信息检测（筛网核心）：对任意文本跑规则，产出脱敏后的 secret finding。
+
+    只存规则名 + 严重度 + 行号 + 掩码片段，明文绝不出现（脱敏铁律）。
+    对所有内容来源通用（JS / HTML / 配置 / 响应体）。
+    """
+    findings: list[dict] = []
+    for rule in rules:
+        for m in rule["regex"].finditer(content):
+            matched = m.group(0)
+            findings.append({
+                "type": "secret",
+                "secret_type": rule["name"],
+                "severity": rule["severity"],
+                "value_preview": _mask(matched),
+                "line": _line_of(content, m.start()),
+                "source_url": source_url,
+            })
+    return findings
+
+
+def _extract_js_assets(content: str, js_url: str) -> list[dict]:
+    """JS 专属：提取隐藏 URL / API 接口 / 子域名（非敏感信息部分）。"""
     findings: list[dict] = []
     js_host = (urlsplit(js_url).hostname or "").strip(".").lower()
     root = ".".join(js_host.split(".")[-2:]) if js_host.count(".") >= 1 else js_host
 
     seen_hosts: set[str] = set()
 
-    # 1) URL / API / 子域名
     for url in _extract_urls(content, js_url):
         path_lower = urlsplit(url).path.lower()
         if path_lower.endswith(_STATIC_EXTS):
@@ -231,7 +257,7 @@ def analyze(content: str, js_url: str, rules: list[dict]) -> list[dict]:
                 "type": "subdomain",
                 "value": host,
                 "root_domain": root,
-                "from_js": js_url,
+                "source_url": js_url,
             })
 
         if _is_api(url) or _param_names(url):
@@ -243,7 +269,7 @@ def analyze(content: str, js_url: str, rules: list[dict]) -> list[dict]:
                 "params": params,
                 "param_source": "query" if params else "",
                 "api_signals": _api_signals(url, params),
-                "from_js": js_url,
+                "source_url": js_url,
             })
         else:
             findings.append({
@@ -251,29 +277,35 @@ def analyze(content: str, js_url: str, rules: list[dict]) -> list[dict]:
                 "url": url,
                 "method": "GET",
                 "crawl_status": "not_fetched",
-                "from_js": js_url,
-            })
-
-    # 2) 敏感信息（脱敏，只存规则名 + 行号 + 掩码片段）
-    for rule in rules:
-        for m in rule["regex"].finditer(content):
-            matched = m.group(0)
-            findings.append({
-                "type": "secret",
-                "secret_type": rule["name"],
-                "severity": rule["severity"],
-                "value_preview": _mask(matched),
-                "line": _line_of(content, m.start()),
-                "from_js": js_url,
+                "source_url": js_url,
             })
 
     return findings
 
 
+def analyze(content: str, source_url: str, rules: list[dict]) -> list[dict]:
+    """分析单个内容来源，产出 finding 列表（dict，未序列化）。
+
+    所有来源都跑敏感信息检测；.js 来源额外提取 URL/API/子域名。
+    """
+    findings: list[dict] = []
+    if source_url.split("?", 1)[0].lower().endswith(".js"):
+        findings.extend(_extract_js_assets(content, source_url))
+    findings.extend(scan_secrets(content, source_url, rules))
+    return findings
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="JS 静态分析（URL/API/敏感信息/子域名）")
+    parser = argparse.ArgumentParser(
+        description="全量敏感信息检测（+ JS 的 URL/API/子域名提取）")
     parser.add_argument("-list", dest="list_file", required=True,
-                        help="JS url 列表文件，每行一个")
+                        help="url 列表文件，每行一个（File / HTTPEndpoint url）")
+    parser.add_argument("--concurrency", type=int,
+                        default=int(os.environ.get("GRAPHPT_SECRETFINDER_CONCURRENCY", _DEFAULT_CONCURRENCY)),
+                        help="并发抓取线程数（默认 20，可经 env GRAPHPT_SECRETFINDER_CONCURRENCY 调整）")
+    parser.add_argument("--max-bytes", type=int,
+                        default=int(os.environ.get("GRAPHPT_SECRETFINDER_MAX_BYTES", _DEFAULT_MAX_BYTES)),
+                        help="单个响应体大小上限字节（默认 2MB，超出截断）")
     args = parser.parse_args()
 
     list_path = Path(args.list_file)
@@ -283,19 +315,34 @@ def main() -> int:
 
     urls = [ln.strip() for ln in list_path.read_text(encoding="utf-8", errors="replace").splitlines()
             if ln.strip() and not ln.strip().startswith("#")]
+    # 规范化 + 去重，保序
+    norm: list[str] = []
+    seen: set[str] = set()
+    for u in urls:
+        if "://" not in u:
+            u = "https://" + u
+        if u not in seen:
+            seen.add(u)
+            norm.append(u)
 
     rules = _load_secret_rules()
     out = sys.stdout
 
-    for js_url in urls:
-        if "://" not in js_url:
-            js_url = "https://" + js_url
-        content = _fetch(js_url)
+    def _process(url: str) -> list[dict]:
+        """抓取→扫描→丢弃。响应体只在此函数内存活，不返回原文（筛网铁律）。"""
+        content = _fetch(url, max_bytes=args.max_bytes)
         if not content:
-            continue
-        for finding in analyze(content, js_url, rules):
-            out.write(json.dumps(finding, ensure_ascii=False) + "\n")
-        out.flush()
+            return []
+        return analyze(content, url, rules)
+
+    # 线程池并发抓取；结果按行写出（顺序无关，每行独立 JSON）
+    concurrency = max(1, args.concurrency)
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        for findings in pool.map(_process, norm):
+            for finding in findings:
+                out.write(json.dumps(finding, ensure_ascii=False) + "\n")
+            if findings:
+                out.flush()
 
     return 0
 
