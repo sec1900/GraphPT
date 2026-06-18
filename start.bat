@@ -12,6 +12,14 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
+:: ---- 先停旧的 Celery / uvicorn（避免改代码后跑旧版）----
+echo Stopping previous services...
+for /f "tokens=2" %%p in ('netstat -ano ^| findstr ":8080 " ^| findstr "LISTENING" 2^>nul') do (
+    taskkill /PID %%p /F >nul 2>&1
+)
+taskkill /FI "IMAGENAME eq python.exe" /FI "WINDOWTITLE eq GraphPT-Celery*" /F >nul 2>&1
+timeout /t 2 /nobreak >nul
+
 echo Neo4j...
 if not exist "tools\neo4j\bin\neo4j.bat" (
     echo ERROR: tools\neo4j not found. Run install.bat or manually extract Neo4j to tools\neo4j\
@@ -42,10 +50,10 @@ if not exist "tools\memurai\memurai.exe" (
 start "" /B "tools\memurai\memurai.exe" --port 6379
 
 echo Celery Worker...
-start "" /MIN cmd /c "cd /d %~dp0 && python -m celery -A graphpt.collector.app worker -P solo -Q celery,collect,deep_crawl"
+start "GraphPT-Celery" /MIN cmd /c "cd /d %~dp0 && python -m celery -A graphpt.collector.app worker -P solo -Q celery,collect,deep_crawl --without-gossip --without-mingle"
 
 echo Web Server...
-start "" /MIN cmd /c "cd /d %~dp0 && python -m uvicorn graphpt.web.app:web_app --host 0.0.0.0 --port 8080"
+start "GraphPT-Web" /MIN cmd /c "cd /d %~dp0 && python -m uvicorn graphpt.web.app:web_app --host 0.0.0.0 --port 8080 --reload"
 
 timeout /t 10 /nobreak >nul
 start http://127.0.0.1:8080
