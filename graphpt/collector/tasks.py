@@ -224,11 +224,13 @@ def _run_single_tool_pipeline(
         target_overrides=target_overrides,
     )
     result = executor.execute()
+    log_path = executor.ctx.get("_last_tool_log", "")
     return {
         "status": result.get("status", "error"),
         "tool": tool,
         "targets": len(targets or []),
         "result": result,
+        "log_file": log_path,
     }
 
 
@@ -476,7 +478,7 @@ def query_unverified(self, asset_id: str | None = None):
 
 # ---- L2 采集（Agent 按需触发）----
 
-@app.task(bind=True, max_retries=2, default_retry_delay=300, time_limit=600)
+@app.task(bind=True, max_retries=2, default_retry_delay=300)
 def deep_crawl(self, url: str, asset_id: str):
     """L2 深度爬取 — Agent 按需触发。
 
@@ -575,4 +577,5 @@ def scan_tool(self, tool: str, asset_id: str = "default"):
         "asset_id": asset_id,
         "findings": findings,
         "written": written,
+        "log_file": result.get("log_file", ""),
     }

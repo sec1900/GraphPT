@@ -29,6 +29,7 @@ from graphpt.collector.adapter import ADAPTER_MAP
 from graphpt.collector.app import app
 from graphpt.collector.neo4j_client import get_graph_writer
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 PIPELINES_PATH = Path(__file__).resolve().parent / "pipelines.yaml"
 
 
@@ -1053,10 +1054,20 @@ class PipelineExecutor:
                 _cleanup_iteration_file()
                 continue
             cmd = _split_command(cmd_str)
+            # 工具输出写临时文件(实时可见), 同时 capture 到内存供 adapter 解析
+            import hashlib, time as _time
+            _tool_log = _PROJECT_ROOT / "tools" / tool / "logs"
+            _tool_log.mkdir(parents=True, exist_ok=True)
+            _log_file = _tool_log / f"{_time.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(cmd_str.encode()).hexdigest()[:8]}.log"
             try:
-                proc = subprocess.run(cmd, capture_output=True, timeout=86400,
-                                      text=True, encoding='utf-8', errors='replace',
-                                      env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
+                with open(_log_file, "w", encoding="utf-8", errors="replace") as _lf:
+                    proc = subprocess.run(cmd, timeout=None,
+                                          text=True, encoding='utf-8', errors='replace',
+                                          env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    if proc.stdout:
+                        _lf.write(proc.stdout)
+                self.ctx["_last_tool_log"] = str(_log_file)
             except subprocess.TimeoutExpired:
                 errors.append({
                     "tool": tool,
@@ -1078,7 +1089,7 @@ class PipelineExecutor:
                 _cleanup_iteration_file()
                 continue
 
-            stdout = (proc.stdout or "").strip()
+            stdout = proc.stdout or ""
             if proc.returncode != 0 and not stdout:
                 errors.append({
                     "tool": tool,
@@ -1304,7 +1315,7 @@ class PipelineExecutor:
 
 # ---- Celery 任务 ----
 
-@app.task(bind=True, max_retries=1, time_limit=3600)
+@app.task(bind=True, max_retries=1)
 def run_pipeline(
     self,
     pipeline_name: str,
