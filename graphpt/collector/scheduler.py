@@ -44,7 +44,7 @@ from typing import Any
 # HTTPEndpoint 由 httpx(第4层)/katana(第5层)产出，跨层串行保证内容先入图，
 # 下一轮 secretfinder 才有目标做敏感信息检测。
 _DEPENDENCY_LAYERS: list[dict[str, Any]] = [
-    {"layer": 1, "node": "RootDomain", "tools": ["subfinder", "urlfinder"]},
+    {"layer": 1, "node": "RootDomain", "tools": ["crt", "subfinder", "urlfinder"]},
     {"layer": 2, "node": "Subdomain", "tools": ["dnsx"]},
     {"layer": 3, "node": "IP", "tools": ["naabu"]},
     {"layer": 4, "node": "IP/Port", "tools": ["nmap", "httpx"]},
