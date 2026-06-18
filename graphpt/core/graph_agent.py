@@ -1,13 +1,10 @@
-"""Graph Agent — 图分析 Agent 会话管理。
+"""Graph Agent — 自动化渗透测试 Agent。
 
-提供按资产启动 Agent 的统一接口，支持两阶段工具门控：
-  - 分析阶段：只能读图（graph_query/graph_summary/graph_attack_paths）
-  - 拓展阶段：解锁 trigger_scan，基于分析结论精准触发工具
+单阶段 Attack 模式：全工具开放，Agent 自主决定先侦察还是先攻击。
 """
 
 from __future__ import annotations
 
-import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,60 +20,44 @@ from graphpt.tools.core import _TOOL_REGISTRY
 
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "agent_prompt.yaml"
 
-_DEFAULT_SYSTEM_TEMPLATE = """你是 GraphPT 渗透测试分析 Agent。
+_EXCLUDED_TOOLS = frozenset({"Task"})
 
-当前资产: {asset_id}
-当前阶段: {phase_desc}
+_DEFAULT_SYSTEM_TEMPLATE = """你是 GraphPT 自动化渗透测试 Agent。
+
+当前目标资产: {asset_id}
 
 {schema_knowledge}
 
 {methodology}
 
-{phase_instruction}
+{attack_instruction}
 """
 
-_DEFAULT_PHASE_INSTRUCTIONS = {
-    "analyze": (
-        "【分析阶段】\n"
-        "你当前只能读取图数据库。请充分分析已有数据，发现攻击路径和薄弱环节。\n"
-        "完成分析后，输出结构化报告并列出建议的拓展动作。\n"
-        "禁止调用 trigger_scan — 该工具在分析阶段不可用。"
-    ),
-    "expand": (
-        "【拓展阶段】\n"
-        "分析已完成，你现在可以使用 trigger_scan 触发精准扫描。\n"
-        "原则：不重复已有 ScanRun、每次触发都有分析依据、最小化扫描范围。"
-    ),
-}
+_DEFAULT_ATTACK_INSTRUCTION = """## 执行模式：单阶段 Attack
+
+- 先查询图数据库，理解已有资产、攻击面、漏洞和扫描覆盖情况。
+- 发现缺口后直接触发必要工具补全数据，不需要等待阶段切换。
+- 每次工具执行后回到图数据库查询新增数据，用图里的事实决定下一步。
+- 不要复述流程，直接推进侦察、验证、利用判断和最终结论。
+"""
 
 
-# ---- 工具过滤 ----
+def _get_tool_schemas() -> list[dict[str, Any]]:
+    """返回所有已注册工具（除 Task 外）的 schema。"""
+    from graphpt.tools.defs import init_builtin_tools
 
-_ANALYZE_TOOLS = frozenset({
-    "graph_query", "graph_summary", "graph_attack_paths",
-    "db_query", "Read", "Grep", "Glob", "TodoWrite",
-})
-
-_EXPAND_TOOLS = _ANALYZE_TOOLS | frozenset({
-    "trigger_scan", "Bash", "Write", "Edit",
-})
-
-
-def _get_tool_schemas(phase: str) -> list[dict[str, Any]]:
-    """按阶段过滤可用工具 schema。"""
-    allowed = _EXPAND_TOOLS if phase == "expand" else _ANALYZE_TOOLS
+    init_builtin_tools()
     return [
         t.to_function_schema()
         for t, _ in _TOOL_REGISTRY.values()
-        if t.name in allowed
+        if t.name not in _EXCLUDED_TOOLS
     ]
 
 
 # ---- 系统提示构建 ----
 
-
 def _load_prompt_config() -> dict:
-    """从 yaml 加载 prompt 配置，失败则返回空 dict（用代码默认值）。"""
+    """从 yaml 加载 prompt 配置，失败则返回空 dict。"""
     try:
         if _CONFIG_PATH.exists():
             return yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8")) or {}
@@ -85,20 +66,17 @@ def _load_prompt_config() -> dict:
     return {}
 
 
-def _build_system_prompt(asset_id: str, phase: str) -> str:
+def _build_system_prompt(asset_id: str) -> str:
     cfg = _load_prompt_config()
-    phase_desc = "分析（只读）" if phase == "analyze" else "拓展（可触发扫描）"
     template = cfg.get("system_template") or _DEFAULT_SYSTEM_TEMPLATE
     schema = cfg.get("schema_knowledge") or GRAPH_SCHEMA_KNOWLEDGE
     methodology = cfg.get("methodology") or GRAPH_AGENT_METHODOLOGY
-    phase_instrs = cfg.get("phase_instructions") or _DEFAULT_PHASE_INSTRUCTIONS
-    phase_instruction = phase_instrs.get(phase, _DEFAULT_PHASE_INSTRUCTIONS.get(phase, ""))
+    attack_instruction = cfg.get("attack_instruction") or _DEFAULT_ATTACK_INSTRUCTION
     return template.format(
         asset_id=asset_id,
-        phase_desc=phase_desc,
         schema_knowledge=schema,
         methodology=methodology,
-        phase_instruction=phase_instruction,
+        attack_instruction=attack_instruction,
     )
 
 
@@ -106,9 +84,8 @@ def _build_system_prompt(asset_id: str, phase: str) -> str:
 
 @dataclass
 class GraphAgentResult:
-    """图分析 Agent 执行结果。"""
+    """渗透测试 Agent 执行结果。"""
     final_text: str
-    phase: str
     asset_id: str
     tool_calls_count: int
     total_tokens: int
@@ -117,7 +94,6 @@ class GraphAgentResult:
 def run_graph_agent(
     *,
     asset_id: str,
-    phase: str = "analyze",
     user_prompt: str = "",
     workspace_root: Path | None = None,
     db_file: Path | None = None,
@@ -128,14 +104,7 @@ def run_graph_agent(
     prior_messages: list[dict[str, Any]] | None = None,
     steering_provider: Callable[[], list[str]] | None = None,
 ) -> GraphAgentResult:
-    """启动图分析 Agent。
-
-    参数:
-        asset_id: 目标资产 ID
-        phase: "analyze" 或 "expand"
-        user_prompt: 用户指令（默认自动生成分析指令）
-        prior_messages: 上一阶段的对话历史（用于 analyze → expand 续接）
-    """
+    """启动渗透测试 Agent。"""
     from graphpt.cli.app import build_ai_config
     from graphpt.common.settings import AppSettings
     from graphpt.core.agent_loop import run_agent_loop
@@ -146,15 +115,11 @@ def run_graph_agent(
     settings = AppSettings.from_env()
     ai_config = build_ai_config(settings)
 
-    system_prompt = _build_system_prompt(asset_id, phase)
-    tools = _get_tool_schemas(phase)
+    system_prompt = _build_system_prompt(asset_id)
+    tools = _get_tool_schemas()
 
     if not user_prompt:
-        user_prompt = (
-            f"请分析资产 {asset_id} 的图数据库，生成攻击面分析报告。"
-            if phase == "analyze"
-            else f"根据分析结果，对资产 {asset_id} 执行精准拓展扫描。"
-        )
+        user_prompt = f"对资产 {asset_id} 发起渗透测试。先查询图数据库了解已有攻击面，然后主动尝试利用发现的漏洞和弱点。"
 
     result = run_agent_loop(
         ai_config=ai_config,
@@ -174,7 +139,6 @@ def run_graph_agent(
 
     return GraphAgentResult(
         final_text=result.final_text,
-        phase=phase,
         asset_id=asset_id,
         tool_calls_count=len(result.tool_calls),
         total_tokens=result.total_prompt_tokens + result.total_completion_tokens,

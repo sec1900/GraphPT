@@ -1,4 +1,4 @@
-"""图分析 Agent 系统提示词 — Neo4j Schema 知识 + 方法论。"""
+"""Graph Agent 系统提示词 — Neo4j Schema 知识 + 单阶段 Attack 方法论。"""
 
 from __future__ import annotations
 
@@ -26,13 +26,14 @@ GRAPH_SCHEMA_KNOWLEDGE = """
 ### 关系
 ```
 Asset -[:HAS_ROOT]-> RootDomain -[:HAS_SUB]-> Subdomain -[:RESOLVES_TO]-> IP
-IP -[:HAS_PORT]-> Port -[:HAS_SERVICE]-> Service
+Asset -[:HAS_IP]-> IP （直连，不经子域名）
+IP -[:HAS_PORT]-> Port
+Port -[:HAS_SERVICE]-> Service
 Port -[:EXPOSES]-> HTTPEndpoint
 HTTPEndpoint -[:MAY_BE_VULNERABLE_TO]-> Vulnerability
 HTTPEndpoint -[:EXPOSES_PATH]-> DirEntry
 HTTPEndpoint -[:REFERENCES]-> File -[:MAY_CONTAIN]-> Secret
-HTTPEndpoint -[:RAN]-> ScanRun
-Asset -[:HAS_IP]-> IP （直连，不经子域名）
+ScanRun -[:RAN]-> 任意被扫描目标节点（Asset/RootDomain/Subdomain/IP/Port/HTTPEndpoint）
 Asset -[:HAS_ICP]-> ICPRecord -[:COVERS]-> RootDomain
 ```
 
@@ -57,6 +58,10 @@ RETURN sub.value
 MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->()-[:HAS_SUB]->()-[:RESOLVES_TO]->()-[:HAS_PORT]->()-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
 WHERE v.severity IN ['critical', 'high']
 RETURN ep.url, v.title, v.severity, v.type
+UNION
+MATCH (a:Asset {id: $asset_id})-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+WHERE v.severity IN ['critical', 'high']
+RETURN ep.url, v.title, v.severity, v.type
 
 // 查看特定 IP 的全部端口和服务
 MATCH (ip:IP {value: $ip_value})-[:HAS_PORT]->(p:Port)
@@ -65,39 +70,45 @@ RETURN p.number, p.protocol, p.status, svc.name
 
 // 查看哪些端点还没跑过 nuclei
 MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->()-[:HAS_SUB]->()-[:RESOLVES_TO]->()-[:HAS_PORT]->()-[:EXPOSES]->(ep:HTTPEndpoint)
-WHERE NOT exists { (ep)-[:RAN]->(sr:ScanRun {tool: 'nuclei'}) }
+WHERE NOT EXISTS {
+  MATCH (:ScanRun {tool: 'nuclei'})-[:RAN]->(ep)
+}
+RETURN ep.url, ep.title, ep.tech
+UNION
+MATCH (a:Asset {id: $asset_id})-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+WHERE NOT EXISTS {
+  MATCH (:ScanRun {tool: 'nuclei'})-[:RAN]->(ep)
+}
 RETURN ep.url, ep.title, ep.tech
 ```
 """
 
 GRAPH_AGENT_METHODOLOGY = """
-## 工作方法论：先消化已有数据，再精准拓展
+## 工作方法论：图驱动的单阶段 Attack
 
-你是一个渗透测试分析 Agent。你的目标是基于图数据库中**已有**的资产信息进行深度分析，发现攻击路径和薄弱环节。
+你是一个自动化渗透测试 Agent。你的目标是基于图数据库中的资产信息持续推进侦察、验证和攻击路径分析。
 
-### 阶段一：分析（只读图数据库）
+### 核心循环
 
 1. **全局概览** — 先用 graph_summary 了解资产规模（域名数、IP 数、端口数、端点数、漏洞数）
 2. **覆盖空白** — 查看哪些节点缺少下游关系（子域名未解析、IP 未扫端口、端口未指纹识别）
 3. **高价值目标** — 按 severity 排序查看已有漏洞，关注 critical/high
 4. **攻击路径** — 用 graph_attack_paths 找多跳路径，评估从入口到目标的可达性
-5. **关联分析** — 交叉查询：
+5. **精准补全** — 对缺失数据直接触发必要工具
+6. **回查新数据** — 工具执行后再查图数据库确认新增节点和关系
+7. **关联分析** — 交叉查询：
    - 同一 IP 上多个端口/服务 → 横向移动机会
    - 同一技术栈(tech[])的多个端点 → 批量利用
    - Secret 节点 → 凭据复用验证
    - 低置信度(单 source)的漏洞 → 需要二次验证
+8. **输出结论** — 给出已验证事实、风险、攻击路径和下一步建议
 
-6. **输出分析报告** — 包含：
-   - 资产全景总结
-   - Top 攻击路径（从入口到目标）
-   - 建议的拓展动作（填补哪些空白、验证哪些漏洞）
+### 工具使用原则
 
-### 阶段二：拓展（触发扫描工具）
-
-分析完成后，才可使用 trigger_scan 工具。拓展原则：
-- **不重复** — 查 ScanRun 节点确认该工具没对该目标跑过
-- **有依据** — 每次触发都基于分析阶段发现的具体空白或假设
-- **最小化** — 只触发必要的扫描，不做无差别全端口/全工具轰炸
+- **不重复** — 查 `(:ScanRun {tool})-[:RAN]->(target)` 确认该工具没对目标跑过
+- **有依据** — 每次触发都基于图里的事实
+- **最小化** — 只扫描必要目标
+- **闭环** — 工具执行后必须回查图数据库
 
 ### 重要约束
 
