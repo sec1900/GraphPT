@@ -114,43 +114,75 @@ def progress(asset_id: str = "default") -> list[dict[str, Any]]:
 
 
 def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[str, Any]:
-    """推进一轮:找到最低的"有目标"依赖层，派发该层所有有目标的工具。
+    """推进一轮:找到最低的"有目标"依赖层,派发该层所有有目标的工具。
 
-    同层并行（一次派发该层全部有目标工具）、跨层串行（只推进最低有目标层，
-    更高层留到下一轮——因为它们的目标往往要等本层产出后才出现）。
+    同层并行(一次派发该层全部有目标工具)、跨层串行(只推进最低有目标层,
+    更高层留到下一轮——因为它们的目标往往要等本层产出后才出现)。
+
+    防重复:派发后设 Redis 锁(按 tool+asset_id),锁有效期内重复点击不会重复派发
+    同一工具。锁带 TTL 自动过期,防止任务崩溃后永久死锁。
 
     Args:
       asset_id: 资产 id
-      dispatch: True 派发 Celery 任务执行；False 只探测不派发（dry-run，供预览/测试）
+      dispatch: True 派发 Celery 任务执行;False 只探测不派发(dry-run,供预览/测试)
 
     Returns:
       {
-        "status": "dispatched" | "idle",
+        "status": "dispatched" | "idle" | "running",
         "layer": <推进的层号> | None,
         "node": <该层消费的节点类型> | None,
         "dispatched": [{"tool": str, "targets": int, "task_id": str|None}, ...],
         "asset_id": asset_id,
       }
-      status=idle 表示所有层都没目标（扫描已收敛）。
+      status=idle 表示所有层都没目标(扫描已收敛)。
+      status=running 表示有可用目标但该层有工具正在执行中,暂不派发。
     """
+    import redis as _redis
+    _LOCK_TTL = 1800  # 锁 30 分钟过期,防止任务挂死
+    try:
+        _r = _redis.Redis(host="localhost", port=6379, socket_connect_timeout=2,
+                          decode_responses=True)
+        _r.ping()
+    except Exception:
+        _r = None  # Redis 不可用 → 不走锁逻辑(保留旧行为)
+
     for spec in _DEPENDENCY_LAYERS:
         tools = spec["tools"]
-        # 探测本层每个工具的待处理目标数
         ready = []
+        skipped = []
         for tool in tools:
             n = _count_targets(tool, asset_id)
-            if n > 0:
-                ready.append({"tool": tool, "targets": n})
+            if n <= 0:
+                continue
+            # 防重复:如果这个工具的锁还在,说明上一轮还没跑完,跳过
+            lock_key = f"scheduler:lock:{asset_id}:{tool}"
+            if _r and _r.exists(lock_key):
+                skipped.append(tool)
+                continue
+            ready.append({"tool": tool, "targets": n})
 
+        if skipped:
+            # 有工具被跳过(正在执行中),推进到下一轮再试——用户等当前任务完成后再点
+            return {
+                "status": "running",
+                "layer": spec["layer"],
+                "node": spec["node"],
+                "dispatched": [],
+                "running": skipped,
+                "asset_id": asset_id,
+            }
         if not ready:
-            continue  # 本层无目标 → 进入下一层
+            continue
 
-        # 找到最低的有目标层 → 派发该层所有有目标工具（同层并行），本轮结束
+        # 派发该层所有有目标工具(同层并行)
         dispatched = []
         for item in ready:
             task_id = None
             if dispatch:
                 task_id = _dispatch_tool(item["tool"], asset_id)
+                if _r and task_id:
+                    _r.setex(f"scheduler:lock:{asset_id}:{item['tool']}",
+                             _LOCK_TTL, task_id or "dispatched")
             dispatched.append({
                 "tool": item["tool"],
                 "targets": item["targets"],

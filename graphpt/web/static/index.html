@@ -2308,6 +2308,12 @@ async function schedulerAdvance() {
       showSchedulerProgress();
       return;
     }
+    if (d.status === 'running') {
+      const running = (d.running || []).join(', ');
+      toast(`第${d.layer}层正在执行中: ${running}，请等待当前任务完成后再推进`, true);
+      showSchedulerProgress();
+      return;
+    }
     const tools = (d.dispatched || []).map(x => `${x.tool}(${x.targets})`).join(', ');
     toast(`已派发 第${d.layer}层[${d.node}]: ${tools}`, true);
     // 轮询进度（2秒一次）
