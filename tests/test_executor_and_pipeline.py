@@ -430,7 +430,9 @@ def test_company_recon_preview_resolves_default_commands():
             "katana": [{"{url}": "http://127.0.0.1/"}],
             "ffuf": [{"{url}": "http://127.0.0.1"}],
             "gobuster": [{"{url}": "http://127.0.0.1"}],
+            "observer_ward": [{"{url}": "http://127.0.0.1/"}],
             "nuclei": [{"{url}": "http://127.0.0.1/", "{tags_arg}": ""}],
+            "403bypass": [{"{url}": "http://127.0.0.1/admin", "{target_id}": "dir:smoke"}],
         },
     )
 

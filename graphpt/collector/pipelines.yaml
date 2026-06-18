@@ -1,6 +1,6 @@
 pipelines:
   company_recon:
-    description: 公司→域名→子域名→DNS→端口→服务→指纹→爬虫/目录→漏洞扫描
+    description: 公司→域名→子域名→DNS→端口→服务→指纹→爬虫/目录→指纹精扫→403绕过
     stages:
     - name: company_to_root_domain
       tools:
@@ -18,12 +18,20 @@ pipelines:
       tools:
       - nmap
       - httpx
-    - name: endpoint_analysis
+    - name: web_crawl_brute
       tools:
       - katana
       - ffuf
       - gobuster
+    - name: web_fingerprint
+      tools:
+      - observer_ward
+    - name: vuln_scan
+      tools:
       - nuclei
+    - name: access_bypass
+      tools:
+      - 403bypass
 
   port_discovery:
     description: 快速全端口发现 → 针对性服务识别 → Web 指纹收集
@@ -48,7 +56,7 @@ pipelines:
       - httpx
 
   web_deep:
-    description: 端口扫描 → 指纹 → 并行爬虫+目录爆破
+    description: 端口扫描 → 指纹 → 并行爬虫+目录爆破 → 403绕过
     stages:
     - name: ip_to_port
       tools:
@@ -61,6 +69,9 @@ pipelines:
       tools:
       - katana
       - ffuf
+    - name: access_bypass
+      tools:
+      - 403bypass
 
   test_nmap_chain:
     description: 单阶段 nmap（验证用）
