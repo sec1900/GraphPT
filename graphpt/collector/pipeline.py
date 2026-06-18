@@ -720,6 +720,19 @@ class PipelineExecutor:
             targets = self.target_overrides.get(tool, [])
             return [dict(target) for target in targets if target] or [{}]
 
+        # 403bypass：目标选择已由 list_forbidden_targets 封装（选 403 节点 + 拼 URL
+        # + 排除已绕过成功的），不走 Cypher 模板。每个 403 目标一次脚本调用（迭代）。
+        if tool == "403bypass":
+            try:
+                from graphpt.collector.neo4j_client import list_forbidden_targets
+                targets = [
+                    {"{url}": t["url"], "{target_id}": t["id"]}
+                    for t in list_forbidden_targets(self.asset_id)
+                ]
+                return targets or [{}]
+            except Exception as exc:
+                raise RuntimeError(f"target_query_failed: {exc}") from exc
+
         cfg = _BATCH_TARGETS.get(tool, {})
         query = cfg.get("query", "")
         mapping = cfg.get("mapping", {})

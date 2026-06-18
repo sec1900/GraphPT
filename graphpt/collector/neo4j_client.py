@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from neo4j import GraphDatabase, Session
 
 from graphpt.common.asset_identity import normalize_url
+
+# 项目根目录（neo4j_client.py 在 graphpt/collector/ 下，上溯三级）
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # ---- 连接 ----
 
@@ -688,6 +692,87 @@ class GraphWriter:
             )
             return {"id": dir_id}
 
+    def write_bypass_result(
+        self,
+        target_id: str,
+        technique: str,
+        *,
+        raw_request: str = "",
+        raw_response: str = "",
+        final_status: int = 0,
+        success: bool = False,
+        asset_id: str = "",
+        source: str = "",
+    ) -> dict[str, Any]:
+        """写入 403 绕过尝试结果，关联到 DirEntry 或 HTTPEndpoint。
+
+        原始数据包（请求 + 响应）落盘到 artifacts/bypass/<asset>/<id>.http，
+        节点只存 packet_path（磁盘路径）+ packet_url（浏览器可打开链接），
+        保持图轻量。technique/final_status/success 作索引字段（无需解析数据包
+        即可检索/过滤）。
+
+        target_id: 被绕过的节点 id（DirEntry 的 dir:... 或 HTTPEndpoint 的 ep:...）。
+        一个 403 目标可挂多个 BypassResult（不同手法各一条，幂等）。
+        success=True 表示该手法拿到了非 403 的可访问响应。
+
+        供后续 403 绕过工具回写结果使用。
+        """
+        import hashlib
+
+        identity = f"{target_id}|{technique}|{raw_request}"
+        bypass_id = f"bypass:{hashlib.md5(identity.encode()).hexdigest()[:16]}"
+        now = _now_iso()
+
+        # 原始数据包落盘（请求 + 响应合存一个 .http 文件）
+        packet_path = ""
+        packet_url = ""
+        if raw_request or raw_response:
+            # asset_id 常含冒号等文件系统非法字符（asset:lab-acme），安全化为目录名
+            import re as _re
+            aid = _re.sub(r'[<>:"/\\|?*]', "_", asset_id or "default")
+            rel_dir = Path("artifacts") / "bypass" / aid
+            abs_dir = _PROJECT_ROOT / rel_dir
+            try:
+                abs_dir.mkdir(parents=True, exist_ok=True)
+                fname = f"{bypass_id.split(':', 1)[-1]}.http"
+                packet_text = (
+                    f"### REQUEST ({technique})\n{raw_request}\n\n"
+                    f"### RESPONSE (status={final_status})\n{raw_response}\n"
+                )
+                (abs_dir / fname).write_text(packet_text, encoding="utf-8")
+                packet_path = str(rel_dir / fname).replace("\\", "/")
+                packet_url = "/" + packet_path
+            except OSError:
+                packet_path = ""
+                packet_url = ""
+
+        with self._driver.session() as session:
+            session.run(
+                """
+                MERGE (b:BypassResult {id: $bypass_id})
+                  ON CREATE SET
+                    b.target_id = $target_id, b.technique = $technique,
+                    b.final_status = $final_status, b.success = $success,
+                    b.packet_path = $packet_path, b.packet_url = $packet_url,
+                    b.sources = [$source], b.created_at = $now
+                  ON MATCH SET
+                    b.final_status = $final_status, b.success = $success,
+                    b.packet_path = $packet_path, b.packet_url = $packet_url,
+                    b.last_seen_at = $now
+                WITH b, coalesce(b.sources, []) AS _cur
+                SET b.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
+                WITH b
+                MATCH (t {id: $target_id})
+                WHERE t:DirEntry OR t:HTTPEndpoint
+                MERGE (t)-[:BYPASS_ATTEMPT]->(b)
+                """,
+                bypass_id=bypass_id, target_id=target_id, technique=technique,
+                final_status=final_status, success=success,
+                packet_path=packet_path, packet_url=packet_url,
+                source=source, now=now,
+            )
+            return {"id": bypass_id, "success": success, "packet_path": packet_path}
+
     def write_file(
         self,
         endpoint_id: str,
@@ -958,6 +1043,17 @@ class GraphWriter:
                     content_hash=f.get("content_hash", ""),
                     source=f.get("source", ""),
                 )
+            elif ftype == "bypass_result":
+                result = self.write_bypass_result(
+                    target_id=f.get("target_id", "") or f.get("parent_id", ""),
+                    technique=f.get("technique", ""),
+                    raw_request=f.get("raw_request", ""),
+                    raw_response=f.get("raw_response", ""),
+                    final_status=f.get("final_status", 0),
+                    success=f.get("success", False),
+                    asset_id=asset_id or f.get("asset_id", ""),
+                    source=f.get("source", ""),
+                )
             elif ftype == "api_endpoint":
                 result = self.write_api_endpoint(
                     url=f.get("url", ""),
@@ -1130,6 +1226,75 @@ def list_ips_without_ports(asset_id: str) -> list[dict[str, str]]:
             asset_id=asset_id,
         )
         return [{"id": record["id"], "value": record["value"]} for record in result]
+
+
+def list_forbidden_targets(asset_id: str) -> list[dict[str, Any]]:
+    """返回 403 待绕过目标（DirEntry + HTTPEndpoint），尚无成功绕过记录的。
+
+    供后续 403 绕过工具消费。返回每个目标的:
+      id      节点 id（write_bypass_result 的 target_id）
+      url     可直接请求的完整 URL
+      kind    "dir_entry" | "http_endpoint"
+      method  原始请求方法
+
+    已有 success=True 的 BypassResult 的目标被排除（已绕过，无需重试）。
+    """
+    driver = _get_driver()
+    with driver.session() as session:
+        result = session.run(
+            """
+            // 路径1：爆破出的 403 目录/文件
+            MATCH (a:Asset {id: $asset_id})
+            CALL {
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
+                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)
+                    -[:EXPOSES]->(ep:HTTPEndpoint)-[:EXPOSES_PATH]->(d:DirEntry)
+              RETURN ep, d
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)
+                    -[:EXPOSES]->(ep:HTTPEndpoint)-[:EXPOSES_PATH]->(d:DirEntry)
+              RETURN ep, d
+            }
+            WITH DISTINCT ep, d
+            WHERE d.status_code = 403
+              AND NOT EXISTS {
+                MATCH (d)-[:BYPASS_ATTEMPT]->(b:BypassResult) WHERE b.success = true
+              }
+            RETURN d.id AS id,
+                   CASE WHEN ep.url ENDS WITH '/'
+                        THEN substring(ep.url, 0, size(ep.url) - 1) + d.path
+                        ELSE ep.url + d.path END AS url,
+                   'dir_entry' AS kind,
+                   coalesce(d.method, 'GET') AS method
+            UNION
+            // 路径2：本身就是 403 的 HTTPEndpoint
+            MATCH (a:Asset {id: $asset_id})
+            CALL {
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
+                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
+            }
+            WITH DISTINCT ep
+            WHERE ep.status_code = 403
+              AND NOT EXISTS {
+                MATCH (ep)-[:BYPASS_ATTEMPT]->(b:BypassResult) WHERE b.success = true
+              }
+            RETURN ep.id AS id, ep.url AS url,
+                   'http_endpoint' AS kind, 'GET' AS method
+            """,
+            asset_id=asset_id,
+        )
+        return [
+            {"id": r["id"], "url": r["url"], "kind": r["kind"], "method": r["method"]}
+            for r in result
+        ]
 
 
 def list_unverified_nodes(asset_id: str) -> dict[str, list[dict[str, Any]]]:

@@ -17,11 +17,12 @@ debug/
 artifacts/
 
 # === 大体积资源（工具二进制 / PoC 库 / skill 知识库）===
-# 忽略 tools 下所有内容，但保留目录结构和 tool.yaml / README.md
+# 忽略 tools 下所有内容，但保留目录结构和 tool.yaml / README.md / 自研脚本工具
 tools/**
 !tools/**/
 !tools/**/tool.yaml
 !tools/**/README.md
+!tools/**/*.py
 res/toolkit/
 res/poc/
 res/skills/

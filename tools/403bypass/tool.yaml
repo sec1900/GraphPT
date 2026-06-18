@@ -1,0 +1,9 @@
+desc: "403 绕过（路径变异/header覆盖/IP伪造/Referer/方法切换/方法覆盖/协议降级/编码，全量技术）"
+command: "{bin} --url {url} --target-id {target_id}"
+use_on:
+  Endpoint:
+    desc: "对 403 的端点/目录/文件尝试全量绕过技术，成功者入图留痕（原始数据包落盘）"
+    command: "{bin} --url {url} --target-id {target_id}"
+    params:
+      url: "{url}"
+      target_id: "{target_id}"
