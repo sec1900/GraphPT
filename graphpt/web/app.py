@@ -1873,6 +1873,17 @@ async def scheduler_advance(body: dict | None = None):
         return _json_error(exc)
 
 
+@web_app.get("/api/scheduler/progress")
+async def scheduler_progress(asset_id: str = "default"):
+    """节点驱动调度进度:所有工具每层的剩余/已完成/总计/百分比。"""
+    try:
+        from graphpt.collector.scheduler import progress as scheduler_progress_fn
+        data = scheduler_progress_fn(asset_id)
+        return {"ok": True, "data": data}
+    except Exception as exc:
+        return _json_error(exc)
+
+
 @web_app.get("/api/pipelines/{name}/progress")
 async def get_pipeline_progress(name: str, asset_id: str = "default"):
     """查询 pipeline 最后运行的快照（失败后可接续）。"""

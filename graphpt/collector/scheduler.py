@@ -74,6 +74,45 @@ def _count_targets(tool: str, asset_id: str) -> int:
     return len([t for t in targets if t])
 
 
+def progress(asset_id: str = "default") -> list[dict[str, Any]]:
+    """返回所有层工具的执行进度（剩余/已完成/总计/百分比）。
+
+    对每个工具：
+      - remaining = _count_targets(tool)（待处理目标,已含 ScanRun 去重）
+      - done = 图里该工具的 ScanRun 总数
+      - total = done + remaining（估算, ScanRun 可能含历史或手动跑的）
+
+    返回按依赖层分组,供前端进度条展示。
+    """
+    from graphpt.collector.neo4j_client import get_graph_writer
+    w = get_graph_writer()
+    out: list[dict[str, Any]] = []
+    with w._driver.session() as s:
+        for spec in _DEPENDENCY_LAYERS:
+            items: list[dict[str, Any]] = []
+            for tool in spec["tools"]:
+                remaining = _count_targets(tool, asset_id)
+                done = s.run(
+                    "MATCH (sr:ScanRun {tool: $tool}) RETURN count(sr) AS c",
+                    tool=tool,
+                ).single()["c"]
+                total = done + remaining
+                pct = (done / total * 100) if total > 0 else 0
+                items.append({
+                    "tool": tool,
+                    "done": done,
+                    "remaining": remaining,
+                    "total": total,
+                    "pct": round(pct, 1),
+                })
+            out.append({
+                "layer": spec["layer"],
+                "node": spec["node"],
+                "tools": items,
+            })
+    return out
+
+
 def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[str, Any]:
     """推进一轮:找到最低的"有目标"依赖层，派发该层所有有目标的工具。
 

@@ -313,6 +313,7 @@
       <button class="btn outline small" onclick="explorerGoRoot()">Roots</button>
       <button class="btn outline small" onclick="loadExplorer()">Refresh</button>
     </div>
+    <div id="scheduler-progress" style="display:none; padding:8px 12px; margin-bottom:8px; background:var(--surface); border:1px solid var(--border); border-radius:8px; font-size:12px"></div>
     <table id="explorer-table">
       <thead><tr>
         <th></th>
@@ -2290,6 +2291,8 @@ let _scanAllJobId = null;
 let _scanAllPoll = null;
 
 // 节点驱动调度:推进一轮（同层并行、跨层串行）
+let _schedProgressTimer = null;
+
 async function schedulerAdvance() {
   try {
     const res = await fetch(API + '/scheduler/advance', {
@@ -2301,16 +2304,52 @@ async function schedulerAdvance() {
     if (!json.ok) { toast(json.error || 'advance failed', false); return; }
     const d = json.data || {};
     if (d.status === 'idle') {
-      toast('扫描已收敛:所有依赖层都没有待处理目标', true);
+      toast('扫描已收敛', true);
+      showSchedulerProgress();
       return;
     }
     const tools = (d.dispatched || []).map(x => `${x.tool}(${x.targets})`).join(', ');
     toast(`已派发 第${d.layer}层[${d.node}]: ${tools}`, true);
-    // 给后台任务一点时间产出，再刷新攻击面
-    setTimeout(() => { if (typeof loadExplorer === 'function') loadExplorer(); }, 1500);
+    // 轮询进度（2秒一次）
+    showSchedulerProgress();
+    stopSchedulerProgressPoll();
+    _schedProgressTimer = setInterval(showSchedulerProgress, 2000);
+    setTimeout(() => { stopSchedulerProgressPoll(); if (typeof loadExplorer === 'function') loadExplorer(); }, 60000);
   } catch (e) {
     toast(e.message, false);
   }
+}
+
+function stopSchedulerProgressPoll() {
+  if (_schedProgressTimer) { clearInterval(_schedProgressTimer); _schedProgressTimer = null; }
+}
+
+async function showSchedulerProgress() {
+  const panel = document.getElementById('scheduler-progress');
+  if (!panel) return;
+  try {
+    const res = await fetch(API + '/scheduler/progress?asset_id=' + encodeURIComponent(currentAsset));
+    const json = await res.json();
+    if (!json.ok || !json.data) return;
+    const layers = json.data;
+    if (!layers.length) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    panel.innerHTML = layers.map(l => {
+      const bars = l.tools.map(t => {
+        let color = t.remaining > 0 ? 'var(--accent)' : '#4caf50';
+        if (t.total === 0 && t.done === 0) color = '#666';
+        const label = t.total > 0 ? `${t.done}/${t.total} (${t.pct}%)` : t.done > 0 ? `${t.done}` : '—';
+        return `<div style="display:flex;align-items:center;gap:6px;margin:2px 0">
+          <span style="width:90px;text-align:right;color:var(--muted)">${t.tool}</span>
+          <span style="flex:1;background:var(--bg);border-radius:4px;height:8px;overflow:hidden">
+            <span style="display:block;height:100%;width:${t.pct}%;background:${color};border-radius:4px;transition:width .3s"></span>
+          </span>
+          <span style="width:100px;font-size:11px;color:${t.remaining>0?'var(--text)':'#4caf50'}">${label}</span>
+        </div>`;
+      }).join('');
+      return `<div style="margin-bottom:4px"><b style="color:var(--accent)">层${l.layer}</b> <span style="color:var(--muted)">${l.node}</span>${bars}</div>`;
+    }).join('');
+  } catch(e) { /* ignore poll errors */ }
 }
 
 function scanAllPreview() {
