@@ -1884,6 +1884,31 @@ async def scheduler_progress(asset_id: str = "default"):
         return _json_error(exc)
 
 
+@web_app.get("/api/scheduler/logs")
+async def scheduler_logs(asset_id: str = "default"):
+    """返回当前运行中工具的实时日志（最近50行）。"""
+    try:
+        from pathlib import Path as _Path
+        import redis as _redis
+        _r = _redis.Redis(host="localhost", port=6379, socket_connect_timeout=2,
+                          decode_responses=True)
+        _r.ping()
+        logs: dict[str, list[str]] = {}
+        for key in _r.keys(f"scheduler:lock:{asset_id}:*"):
+            tool = key.rsplit(":", 1)[-1]
+            log_dir = _Path("tools") / tool / "logs"
+            files = sorted(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True) \
+                if log_dir.is_dir() else []
+            if files:
+                lines = files[0].read_text(encoding="utf-8", errors="replace").splitlines()
+                logs[tool] = lines[-50:]
+            else:
+                logs[tool] = []
+        return {"ok": True, "data": logs}
+    except Exception as exc:
+        return {"ok": True, "data": {}}  # Redis不可用时返回空
+
+
 @web_app.get("/api/pipelines/{name}/progress")
 async def get_pipeline_progress(name: str, asset_id: str = "default"):
     """查询 pipeline 最后运行的快照（失败后可接续）。"""
