@@ -47,8 +47,7 @@ def main() -> int:
         # 优先用同目录的 .exe，不要 PATH 里的
         pass
 
-    # 过滤掉可能被 python 执行添加的隐式参数
-    args = [a for a in sys.argv[1:] if a not in ("-json", "--json", "-silent", "--silent")]
+    args = sys.argv[1:]
     targets_file = ""
     chunk_size = _CHUNK_SIZE
     timeout = _NAABU_TIMEOUT
