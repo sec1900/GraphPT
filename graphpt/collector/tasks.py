@@ -41,6 +41,13 @@ def _find_tool(name: str) -> str | None:
     local = _PROJECT_TOOLS_DIR / exe
     if local.is_file():
         return str(local)
+
+    # tools/ 目录下的 .py 包装器优先于 .exe（例如 naabu.py 分组包装器）
+    script_d = _PROJECT_TOOLS_DIR / name / f"{name}.py"
+    if script_d.is_file():
+        python = shutil.which("python") or sys.executable
+        return f"{python} {script_d}"
+
     local_dir = _PROJECT_TOOLS_DIR / name / exe
     if local_dir.is_file():
         return str(local_dir)
