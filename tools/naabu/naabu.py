@@ -21,7 +21,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-_CHUNK_SIZE = 100  # 每组 IP 数
+_CHUNK_SIZE = 20  # 每组 IP 数（全端口扫描约 5-8 分钟/组）
 _NAABU_TIMEOUT = 600  # 每组超时秒数
 
 # 定位 naabu.exe（同目录）
