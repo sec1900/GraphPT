@@ -76,6 +76,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./res:/app/res:ro
+      - ./tools:/app/tools:ro
       - ./collector_data:/app/collector_data
       - ./graphpt/collector/collector.yaml:/app/graphpt/collector/collector.yaml:ro
     environment:
@@ -109,6 +110,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./res:/app/res:ro
+      - ./tools:/app/tools:ro
       - ./graphpt/collector/collector.yaml:/app/graphpt/collector/collector.yaml:ro
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -138,6 +140,7 @@ services:
     ports:
       - "5555:5555"
     volumes:
+      - ./tools:/app/tools:ro
       - ./graphpt/collector/collector.yaml:/app/graphpt/collector/collector.yaml:ro
     environment:
       - CELERY_BROKER_URL=redis://redis:6379/0
@@ -150,9 +153,53 @@ services:
     restart: unless-stopped
 
   # ==========================================
-  # Agent — 认知引擎（7×24 持久运行）
-  # 尚未实现，profiles: [agent] 使其不随默认 up -d 启动
-  # 就绪后: docker compose --profile agent up -d
+  # Web Admin — 管理后台 (http://localhost:8080)
+  # ==========================================
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: graphpt-worker:latest
+    container_name: graphpt-web
+    command: >
+      python -m uvicorn graphpt.web.app:web_app
+      --host 0.0.0.0
+      --port 8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./res:/app/res:ro
+      - ./tools:/app/tools:ro
+      - ./collector_data:/app/collector_data
+      - ./graphpt/collector/collector.yaml:/app/graphpt/collector/collector.yaml:ro
+      - ./.env:/app/.env:ro
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-graphpt123}
+      - GRAPHPT_AI_BASE_URL=${GRAPHPT_AI_BASE_URL}
+      - GRAPHPT_AI_MODEL=${GRAPHPT_AI_MODEL:-deepseek-v4-pro}
+      - GRAPHPT_AI_API_KEY=${GRAPHPT_AI_API_KEY}
+      - GRAPHPT_AI_WIRE_API=${GRAPHPT_AI_WIRE_API:-chat_completions}
+      - GRAPHPT_AI_MAX_TOKENS=${GRAPHPT_AI_MAX_TOKENS:-65536}
+      - GRAPHPT_REASONING_MODE=${GRAPHPT_REASONING_MODE:-enabled}
+      - GRAPHPT_REASONING_EFFORT=${GRAPHPT_REASONING_EFFORT:-xhigh}
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - graphpt-net
+    restart: unless-stopped
+
+  # ==========================================
+  # Agent CLI — 认知引擎交互入口
+  # profiles: [agent] 使其不随默认 up -d 启动
+  # 使用: docker compose --profile agent run --rm agent
   # ==========================================
   agent:
     profiles:
@@ -162,15 +209,13 @@ services:
       dockerfile: Dockerfile.worker
     image: graphpt-worker:latest
     container_name: graphpt-agent
-    command: >
-      python -m graphpt.cli agent run
-      --asset-id ${GRAPHPT_ASSET_ID:-default}
-      --model ${GRAPHPT_AI_MODEL:-deepseek-v4-pro}
+    command: python -m graphpt
     stdin_open: true
     tty: true
     volumes:
       - ./data:/app/data
       - ./res:/app/res:ro
+      - ./tools:/app/tools:ro
       - ./workspace:/app/workspace
       - ./.env:/app/.env:ro
     environment:

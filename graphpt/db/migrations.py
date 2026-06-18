@@ -238,20 +238,6 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
         "CREATE INDEX IF NOT EXISTS idx_task_messages_task_id ON task_messages(task_id, id)",
         # agent_sessions/http_traffic indexes handled via init_db schema, safe to skip if tables absent
     ]),
-    (20, "finding_audit_log table + findings.cwe_id column", [
-        """CREATE TABLE IF NOT EXISTS finding_audit_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            finding_id INTEGER NOT NULL,
-            task_id INTEGER NOT NULL,
-            field_name TEXT NOT NULL,
-            old_value TEXT NOT NULL DEFAULT '',
-            new_value TEXT NOT NULL DEFAULT '',
-            changed_at_utc TEXT NOT NULL
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_finding_audit_finding ON finding_audit_log(finding_id)",
-        "CREATE INDEX IF NOT EXISTS idx_finding_audit_task ON finding_audit_log(task_id)",
-        "ALTER TABLE findings ADD COLUMN cwe_id TEXT NOT NULL DEFAULT ''",
-    ]),
     (21, "findings add dismissed_round for false-positive re-examine", [
         "ALTER TABLE findings ADD COLUMN dismissed_round INTEGER NOT NULL DEFAULT 0",
     ]),
@@ -505,6 +491,20 @@ _MIGRATIONS: list[tuple[int, str, list[str]]] = [
     ]),
     (41, "finding_attempts add response_fingerprint for stale-response detection", [
         "ALTER TABLE finding_attempts ADD COLUMN response_fingerprint TEXT NOT NULL DEFAULT ''",
+    ]),
+    (42, "finding_audit_log table + findings.cwe_id column", [
+        """CREATE TABLE IF NOT EXISTS finding_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            finding_id INTEGER NOT NULL,
+            task_id INTEGER NOT NULL,
+            field_name TEXT NOT NULL,
+            old_value TEXT NOT NULL DEFAULT '',
+            new_value TEXT NOT NULL DEFAULT '',
+            changed_at_utc TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_finding_audit_finding ON finding_audit_log(finding_id)",
+        "CREATE INDEX IF NOT EXISTS idx_finding_audit_task ON finding_audit_log(task_id)",
+        "ALTER TABLE findings ADD COLUMN cwe_id TEXT NOT NULL DEFAULT ''",
     ]),
 ]
 

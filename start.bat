@@ -19,11 +19,9 @@ if not exist "tools\neo4j\bin\neo4j.bat" (
     exit /b 1
 )
 call tools\neo4j\bin\neo4j.bat start
-if %ERRORLEVEL% neq 0 (
-    echo ERROR: Neo4j failed to start. Run this script as Administrator and check tools\neo4j\logs\neo4j.log
-    pause
-    exit /b 1
-)
+:: Note: 'neo4j start' returns a non-zero code when the service is ALREADY running.
+:: That is not a failure, so we don't treat the exit code as fatal here.
+:: Instead we probe port 7687 below to decide whether Neo4j is actually ready.
 for /l %%i in (1,1,30) do (
     powershell -NoProfile -Command "exit (1 - [int](Test-NetConnection 127.0.0.1 -Port 7687 -InformationLevel Quiet))" >nul 2>&1
     if not errorlevel 1 goto neo4j_ready
@@ -33,6 +31,7 @@ echo ERROR: Neo4j did not open port 7687 in time. Check tools\neo4j\logs\neo4j.l
 pause
 exit /b 1
 :neo4j_ready
+echo Neo4j ready on port 7687.
 
 echo Redis...
 if not exist "tools\memurai\memurai.exe" (

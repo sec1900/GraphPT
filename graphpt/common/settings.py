@@ -386,7 +386,7 @@ def is_debug() -> bool:
 
 
 def get_proxy_url() -> str:
-    return os.environ.get("GRAPHPT_PROXY_URL", "")
+    return os.environ.get("GRAPHPT_PROXY_URL", "").strip()
 
 
 def get_setting_text(*, attr_name: str, env_key: str, default: str = "") -> str:

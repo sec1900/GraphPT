@@ -1,13 +1,13 @@
 desc: "Web Fuzz 多模式"
-command: "{bin} -u {url}/FUZZ -w res/wordlists/common.txt -fc 403,404"
+command: "{bin} -u {url}/FUZZ -w res/wordlists/web_dirs.txt -fc 403,404 -json"
 use_on:
   Endpoint:
     desc: "目录/路径 Fuzz"
-    command: "{bin} -u {url}/FUZZ -w res/wordlists/common.txt -fc 403,404 -t 50"
+    command: "{bin} -u {url}/FUZZ -w res/wordlists/web_dirs.txt -fc 403,404 -t 50 -json"
     params:
       url: "{url}"
   IP:
     desc: "虚拟主机 Fuzz"
-    command: "{bin} -u http://{ip} -H \"Host: FUZZ\" -w res/wordlists/common.txt -fc 403,404"
+    command: "{bin} -u http://{ip} -H \"Host: FUZZ\" -w res/wordlists/dns_subdomains.txt -fc 403,404 -json"
     params:
       ip: "{value}"
