@@ -1081,12 +1081,12 @@ class NaabuAdapter(BaseAdapter):
     """naabu -json 输出适配器 → Port Finding。
 
     每行格式: {"host":"1.2.3.4","port":80,"protocol":"tcp"}
+    parent_id 从 host 字段自推导(ip:1.2.3.4),支持批量模式。
     """
 
     tool_name = "naabu"
 
     def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:
-        parent_id = ctx.get("parent_id", "")
         asset_id = ctx.get("asset_id", "")
         findings: list[dict[str, Any]] = []
 
@@ -1100,11 +1100,12 @@ class NaabuAdapter(BaseAdapter):
             except (json.JSONDecodeError, ValueError):
                 continue
             port = obj.get("port")
-            if not port:
+            host = str(obj.get("host") or "").strip()
+            if not port or not host:
                 continue
             findings.append({
                 "type": "port",
-                "parent_id": parent_id,
+                "parent_id": f"ip:{host}",
                 "port": int(port),
                 "protocol": obj.get("protocol", "tcp"),
                 "service": "",

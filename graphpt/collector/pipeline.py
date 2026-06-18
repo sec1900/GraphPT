@@ -317,9 +317,9 @@ _BATCH_TARGETS: dict[str, dict[str, Any]] = {
             }
             WITH DISTINCT ip
             WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ip.value }
-            RETURN ip.value AS ip, ip.id AS parent_id
+            RETURN ip.value AS ip
         """,
-        "mapping": {"ip": "{ip}", "parent_id": "{parent_id}"},
+        "mapping": {"ip": "{targets_file}"},
     },
     "nmap": {
         "query": """
