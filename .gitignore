@@ -23,9 +23,24 @@ tools/**
 !tools/**/tool.yaml
 !tools/**/README.md
 !tools/**/*.py
+# 但第三方工具自带的安装目录（如 nmap 的 zenmap）整体忽略，不要被 *.py 规则捞回来
+tools/nmap/zenmap/
+tools/nmap/ndiff.py
 res/toolkit/
 res/poc/
 res/skills/
+
+# === 克隆的第三方工具仓库（3.5G，绝不入库）===
+github_repos/
+
+# === 大体积字典 / 指纹库 / payload（按需用脚本生成或本地放置，不入库）===
+res/wordlists/*.txt
+res/knowledge/payloads/
+# 保留字典说明文档
+!res/wordlists/README.md
+
+# === 前端第三方库（CDN 或构建时拉取，不入库）===
+graphpt/web/static/vendor/
 
 # === 杂项 ===
 /python
