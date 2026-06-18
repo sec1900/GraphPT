@@ -317,7 +317,11 @@ _BATCH_TARGETS: dict[str, dict[str, Any]] = {
               RETURN ip
             }
             WITH DISTINCT ip
-            WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ip.value }
+            WHERE NOT (ip.value STARTS WITH '10.')
+              AND NOT (ip.value STARTS WITH '192.168.')
+              AND NOT (ip.value STARTS WITH '127.')
+              AND NOT (ip.value = '0.0.0.0')
+              AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ip.value }
             RETURN ip.value AS ip
         """,
         "mapping": {"ip": "{targets_file}"},
