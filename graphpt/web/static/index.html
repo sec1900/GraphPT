@@ -204,7 +204,7 @@
   #cfg-editor { min-height:520px; font-family:Consolas, 'Cascadia Mono', monospace; font-size:12px; line-height:1.5; resize:vertical; }
   @media (max-width: 960px) { .cfg-layout { grid-template-columns:1fr; } }
 </style>
-<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<script src="/static/vendor/vis-network.min.js"></script>
 </head>
 <body>
 
@@ -308,6 +308,7 @@
       <span id="explorer-crumb" style="font-size:12px;color:var(--muted)">All Assets</span>
       <input type="text" id="explorer-filter" placeholder="Filter..." style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:12px;width:160px" oninput="rebuild()" />
       <span class="spacer"></span>
+      <button class="btn outline small" onclick="schedulerAdvance()" title="节点驱动:推进一轮（同层并行、跨层串行）">▶ 推进一轮</button>
       <button class="btn outline small" onclick="scanAllPreview()">Scan All Unscanned</button>
       <button class="btn outline small" onclick="explorerGoRoot()">Roots</button>
       <button class="btn outline small" onclick="loadExplorer()">Refresh</button>
@@ -411,7 +412,7 @@
           <tr><td>nmap</td><td>port</td><td style="color:var(--green)">{ports} {ip} → {urls}</td></tr>
           <tr><td>httpx</td><td>http_endpoint</td><td style="color:var(--green)">{urls} {urls_file}</td></tr>
           <tr><td>katana</td><td>file / http_endpoint</td><td style="color:var(--green)">{urls}</td></tr>
-          <tr><td>dirbuster/ffuf</td><td>dir_entry</td><td style="color:var(--muted)">(writes to Neo4j directly)</td></tr>
+          <tr><td>gobuster / ffuf</td><td>dir_entry</td><td style="color:var(--muted)">(writes to Neo4j directly)</td></tr>
         </table>
       </div>
       <div class="cfg-layout">
@@ -439,21 +440,18 @@
     <!-- Tab: Agent Prompt -->
     <div id="cfg-tab-agent-prompt" class="cfg-tab-pane" style="display:none">
       <div class="toolbar" style="margin-bottom:8px">
-        <span style="font-size:12px;color:var(--muted)">Agent System Prompt — 完整自定义 Agent 的角色、知识、方法论和阶段指令</span>
+        <span style="font-size:12px;color:var(--muted)">Agent System Prompt — 完整自定义 Agent 的角色、知识、方法论和执行指令</span>
         <span class="spacer"></span>
         <button class="btn outline small" onclick="resetAgentPrompt()">Reset to Default</button>
         <button class="btn" onclick="saveAgentPrompt()">Save</button>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.6">
-        <div>YAML 格式，包含 5 个可编辑部分。模板占位符: <code>{asset_id}</code> <code>{phase_desc}</code> <code>{schema_knowledge}</code> <code>{methodology}</code> <code>{phase_instruction}</code></div>
+        <div>YAML 格式，包含 4 个可编辑部分。模板占位符: <code>{asset_id}</code> <code>{schema_knowledge}</code> <code>{methodology}</code> <code>{attack_instruction}</code></div>
         <div style="margin-top:4px">
           <b>system_template</b> — 整体框架模板 &nbsp;|&nbsp;
           <b>schema_knowledge</b> — Neo4j Schema 知识 &nbsp;|&nbsp;
-          <b>methodology</b> — 工作方法论
-        </div>
-        <div>
-          <b>phase_instructions.analyze</b> — 分析阶段指令 &nbsp;|&nbsp;
-          <b>phase_instructions.expand</b> — 拓展阶段指令
+          <b>methodology</b> — 工作方法论 &nbsp;|&nbsp;
+          <b>attack_instruction</b> — 单阶段执行指令
         </div>
       </div>
       <textarea id="agent-prompt-editor" spellcheck="false" style="width:100%;min-height:500px;font-family:monospace;font-size:12px;background:var(--bg2);color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:10px;resize:vertical;tab-size:2"></textarea>
@@ -467,8 +465,7 @@
       <span style="font-size:14px;font-weight:600">Graph Agent</span>
       <span class="spacer"></span>
       <select id="agent-asset-sel" style="min-width:180px"></select>
-      <button class="btn" onclick="startAnalyze()">Analyze</button>
-      <button class="btn outline" onclick="startExpand()" id="btn-expand" disabled>Expand</button>
+      <button class="btn" onclick="startAgent()">Run</button>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
       <div>
@@ -632,8 +629,12 @@ async function loadAssets() {
     const json = await res.json();
     if (json.ok) {
       assetList = json.data || [];
+      // currentAsset 默认 'default'，若不在真实资产列表中则切到第一个真实资产。
+      // 切换后刷新当前页，避免初始化竞态下用错误的 asset_id 拿到空数据。
+      const prev = currentAsset;
       if (!assetList.find(a => a.id === currentAsset)) currentAsset = assetList[0]?.id || 'default';
       renderAssetSelectors();
+      if (currentAsset !== prev) loadCurrentPage();
     }
   } catch(e) { /* ignore */ }
 }
@@ -1271,7 +1272,7 @@ function renderRow(r) {
   const depth = r._depth || 0;
   const indent = depth * 20;
   const isExpanded = r._expanded;
-  const isLeaf = r._leaf !== false || r.type === 'DirEntry' || r.type === 'File' || r.type === 'Subdomain' || r.type === '_load_more';
+  const isLeaf = r._leaf !== false || r.type === 'DirEntry' || r.type === 'File' || r.type === 'ApiEndpoint' || r.type === 'Subdomain' || r.type === '_load_more';
   const hasChildren = !isLeaf && (r.type === 'root_domain' || r.type === 'standalone_ip' || r.type === 'IP' || r.type === 'Endpoint' || r.type === 'Subdomain');
   if (r.type === '_load_more') {
     return `<tr class="ex-row" style="cursor:pointer" onclick="event.stopPropagation();loadMoreChildren('${esc(r.nodeId)}')">
@@ -1289,7 +1290,7 @@ function renderRow(r) {
   }
 
   const type = r.type || '';
-  const icon = type === 'root_domain' ? String.fromCodePoint(0x1F4C1) : type === 'standalone_ip' ? String.fromCodePoint(0x1F517) : type === 'Subdomain' ? String.fromCodePoint(0x1F4C4) : type === 'IP' ? String.fromCodePoint(0x1F517) : type === 'Port' ? String.fromCodePoint(0x1F50C) : type === 'Endpoint' ? String.fromCodePoint(0x1F310) : type === 'DirEntry' ? String.fromCodePoint(0x1F4C2) : type === 'File' ? String.fromCodePoint(0x1F4C4) : type === 'ScanRun' ? String.fromCodePoint(0x2705) : String.fromCodePoint(0x2022);
+  const icon = type === 'root_domain' ? String.fromCodePoint(0x1F4C1) : type === 'standalone_ip' ? String.fromCodePoint(0x1F517) : type === 'Subdomain' ? String.fromCodePoint(0x1F4C4) : type === 'IP' ? String.fromCodePoint(0x1F517) : type === 'Port' ? String.fromCodePoint(0x1F50C) : type === 'Endpoint' ? String.fromCodePoint(0x1F310) : type === 'DirEntry' ? String.fromCodePoint(0x1F4C2) : type === 'File' ? String.fromCodePoint(0x1F4C4) : type === 'ApiEndpoint' ? String.fromCodePoint(0x1F4E1) : type === 'ScanRun' ? String.fromCodePoint(0x2705) : String.fromCodePoint(0x2022);
 
   let nameHtml = '';
   if (type === 'Endpoint' && r.url) {
@@ -1300,6 +1301,9 @@ function renderRow(r) {
     nameHtml = `<span style="color:var(--green)">${esc(r.value||'')}</span>`;
   } else if (type === 'DirEntry') {
     nameHtml = `<span style="color:var(--orange)">${esc(r.method||'GET')} ${esc(r.path||'')}</span>`;
+  } else if (type === 'ApiEndpoint') {
+    const p = r.path || (r.url||'').replace(/^https?:\/\/[^/]+/, '') || r.url || '';
+    nameHtml = `<span style="color:var(--green)">${esc(r.method||'GET')}</span> <span style="color:var(--accent)">${esc(p)}</span>`;
   } else if (type === 'File') {
     const fn = (r.url || '').split('/').pop() || r.url || '';
     nameHtml = `<span style="color:var(--purple)">${esc(fn)}</span>`;
@@ -1355,6 +1359,21 @@ function renderRow(r) {
     if (r.status_code) parts.push(statusBadge(r.status_code));
     if (r.content_type) parts.push(esc(r.content_type));
     if (r.size) parts.push(fmtSize(r.size));
+    detail = parts.join(' ');
+  } else if (type === 'ApiEndpoint') {
+    const parts = [];
+    if (r.status_code) parts.push(statusBadge(r.status_code));
+    if (r.params && r.params.length) {
+      const ps = r.params.slice(0, 8).map(esc).join(', ');
+      parts.push(`<span style="color:var(--muted)" title="参数名（已脱敏，不含值）">${r.param_source||'param'}: ${ps}${r.params.length>8?' …':''}</span>`);
+    }
+    (r.api_signals || []).forEach(sig => {
+      parts.push(`<span class="badge" style="background:var(--bg2);color:var(--accent)">${esc(sig)}</span>`);
+    });
+    if (r.from_js) {
+      const jn = (r.from_js || '').split('/').pop();
+      parts.push(`<span style="color:var(--purple)" title="${esc(r.from_js)}">⛓ ${esc(jn)}</span>`);
+    }
     detail = parts.join(' ');
   } else if (type === 'File') {
     const parts = [];
@@ -1706,7 +1725,6 @@ const PL_TOOLS = [
   {name:'nmap', desc:'nmap — service detection on discovered ports', use_on:{IP:{}, standalone_ip:{}}},
   {name:'httpx', desc:'httpx — web fingerprint', use_on:{Subdomain:{}, IP:{}, standalone_ip:{}, Port:{}}},
   {name:'katana', desc:'katana — headless JS crawler', use_on:{Endpoint:{}}},
-  {name:'dirbuster', desc:'dirbuster — directory/file brute-force', use_on:{Endpoint:{}}},
   {name:'ffuf', desc:'ffuf — fast web fuzzer', use_on:{Endpoint:{}}},
   {name:'gobuster', desc:'gobuster — directory/file/DNS brute-force', use_on:{Endpoint:{}}},
   {name:'nuclei', desc:'nuclei — vulnerability scanner', use_on:{Endpoint:{}}},
@@ -2271,6 +2289,30 @@ function tutOpen() {
 let _scanAllJobId = null;
 let _scanAllPoll = null;
 
+// 节点驱动调度:推进一轮（同层并行、跨层串行）
+async function schedulerAdvance() {
+  try {
+    const res = await fetch(API + '/scheduler/advance', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({asset_id: currentAsset}),
+    });
+    const json = await res.json();
+    if (!json.ok) { toast(json.error || 'advance failed', false); return; }
+    const d = json.data || {};
+    if (d.status === 'idle') {
+      toast('扫描已收敛:所有依赖层都没有待处理目标', true);
+      return;
+    }
+    const tools = (d.dispatched || []).map(x => `${x.tool}(${x.targets})`).join(', ');
+    toast(`已派发 第${d.layer}层[${d.node}]: ${tools}`, true);
+    // 给后台任务一点时间产出，再刷新攻击面
+    setTimeout(() => { if (typeof loadExplorer === 'function') loadExplorer(); }, 1500);
+  } catch (e) {
+    toast(e.message, false);
+  }
+}
+
 function scanAllPreview() {
   const assetId = document.getElementById('dash-asset-sel').value || 'default';
   const box = document.getElementById('scan-all-preview');
@@ -2552,33 +2594,16 @@ function refreshAgentSessions() {
   });
 }
 
-function startAnalyze() {
+function startAgent() {
   const assetId = document.getElementById('agent-asset-sel').value;
   if(!assetId){ toast('Select an asset','err'); return; }
   const prompt = document.getElementById('agent-prompt').value.trim();
-  document.getElementById('agent-output').textContent = 'Starting analyze...';
-  document.getElementById('btn-expand').disabled = true;
-  fetch('/api/agent/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId, prompt:prompt})})
+  document.getElementById('agent-output').textContent = 'Starting agent...';
+  fetch('/api/agent/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId, prompt:prompt})})
     .then(r=>r.json()).then(d=>{
       if(!d.ok){ toast(d.error||'failed','err'); return; }
       _agentSessionId = d.session_id;
       document.getElementById('agent-status').innerHTML = `<span class="badge warn">running</span> ${d.session_id}`;
-      document.getElementById('agent-prompt').value = '';
-      pollAgent();
-    });
-}
-
-function startExpand() {
-  const assetId = document.getElementById('agent-asset-sel').value;
-  if(!assetId){ toast('Select an asset','err'); return; }
-  const prompt = document.getElementById('agent-prompt').value.trim();
-  document.getElementById('agent-output').textContent = 'Starting expand...';
-  fetch('/api/agent/expand',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId, prompt:prompt})})
-    .then(r=>r.json()).then(d=>{
-      if(!d.ok){ toast(d.error||'failed','err'); return; }
-      _agentSessionId = d.session_id;
-      document.getElementById('agent-status').innerHTML = `<span class="badge warn">running</span> ${d.session_id}`;
-      document.getElementById('btn-expand').disabled = true;
       document.getElementById('agent-prompt').value = '';
       pollAgent();
     });
@@ -2588,7 +2613,7 @@ function sendAgentPrompt() {
   const prompt = document.getElementById('agent-prompt').value.trim();
   if (!prompt) return;
   if (!_agentSessionId) {
-    startAnalyze();
+    startAgent();
     return;
   }
   fetch('/api/agent/steer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:_agentSessionId, message:prompt})})
@@ -2622,7 +2647,6 @@ function pollAgent() {
         txt += d.result||'(no output)';
         out.textContent = txt;
         out.scrollTop = out.scrollHeight;
-        document.getElementById('btn-expand').disabled = false;
         refreshAgentSessions();
       } else if(d.status==='error'){
         clearInterval(_agentPoll);

@@ -1,10 +1,140 @@
 import asyncio
+import json
+import uuid
 from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
 
 import graphpt.web.app as web_app_mod
+
+
+def test_redis_broker_config_uses_celery_broker_url(monkeypatch):
+    monkeypatch.setenv("CELERY_BROKER_URL", "redis://redis:6380/2")
+
+    cfg = web_app_mod._redis_broker_config()
+
+    assert cfg["url"] == "redis://redis:6380/2"
+    assert cfg["host"] == "redis"
+    assert cfg["port"] == 6380
+    assert cfg["db"] == 2
+    assert cfg["ssl"] is False
+
+
+def test_neo4j_query_reports_unavailable(monkeypatch):
+    monkeypatch.setattr(web_app_mod, "_check_neo4j", lambda: False)
+
+    with pytest.raises(HTTPException) as exc:
+        web_app_mod._neo4j_query("RETURN 1")
+
+    assert exc.value.status_code == 503
+    assert exc.value.detail == "neo4j unavailable"
+
+
+def test_neo4j_query_reports_query_failure(monkeypatch):
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def run(self, cypher, **params):
+            raise RuntimeError("bad cypher")
+
+    class FakeDriver:
+        def session(self):
+            return FakeSession()
+
+    monkeypatch.setattr(web_app_mod, "_check_neo4j", lambda: True)
+    monkeypatch.setattr(web_app_mod, "_neo4j", lambda: FakeDriver())
+
+    with pytest.raises(HTTPException) as exc:
+        web_app_mod._neo4j_query("BROKEN")
+
+    assert exc.value.status_code == 500
+    assert "neo4j query failed" in exc.value.detail
+
+
+def test_json_error_preserves_http_exception():
+    original = HTTPException(status_code=503, detail="neo4j unavailable")
+
+    with pytest.raises(HTTPException) as exc:
+        web_app_mod._json_error(original)
+
+    assert exc.value is original
+
+
+def test_agent_session_id_is_random_token():
+    first = web_app_mod._new_agent_session_id()
+    second = web_app_mod._new_agent_session_id()
+
+    assert first
+    assert second
+    assert first != second
+    assert "default" not in first
+    assert "expand" not in second
+
+
+def _test_temp_dir(name: str) -> Path:
+    path = Path(".temp") / f"{name}_{uuid.uuid4().hex}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def test_agent_session_persists_snapshot_and_events(monkeypatch):
+    tmp_path = _test_temp_dir("web_agent_sessions")
+    monkeypatch.setattr(web_app_mod, "_AGENT_SESSION_DIR", tmp_path)
+    web_app_mod._agent_sessions.clear()
+
+    web_app_mod._create_agent_session("sid-1", asset_id="asset-a")
+    web_app_mod._append_agent_log("sid-1", "started")
+    web_app_mod._append_agent_output("sid-1", "hello")
+    web_app_mod._update_agent_session("sid-1", {"status": "done"}, event={"type": "done"})
+
+    snapshot_path = tmp_path / "sid-1.json"
+    events_path = tmp_path / "sid-1.jsonl"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
+
+    assert snapshot["session_id"] == "sid-1"
+    assert snapshot["status"] == "done"
+    assert snapshot["asset_id"] == "asset-a"
+    assert "phase" not in snapshot
+    assert snapshot["output_buf"] == "hello"
+    assert snapshot["logs"] == ["started"]
+    assert [event["type"] for event in events] == ["created", "status", "token", "done"]
+
+
+def test_agent_status_loads_session_from_disk(monkeypatch):
+    tmp_path = _test_temp_dir("web_agent_sessions")
+    monkeypatch.setattr(web_app_mod, "_AGENT_SESSION_DIR", tmp_path)
+    web_app_mod._agent_sessions.clear()
+    (tmp_path / "sid-2.json").write_text(
+        json.dumps({"session_id": "sid-2", "status": "done", "asset_id": "asset-b"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = asyncio.run(web_app_mod.api_agent_status(session_id="sid-2"))
+
+    assert result["ok"] is True
+    assert result["session_id"] == "sid-2"
+    assert result["status"] == "done"
+
+
+def test_agent_session_trims_large_output_and_logs(monkeypatch):
+    monkeypatch.setattr(web_app_mod, "_AGENT_OUTPUT_LIMIT", 5)
+    monkeypatch.setattr(web_app_mod, "_AGENT_LOG_LIMIT", 2)
+
+    trimmed = web_app_mod._trim_agent_session({
+        "output_buf": "0123456789",
+        "logs": ["a", "b", "c"],
+    })
+
+    assert trimmed["output_buf"] == "56789"
+    assert trimmed["logs"] == ["b", "c"]
+    assert trimmed["output_truncated"] is True
+    assert trimmed["logs_truncated"] is True
 
 
 def test_surfaces_endpoints_include_standalone_ip_path(monkeypatch):
@@ -196,6 +326,128 @@ def test_adhoc_tool_run_executes_single_stage(monkeypatch):
     assert result["status"] == "ok"
     assert result["data"]["stages"][0]["tool"] == "dummy"
     assert captured["target_overrides"] == {"dummy": [{"{ip}": "192.0.2.10"}]}
+
+
+def test_adhoc_nmap_fills_ports_from_graph(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr(web_app_mod, "_collector_tool_config", lambda tool: {
+        "command": "{bin} -p {ports} {ip} -oX -",
+        "use_on": {
+            "IP": {
+                "desc": "scan ip",
+                "params": {
+                    "ip": "{value}",
+                    "ports": "{ports}",
+                    "scan_target": "{value}|{ports}",
+                },
+            },
+        },
+    })
+
+    def fake_query(cypher, **params):
+        calls.append((cypher, params))
+        return [{"port": 80}, {"port": 443}, {"port": 80}]
+
+    monkeypatch.setattr(web_app_mod, "_neo4j_query", fake_query)
+
+    result = web_app_mod._adhoc_target_overrides(
+        "nmap",
+        {
+            "target": "192.0.2.10",
+            "node_type": "IP",
+            "node": {"type": "IP", "value": "192.0.2.10"},
+        },
+        asset_id="asset-a",
+    )
+
+    assert result == {
+        "nmap": [{
+            "{ip}": "192.0.2.10",
+            "{ports}": "80,443",
+            "{scan_target}": "192.0.2.10|80,443",
+        }]
+    }
+    assert calls[0][1] == {"asset_id": "asset-a", "ip": "192.0.2.10"}
+    assert "MATCH (a)-[:HAS_IP]->(ip:IP {value: $ip})" in calls[0][0]
+    assert "MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP {value: $ip})" in calls[0][0]
+
+
+def test_adhoc_nmap_reports_missing_graph_ports(monkeypatch):
+    monkeypatch.setattr(web_app_mod, "_collector_tool_config", lambda tool: {
+        "command": "{bin} -p {ports} {ip} -oX -",
+        "use_on": {
+            "standalone_ip": {
+                "desc": "scan standalone ip",
+                "params": {
+                    "ip": "{value}",
+                    "ports": "{ports}",
+                },
+            },
+        },
+    })
+    monkeypatch.setattr(web_app_mod, "_neo4j_query", lambda cypher, **params: [])
+
+    with pytest.raises(HTTPException) as exc:
+        web_app_mod._adhoc_target_overrides(
+            "nmap",
+            {
+                "target": "192.0.2.10",
+                "node_type": "standalone_ip",
+                "node": {"type": "standalone_ip", "value": "192.0.2.10"},
+            },
+            asset_id="asset-a",
+        )
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "tool nmap requires ports but no ports found for IP: 192.0.2.10"
+
+
+def test_adhoc_nmap_uses_payload_ports_without_query(monkeypatch):
+    monkeypatch.setattr(web_app_mod, "_collector_tool_config", lambda tool: {
+        "command": "{bin} -p {ports} {ip} -oX -",
+        "use_on": {
+            "IP": {
+                "desc": "scan ip",
+                "params": {
+                    "ip": "{value}",
+                    "ports": "{ports}",
+                    "scan_target": "{value}|{ports}",
+                },
+            },
+        },
+    })
+
+    def fail_query(cypher, **params):
+        raise AssertionError("graph query should not run when node payload already has ports")
+
+    monkeypatch.setattr(web_app_mod, "_neo4j_query", fail_query)
+
+    result = web_app_mod._adhoc_target_overrides(
+        "nmap",
+        {
+            "target": "192.0.2.10",
+            "node_type": "IP",
+            "node": {"type": "IP", "value": "192.0.2.10", "ports": [8080, 8443]},
+        },
+        asset_id="asset-a",
+    )
+
+    assert result == {
+        "nmap": [{
+            "{ip}": "192.0.2.10",
+            "{ports}": "8080,8443",
+            "{scan_target}": "192.0.2.10|8080,8443",
+        }]
+    }
+
+
+def test_node_context_normalizes_port_lists():
+    context = web_app_mod._node_context({
+        "node": {"type": "IP", "value": "192.0.2.10", "ports": [80, "443", "bad"]},
+    })
+
+    assert context["ports"] == "80,443"
 
 
 def test_save_pipeline_rejects_missing_tool():

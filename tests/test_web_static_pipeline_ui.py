@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 INDEX_HTML = Path(__file__).resolve().parents[1] / "graphpt" / "web" / "static" / "index.html"
+VIS_VENDOR = Path(__file__).resolve().parents[1] / "graphpt" / "web" / "static" / "vendor" / "vis-network.min.js"
 
 
 def test_pipeline_page_switches_to_pipeline_loader():
@@ -9,6 +10,15 @@ def test_pipeline_page_switches_to_pipeline_loader():
 
     assert "case 'page-tasks': loadPipelines(); break;" in html
     assert "case 'page-tasks': loadTasks(); break;" not in html
+
+
+def test_graph_visualization_uses_local_vendor_asset():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+
+    assert "https://unpkg.com" not in html
+    assert '<script src="/static/vendor/vis-network.min.js"></script>' in html
+    assert VIS_VENDOR.exists()
+    assert VIS_VENDOR.stat().st_size > 100_000
 
 
 def test_removed_dead_task_queue_ui_code():
@@ -77,3 +87,27 @@ def test_pipeline_ui_uses_tools_schema_without_categories():
     assert "stage.category" not in html
     assert "placeholderForNode" not in html
     assert "dataset.placeholder" not in html
+
+
+def test_pipeline_ui_does_not_expose_missing_dirbuster_tool():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+
+    assert "name:'dirbuster'" not in html
+    assert "dirbuster/ffuf" not in html
+    assert "gobuster / ffuf" in html
+    assert "name:'gobuster'" in html
+    assert "name:'ffuf'" in html
+
+
+def test_agent_ui_uses_single_run_endpoint():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+
+    assert "function startAgent()" in html
+    assert "fetch('/api/agent/run'" in html
+    assert "startAnalyze" not in html
+    assert "startExpand" not in html
+    assert "btn-expand" not in html
+    assert "/api/agent/analyze" not in html
+    assert "/api/agent/expand" not in html
+    assert "phase_instructions" not in html
+    assert "attack_instruction" in html

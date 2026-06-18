@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import secrets
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request
@@ -81,15 +84,22 @@ def _neo4j():
 
 
 def _neo4j_query(cypher: str, **params):
-    """执行 Neo4j 查询，数据库不可用时返回空列表。"""
+    """执行 Neo4j 查询；连接或查询失败时显式报错。"""
     if not _check_neo4j():
-        return []
+        raise HTTPException(status_code=503, detail="neo4j unavailable")
     driver = _neo4j()
     try:
         with driver.session() as session:
             return list(session.run(cypher, **params))
-    except Exception:
-        return []
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"neo4j query failed: {exc}") from exc
+
+
+def _json_error(exc: Exception, *, status_code: int = 500) -> JSONResponse:
+    """路由兜底错误响应；HTTPException 交给 FastAPI 保留原状态码。"""
+    if isinstance(exc, HTTPException):
+        raise exc
+    return JSONResponse({"ok": False, "error": str(exc)}, status_code=status_code)
 
 
 # ---- 静态文件 ----
@@ -103,17 +113,45 @@ async def index():
 # Health API
 # ============================================================
 
+def _redis_broker_config() -> dict:
+    """从 CELERY_BROKER_URL 解析 Redis 连接信息。"""
+    broker_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0").strip()
+    parsed = urlparse(broker_url)
+    if parsed.scheme not in ("redis", "rediss"):
+        raise ValueError(f"unsupported redis broker scheme: {parsed.scheme or '(empty)'}")
+    db_text = (parsed.path or "/0").lstrip("/") or "0"
+    return {
+        "url": broker_url,
+        "host": parsed.hostname or "localhost",
+        "port": parsed.port or 6379,
+        "db": int(db_text.split("/", 1)[0]),
+        "ssl": parsed.scheme == "rediss",
+    }
+
+
 def _redis_health() -> dict:
-    """检查 Redis 可达性和 collect 队列长度。"""
+    """检查 Celery Broker Redis 可达性和 collect 队列长度。"""
     try:
         import redis as _redis
 
-        host = os.getenv("REDIS_HOST", "localhost")
-        port = int(os.getenv("REDIS_PORT", "6379"))
-        db = int(os.getenv("REDIS_DB", "0"))
-        client = _redis.Redis(host=host, port=port, db=db, socket_connect_timeout=2, socket_timeout=2)
+        cfg = _redis_broker_config()
+        client = _redis.Redis(
+            host=cfg["host"],
+            port=cfg["port"],
+            db=cfg["db"],
+            ssl=cfg["ssl"],
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
         pong = client.ping()
-        return {"ok": bool(pong), "host": host, "port": port, "queue_depth": client.llen("collect")}
+        return {
+            "ok": bool(pong),
+            "broker_url": cfg["url"],
+            "host": cfg["host"],
+            "port": cfg["port"],
+            "db": cfg["db"],
+            "queue_depth": client.llen("collect"),
+        }
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
 
@@ -312,7 +350,7 @@ async def dashboard(asset_id: str = "default"):
 
         return {"ok": True, "data": stats}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 # ============================================================
@@ -340,7 +378,7 @@ async def list_assets():
         ]
         return {"ok": True, "data": assets}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.post("/api/assets")
@@ -363,7 +401,7 @@ async def create_asset(body: dict):
         record = result[0] if result else None
         return {"ok": True, "data": {"id": record["id"], "name": record["name"], "created": record.get("created", False)}}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.delete("/api/assets/{asset_id}")
@@ -387,7 +425,7 @@ async def delete_asset(asset_id: str):
         )
         return {"ok": True, "data": {"deleted": result[0]["deleted"] if result else 0}}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 # ============================================================
@@ -442,7 +480,7 @@ async def list_targets(asset_id: str = "default"):
 
         return {"ok": True, "data": targets}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.post("/api/targets")
@@ -581,7 +619,7 @@ async def add_target(body: dict, asset_id: str = "default"):
     except HTTPException:
         raise
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.delete("/api/targets/{target_id}")
@@ -596,7 +634,7 @@ async def delete_target(target_id: str, asset_id: str = "default"):
             OPTIONAL MATCH (s)-[:RESOLVES_TO]->(ip:IP)
             OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
             OPTIONAL MATCH (p)-[:EXPOSES]->(ep:HTTPEndpoint)
-            OPTIONAL MATCH (p)-[:RUNS]->(svc:Service)
+            OPTIONAL MATCH (p)-[:HAS_SERVICE]->(svc:Service)
             DETACH DELETE ep, svc, p, ip, s, r
             """,
             aid=asset_id,
@@ -608,7 +646,7 @@ async def delete_target(target_id: str, asset_id: str = "default"):
             MATCH (:Asset {id: $aid})-[r_hi:HAS_IP]->(ip:IP {id: $tid})
             OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
             OPTIONAL MATCH (p)-[:EXPOSES]->(ep:HTTPEndpoint)
-            OPTIONAL MATCH (p)-[:RUNS]->(svc:Service)
+            OPTIONAL MATCH (p)-[:HAS_SERVICE]->(svc:Service)
             DELETE r_hi, ep, svc, p, ip
             """,
             aid=asset_id,
@@ -616,7 +654,7 @@ async def delete_target(target_id: str, asset_id: str = "default"):
         )
         return {"ok": True}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 # ============================================================
@@ -670,7 +708,7 @@ async def explorer_roots(asset_id: str = "default"):
 
         return {"ok": True, "data": {"roots": roots}}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.get("/api/explorer/{node_id:path}")
@@ -692,7 +730,7 @@ async def explorer_subtree(node_id: str, asset_id: str = "default",
         else:
             return JSONResponse({"ok": False, "error": f"unknown node type: {node_id}"}, status_code=400)
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 async def _expand_root(root_id: str, asset_id: str, limit: int = 50, offset: int = 0):
@@ -921,6 +959,19 @@ async def _expand_endpoint(ep_id: str, asset_id: str, limit: int = 100, offset: 
         """,
         eid=ep_id,
     )
+    # 发现的接口（katana 爬取）
+    apis = _neo4j_query(
+        """
+        MATCH (:HTTPEndpoint {id: $eid})-[:EXPOSES_API]->(a:ApiEndpoint)
+        RETURN a.id AS id, a.url AS url, a.path AS path, a.method AS method,
+               a.status_code AS status_code, a.content_type AS content_type,
+               a.params AS params, a.param_source AS param_source,
+               a.api_signals AS api_signals, a.from_js AS from_js,
+               a.sources AS sources, a.created_at AS created_at
+        ORDER BY a.method, a.path
+        """,
+        eid=ep_id,
+    )
 
     children = []
     # File rows first (more important)
@@ -933,6 +984,16 @@ async def _expand_endpoint(ep_id: str, asset_id: str, limit: int = 100, offset: 
             "local_path": f["local_path"] or "",
             "sources": f["sources"] or [], "created_at": f["created_at"],
             "secrets": secrets,
+        })
+    # ApiEndpoint rows (接口，比目录更重要)
+    for a in apis:
+        children.append({
+            "id": a["id"], "type": "ApiEndpoint", "url": a["url"],
+            "path": a["path"], "method": a["method"],
+            "status_code": a["status_code"], "content_type": a["content_type"] or "",
+            "params": a["params"] or [], "param_source": a["param_source"] or "",
+            "api_signals": a["api_signals"] or [], "from_js": a["from_js"] or "",
+            "sources": a["sources"] or [], "created_at": a["created_at"],
         })
     # DirEntry rows
     for d in dirs:
@@ -1046,7 +1107,7 @@ async def list_surfaces_subdomains(
             "per_page": per_page,
         }
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.get("/api/surfaces/ips")
@@ -1104,7 +1165,7 @@ async def list_surfaces_ips(asset_id: str = "default", page: int = 1, per_page: 
             "per_page": per_page,
         }
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.get("/api/surfaces/endpoints")
@@ -1198,7 +1259,7 @@ async def list_surfaces_endpoints(
             "per_page": per_page,
         }
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 # ============================================================
@@ -1308,7 +1369,7 @@ async def list_vulnerabilities(
             "per_page": per_page,
         }
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 # ============================================================
@@ -1379,7 +1440,7 @@ async def list_tasks():
             "active_count": active_count,
         }
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.post("/api/tasks/{task_name}/run")
@@ -1438,7 +1499,7 @@ async def list_pipelines():
         pipelines = mgr.list_all()
         return {"ok": True, "data": pipelines}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.get("/api/pipelines/{name}")
@@ -1455,7 +1516,7 @@ async def get_pipeline(name: str):
     except HTTPException:
         raise
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.post("/api/pipelines/{name}/preview")
@@ -1477,7 +1538,7 @@ async def preview_pipeline(name: str, body: dict | None = None):
     except HTTPException:
         raise
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 def _collector_tools_config() -> dict:
@@ -1529,15 +1590,77 @@ def _tool_stage_definition(tool: str, node_type: str = "") -> dict:
     }
 
 
+def _context_value(value: object) -> str:
+    if isinstance(value, (list, tuple, set)):
+        return ",".join(str(item).strip() for item in value if item not in (None, ""))
+    return str(value)
+
+
+def _split_ports(value: object) -> list[int]:
+    if value in (None, ""):
+        return []
+    raw_items = value if isinstance(value, (list, tuple, set)) else re.split(r"[\s,]+", str(value).strip("[]"))
+    ports: list[int] = []
+    for item in raw_items:
+        text = str(item or "").strip().strip("'\"")
+        if not text:
+            continue
+        try:
+            port = int(text)
+        except ValueError:
+            continue
+        if 1 <= port <= 65535 and port not in ports:
+            ports.append(port)
+    return ports
+
+
+def _ports_text(ports: list[int]) -> str:
+    return ",".join(str(port) for port in ports)
+
+
+def _graph_ports_for_ip(asset_id: str, ip: str) -> list[int]:
+    rows = _neo4j_query(
+        """
+        MATCH (a:Asset {id: $asset_id})
+        CALL {
+          WITH a
+          MATCH (a)-[:HAS_IP]->(ip:IP {value: $ip})
+          RETURN ip
+          UNION
+          WITH a
+          MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP {value: $ip})
+          RETURN ip
+        }
+        MATCH (ip)-[:HAS_PORT]->(p:Port)
+        RETURN DISTINCT p.number AS port
+        ORDER BY port
+        """,
+        asset_id=asset_id,
+        ip=ip,
+    )
+    ports: list[int] = []
+    for row in rows:
+        try:
+            port = int(row.get("port"))
+        except (TypeError, ValueError):
+            continue
+        if 1 <= port <= 65535 and port not in ports:
+            ports.append(port)
+    return ports
+
+
 def _node_context(body: dict) -> dict[str, str]:
     node = body.get("node") if isinstance(body.get("node"), dict) else {}
-    context = {str(k): str(v) for k, v in node.items() if v not in (None, "")}
+    context = {str(k): _context_value(v) for k, v in node.items() if v not in (None, "")}
     target = str(body.get("target") or "").strip()
     if target:
         context.setdefault("value", target)
         context.setdefault("url", target)
     if "number" in context:
         context.setdefault("port", context["number"])
+    ports = _split_ports(context.get("ports"))
+    if ports:
+        context["ports"] = _ports_text(ports)
     return context
 
 
@@ -1566,7 +1689,7 @@ def _adhoc_params(body: dict) -> dict[str, str]:
     return {str(k): str(v) for k, v in params.items() if v not in (None, "")}
 
 
-def _adhoc_target_overrides(tool: str, body: dict) -> dict[str, list[dict[str, str]]]:
+def _adhoc_target_overrides(tool: str, body: dict, *, asset_id: str) -> dict[str, list[dict[str, str]]]:
     """右键运行必须按 use_on 锁定当前节点，不能退回批量目标选择。"""
     tool_cfg = _collector_tool_config(tool)
     node_type = str(body.get("node_type") or "").strip()
@@ -1578,6 +1701,16 @@ def _adhoc_target_overrides(tool: str, body: dict) -> dict[str, list[dict[str, s
         raise HTTPException(400, f"tool {tool} has no use_on params for node type: {node_type}")
 
     context = _node_context(body)
+    needs_ports = any("{ports}" in str(template or "") for template in params.values())
+    if needs_ports and not _split_ports(context.get("ports")) and node_type in {"IP", "standalone_ip"}:
+        ip = (context.get("value") or context.get("ip") or "").strip()
+        if not ip:
+            raise HTTPException(400, f"tool {tool} requires an IP value for node type: {node_type}")
+        ports = _graph_ports_for_ip(asset_id, ip)
+        if not ports:
+            raise HTTPException(400, f"tool {tool} requires ports but no ports found for IP: {ip}")
+        context["ports"] = _ports_text(ports)
+
     target: dict[str, str] = {}
     for key, template in params.items():
         value = _render_node_template(template, context).strip()
@@ -1604,13 +1737,13 @@ async def preview_tool(tool: str, body: dict | None = None):
             {"stages": [stage]},
             asset_id=asset_id,
             params=_adhoc_params(body),
-            target_overrides=_adhoc_target_overrides(tool, body),
+            target_overrides=_adhoc_target_overrides(tool, body, asset_id=asset_id),
         )
         return {"ok": True, "data": executor.preview()}
     except HTTPException:
         raise
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.post("/api/tools/{tool}/run")
@@ -1627,14 +1760,14 @@ async def run_tool(tool: str, body: dict | None = None):
             {"stages": [stage]},
             asset_id=asset_id,
             params=_adhoc_params(body),
-            target_overrides=_adhoc_target_overrides(tool, body),
+            target_overrides=_adhoc_target_overrides(tool, body, asset_id=asset_id),
         )
         result = executor.execute()
         return {"ok": result.get("status") != "error", "data": result, "status": result.get("status")}
     except HTTPException:
         raise
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.put("/api/pipelines/{name}")
@@ -1680,7 +1813,7 @@ async def save_pipeline(name: str, body: dict):
     except HTTPException:
         raise
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.delete("/api/pipelines/{name}")
@@ -1697,7 +1830,7 @@ async def delete_pipeline(name: str):
     except HTTPException:
         raise
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.post("/api/pipelines/{name}/run")
@@ -1716,7 +1849,28 @@ async def run_pipeline(name: str, body: dict | None = None):
         )
         return {"ok": True, "task_id": result.id, "pipeline": name}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
+
+
+@web_app.post("/api/scheduler/advance")
+async def scheduler_advance(body: dict | None = None):
+    """节点驱动调度:推进一轮（手动触发版）。
+
+    找到最低的"有目标"依赖层，派发该层所有有目标工具（同层并行、跨层串行）。
+    body: {asset_id, dispatch}。dispatch=False 为 dry-run（只探测不派发）。
+
+    返回 advance_once 结果:status(dispatched/idle)、layer、node、dispatched 列表。
+    """
+    body = body or {}
+    asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
+    dispatch = body.get("dispatch", True)
+    try:
+        from graphpt.collector.scheduler import advance_once
+
+        result = advance_once(asset_id, dispatch=bool(dispatch))
+        return {"ok": True, "data": result}
+    except Exception as exc:
+        return _json_error(exc)
 
 
 @web_app.get("/api/pipelines/{name}/progress")
@@ -1739,7 +1893,7 @@ async def get_pipeline_progress(name: str, asset_id: str = "default"):
             "failed_at": pr.get("failed_at"),
         }}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.delete("/api/pipelines/{name}/progress")
@@ -1753,7 +1907,7 @@ async def clear_pipeline_progress(name: str, asset_id: str = "default"):
             s.run("MATCH (pr:PipelineRun {id: $rid}) DETACH DELETE pr", rid=run_id)
         return {"ok": True}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 # ============================================================
@@ -1775,7 +1929,7 @@ async def get_config(tool: str | None = None):
             text = tool_path.read_text(encoding="utf-8") if tool_path.is_file() else ""
         return {"ok": True, "data": text, "tool": selected, "tools": names, "path": path}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.put("/api/config")
@@ -1800,7 +1954,7 @@ async def save_config(body: dict):
         tool_path.write_text(text, encoding="utf-8")
         return {"ok": True, "tool": tool, "path": str(tool_path)}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.get("/api/config/check")
@@ -1846,7 +2000,7 @@ async def check_tools():
                 }
         return {"ok": True, "data": tools}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 # ============================================================
@@ -1861,7 +2015,7 @@ async def api_scan_all_preview(asset_id: str = "default"):
         summary = get_unscanned_summary(asset_id)
         return {"ok": True, "asset_id": asset_id, "tools": summary}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.post("/api/scan-all")
@@ -1875,7 +2029,7 @@ async def api_scan_all_start(body: dict | None = None):
         result = scan_all_unscanned(asset_id, tools=tools)
         return result
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.get("/api/scan-all/status")
@@ -1950,7 +2104,7 @@ async def graph_data(asset_id: str = "default"):
         nodes.extend(row["nodes"] or [])
         return {"ok": True, "data": {"nodes": nodes, "edges": row["edges"] or []}}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 @web_app.get("/api/changes")
@@ -2019,7 +2173,7 @@ async def api_changes(asset_id: str = "default", since: str = "", limit: int = 5
             "property_changes": [{"id": r["id"], "value": r["value"], "fields": r["fields"], "changed_at": r["changed_at"]} for r in prop_changes],
         }}
     except Exception as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return _json_error(exc)
 
 
 # ============================================================
@@ -2029,6 +2183,11 @@ async def api_changes(asset_id: str = "default", since: str = "", limit: int = 5
 import threading
 from pydantic import BaseModel
 
+_AGENT_SESSION_DIR = _PROJECT_ROOT / ".graphpt" / "web_agent_sessions"
+_AGENT_OUTPUT_LIMIT = 200_000
+_AGENT_LOG_LIMIT = 500
+
+
 class _AgentRequest(BaseModel):
     asset_id: str
     prompt: str = ""
@@ -2037,56 +2196,208 @@ _agent_sessions: dict[str, dict] = {}
 _agent_lock = threading.Lock()
 
 
-@web_app.post("/api/agent/analyze")
-async def api_agent_analyze(req: _AgentRequest):
-    """启动图分析 Agent（分析阶段）。"""
+def _new_agent_session_id() -> str:
+    """生成不可预测且不依赖时间的 Agent 会话 ID。"""
+    return secrets.token_urlsafe(18)
+
+
+def _agent_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _agent_session_path(session_id: str) -> Path:
+    return _AGENT_SESSION_DIR / f"{session_id}.json"
+
+
+def _agent_events_path(session_id: str) -> Path:
+    return _AGENT_SESSION_DIR / f"{session_id}.jsonl"
+
+
+def _trim_agent_session(session: dict) -> dict:
+    data = dict(session)
+    output = str(data.get("output_buf") or "")
+    if len(output) > _AGENT_OUTPUT_LIMIT:
+        data["output_buf"] = output[-_AGENT_OUTPUT_LIMIT:]
+        data["output_truncated"] = True
+    logs = data.get("logs")
+    if isinstance(logs, list) and len(logs) > _AGENT_LOG_LIMIT:
+        data["logs"] = logs[-_AGENT_LOG_LIMIT:]
+        data["logs_truncated"] = True
+    return data
+
+
+def _save_agent_session(session_id: str, session: dict, *, event: dict | None = None) -> None:
+    _AGENT_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    payload = _trim_agent_session({
+        **session,
+        "session_id": session_id,
+        "updated_at": _agent_now(),
+    })
+    path = _agent_session_path(session_id)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    if event is not None:
+        event_payload = {"ts": _agent_now(), "session_id": session_id, **event}
+        with _agent_events_path(session_id).open("a", encoding="utf-8") as fp:
+            fp.write(json.dumps(event_payload, ensure_ascii=False) + "\n")
+
+
+def _load_agent_session(session_id: str) -> dict | None:
+    path = _agent_session_path(session_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _list_agent_session_statuses() -> dict[str, str]:
+    statuses: dict[str, str] = {}
+    if _AGENT_SESSION_DIR.exists():
+        files = [p for p in _AGENT_SESSION_DIR.glob("*.json") if p.is_file()]
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in files[:200]:
+            sid = path.stem
+            data = _load_agent_session(sid)
+            if data:
+                statuses[sid] = str(data.get("status") or "unknown")
+    with _agent_lock:
+        statuses.update({k: str(v.get("status") or "unknown") for k, v in _agent_sessions.items()})
+    return statuses
+
+
+def _update_agent_session(session_id: str, updates: dict | None = None, *, event: dict | None = None) -> dict | None:
+    with _agent_lock:
+        session = _agent_sessions.get(session_id)
+        if session is None:
+            session = _load_agent_session(session_id)
+            if session is None:
+                return None
+            _agent_sessions[session_id] = session
+        if updates:
+            session.update(updates)
+        trimmed = _trim_agent_session(session)
+        session.clear()
+        session.update(trimmed)
+        snapshot = dict(session)
+    _save_agent_session(session_id, snapshot, event=event)
+    return snapshot
+
+
+def _append_agent_log(session_id: str, message: str, *, kind: str = "status") -> None:
+    with _agent_lock:
+        session = _agent_sessions.get(session_id)
+        if not session:
+            return
+        session.setdefault("logs", []).append(message)
+        trimmed = _trim_agent_session(session)
+        session.clear()
+        session.update(trimmed)
+        snapshot = dict(session)
+    _save_agent_session(session_id, snapshot, event={"type": kind, "message": message})
+
+
+def _append_agent_output(session_id: str, text: str) -> None:
+    if not text:
+        return
+    with _agent_lock:
+        session = _agent_sessions.get(session_id)
+        if not session:
+            return
+        session["output_buf"] = str(session.get("output_buf") or "") + text
+        trimmed = _trim_agent_session(session)
+        session.clear()
+        session.update(trimmed)
+        snapshot = dict(session)
+    _save_agent_session(session_id, snapshot, event={"type": "token", "text": text})
+
+
+def _drain_agent_steering(session_id: str) -> list[str]:
+    with _agent_lock:
+        session = _agent_sessions.get(session_id)
+        if not session:
+            return []
+        msgs = list(session.get("steering_queue", []))
+        session["steering_queue"] = []
+        snapshot = dict(session)
+    if msgs:
+        _save_agent_session(session_id, snapshot, event={"type": "steering_drained", "count": len(msgs)})
+    return msgs
+
+
+def _queue_agent_steering(session_id: str, message: str) -> bool:
+    with _agent_lock:
+        session = _agent_sessions.get(session_id)
+        if session is None:
+            session = _load_agent_session(session_id)
+            if session is None:
+                return False
+            _agent_sessions[session_id] = session
+        session.setdefault("steering_queue", []).append(message)
+        snapshot = dict(session)
+    _save_agent_session(session_id, snapshot, event={"type": "steer", "message": message})
+    _append_agent_log(session_id, f"[user] {message}", kind="steer_log")
+    return True
+
+
+def _create_agent_session(session_id: str, *, asset_id: str) -> dict:
+    session = {
+        "session_id": session_id,
+        "status": "running",
+        "asset_id": asset_id,
+        "logs": [],
+        "output_buf": "",
+        "created_at": _agent_now(),
+    }
+    with _agent_lock:
+        _agent_sessions[session_id] = session
+    _save_agent_session(session_id, session, event={"type": "created", "asset_id": asset_id})
+    return session
+
+
+@web_app.post("/api/agent/run")
+async def api_agent_run(req: _AgentRequest):
+    """启动单阶段 Graph Agent。"""
     from graphpt.core.graph_agent import run_graph_agent
 
-    session_id = f"{req.asset_id}_{int(time.time())}"
+    session_id = _new_agent_session_id()
 
     def _run():
         def _on_status(msg):
-            with _agent_lock:
-                s = _agent_sessions.get(session_id)
-                if s:
-                    s.setdefault("logs", []).append(msg)
+            _append_agent_log(session_id, msg)
 
         def _on_token(t):
-            with _agent_lock:
-                s = _agent_sessions.get(session_id)
-                if s:
-                    s["output_buf"] = s.get("output_buf", "") + t
+            _append_agent_output(session_id, t)
 
         def _steering():
-            with _agent_lock:
-                s = _agent_sessions.get(session_id)
-                if s:
-                    msgs = list(s.get("steering_queue", []))
-                    s["steering_queue"] = []
-                    return msgs
-            return []
+            return _drain_agent_steering(session_id)
 
         try:
             result = run_graph_agent(
                 asset_id=req.asset_id,
-                phase="analyze",
                 user_prompt=req.prompt or "",
                 workspace_root=_PROJECT_ROOT,
                 on_status=_on_status,
                 on_token=_on_token,
                 steering_provider=_steering,
             )
-            with _agent_lock:
-                _agent_sessions[session_id]["status"] = "done"
-                _agent_sessions[session_id]["result"] = result.final_text
-                _agent_sessions[session_id]["tool_calls"] = result.tool_calls_count
+            _update_agent_session(session_id, {
+                "status": "done",
+                "result": result.final_text,
+                "tool_calls": result.tool_calls_count,
+                "finished_at": _agent_now(),
+            }, event={"type": "done", "tool_calls": result.tool_calls_count})
         except Exception as e:
-            with _agent_lock:
-                _agent_sessions[session_id]["status"] = "error"
-                _agent_sessions[session_id]["error"] = str(e)
+            _update_agent_session(session_id, {
+                "status": "error",
+                "error": str(e),
+                "finished_at": _agent_now(),
+            }, event={"type": "error", "error": str(e)})
 
-    with _agent_lock:
-        _agent_sessions[session_id] = {"status": "running", "asset_id": req.asset_id, "phase": "analyze", "logs": [], "output_buf": ""}
+    _create_agent_session(session_id, asset_id=req.asset_id)
 
     threading.Thread(target=_run, daemon=True).start()
     return {"ok": True, "session_id": session_id}
@@ -2096,10 +2407,11 @@ async def api_agent_analyze(req: _AgentRequest):
 async def api_agent_status(session_id: str = ""):
     """获取 Agent 运行状态。"""
     if not session_id:
-        with _agent_lock:
-            return {"ok": True, "sessions": {k: v["status"] for k, v in _agent_sessions.items()}}
+        return {"ok": True, "sessions": _list_agent_session_statuses()}
     with _agent_lock:
         session = _agent_sessions.get(session_id)
+    if not session:
+        session = _load_agent_session(session_id)
     if not session:
         raise HTTPException(404, "session not found")
     return {"ok": True, **session}
@@ -2118,65 +2430,8 @@ async def api_agent_steer(req: _SteerRequest):
         raise HTTPException(404, "session not found")
     if session["status"] != "running":
         return {"ok": False, "error": "session is not running"}
-    with _agent_lock:
-        session.setdefault("steering_queue", []).append(req.message)
-        session.setdefault("logs", []).append(f"[user] {req.message}")
+    _queue_agent_steering(req.session_id, req.message)
     return {"ok": True}
-
-
-@web_app.post("/api/agent/expand")
-async def api_agent_expand(req: _AgentRequest):
-    """启动拓展阶段 Agent。"""
-    from graphpt.core.graph_agent import run_graph_agent
-
-    session_id = f"{req.asset_id}_expand_{int(time.time())}"
-
-    def _run():
-        def _on_status(msg):
-            with _agent_lock:
-                s = _agent_sessions.get(session_id)
-                if s:
-                    s.setdefault("logs", []).append(msg)
-
-        def _on_token(t):
-            with _agent_lock:
-                s = _agent_sessions.get(session_id)
-                if s:
-                    s["output_buf"] = s.get("output_buf", "") + t
-
-        def _steering():
-            with _agent_lock:
-                s = _agent_sessions.get(session_id)
-                if s:
-                    msgs = list(s.get("steering_queue", []))
-                    s["steering_queue"] = []
-                    return msgs
-            return []
-
-        try:
-            result = run_graph_agent(
-                asset_id=req.asset_id,
-                phase="expand",
-                user_prompt=req.prompt or "",
-                workspace_root=_PROJECT_ROOT,
-                on_status=_on_status,
-                on_token=_on_token,
-                steering_provider=_steering,
-            )
-            with _agent_lock:
-                _agent_sessions[session_id]["status"] = "done"
-                _agent_sessions[session_id]["result"] = result.final_text
-                _agent_sessions[session_id]["tool_calls"] = result.tool_calls_count
-        except Exception as e:
-            with _agent_lock:
-                _agent_sessions[session_id]["status"] = "error"
-                _agent_sessions[session_id]["error"] = str(e)
-
-    with _agent_lock:
-        _agent_sessions[session_id] = {"status": "running", "asset_id": req.asset_id, "phase": "expand", "logs": [], "output_buf": ""}
-
-    threading.Thread(target=_run, daemon=True).start()
-    return {"ok": True, "session_id": session_id}
 
 
 # ============================================================
@@ -2194,13 +2449,13 @@ async def api_agent_prompt_get():
         raw = _AGENT_PROMPT_PATH.read_text(encoding="utf-8")
     else:
         # 返回代码内置默认值
-        from graphpt.core.graph_agent import _DEFAULT_SYSTEM_TEMPLATE, _DEFAULT_PHASE_INSTRUCTIONS
+        from graphpt.core.graph_agent import _DEFAULT_ATTACK_INSTRUCTION, _DEFAULT_SYSTEM_TEMPLATE
         from graphpt.core.graph_agent_prompt import GRAPH_SCHEMA_KNOWLEDGE, GRAPH_AGENT_METHODOLOGY
         raw = yaml.dump({
             "system_template": _DEFAULT_SYSTEM_TEMPLATE,
             "schema_knowledge": GRAPH_SCHEMA_KNOWLEDGE,
             "methodology": GRAPH_AGENT_METHODOLOGY,
-            "phase_instructions": _DEFAULT_PHASE_INSTRUCTIONS,
+            "attack_instruction": _DEFAULT_ATTACK_INSTRUCTION,
         }, allow_unicode=True, default_flow_style=False, sort_keys=False)
     return {"ok": True, "yaml": raw}
 
@@ -2226,13 +2481,13 @@ async def api_agent_prompt_put(request: Request):
     if not isinstance(cfg, dict):
         raise HTTPException(400, "YAML 顶层必须是 mapping")
     # 检查关键字段
-    required = {"system_template", "schema_knowledge", "methodology", "phase_instructions"}
+    required = {"system_template", "schema_knowledge", "methodology", "attack_instruction"}
     missing = required - set(cfg.keys())
     if missing:
         raise HTTPException(400, f"缺少必要字段: {', '.join(missing)}")
     # 检查 system_template 占位符
     tpl = cfg.get("system_template", "")
-    for ph in ["{asset_id}", "{phase_desc}", "{schema_knowledge}", "{methodology}", "{phase_instruction}"]:
+    for ph in ["{asset_id}", "{schema_knowledge}", "{methodology}", "{attack_instruction}"]:
         if ph not in tpl:
             raise HTTPException(400, f"system_template 缺少占位符: {ph}")
     _AGENT_PROMPT_PATH.parent.mkdir(parents=True, exist_ok=True)
