@@ -1,19 +1,19 @@
 # GraphPT
 
-基于知识图谱的自动化渗透测试平台。工具链自动化完成信息收集，结果汇入 Neo4j 图数据库构建资产关系图谱，未来由 AI Agent 读取图谱进行智能分析与渗透决策。
+基于知识图谱的自动化渗透测试平台。工具链自动完成信息收集并写入 Neo4j 图数据库，AI Agent 读取图谱分析攻击路径，并按需触发精准扫描。
 
 ## 架构
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │ 工具链自动化  │────→│  Neo4j      │────→│  AI Agent   │
-│ Pipeline     │     │  图数据库    │     │  (规划中)    │
+│ Pipeline     │     │  图数据库    │     │  + Web 管理  │
 └─────────────┘     └─────────────┘     └─────────────┘
-  侦察/扫描/收集       资产关系图谱        读图分析→AI渗透
+  侦察/扫描/收集       资产关系图谱        图分析→触发扫描
 ```
 
-**当前已实现：** 自动化工具编排 + 数据采集入图  
-**规划中：** LLM Agent 读取图数据库，基于图谱上下文进行智能渗透决策
+**当前已实现：** 工具编排、数据入图、Web 管理、图可视化、漏洞列表、被动 URL 发现、Web 指纹识别、指纹驱动漏洞扫描、403 访问绕过、基础 Graph Agent 图分析与扫描触发。  
+**仍待完善：** 报告导出、漏洞验证闭环、可复用 Runbook/定时调度、工具自动安装。
 
 ## 快速开始
 
@@ -56,6 +56,7 @@ python -m graphpt
 ```bash
 cp .env.docker .env
 docker-compose up -d
+# Web 管理端: http://127.0.0.1:8080
 ```
 
 ## 配置说明
@@ -91,10 +92,19 @@ use_on:
 
 ### 添加新工具
 
+GraphPT 支持两类工具：
+
+**外部二进制工具**（如 nmap、nuclei）：
 1. 创建 `tools/<name>/` 目录
 2. 放入工具二进制文件
 3. 编写 `tool.yaml`，定义命令模板和 `use_on` 规则
 4. （可选）在 `pipelines.yaml` 中加入流水线
+
+**自研脚本工具**（如 403bypass，纯 Python，随仓库分发）：
+1. 创建 `tools/<name>/<name>.py`（执行器自动识别 `.py` 脚本并用 `python` 调用）
+2. 编写 `tool.yaml`，`{bin}` 会被解析为 `python tools/<name>/<name>.py`
+3. 脚本结果以 JSONL 输出到 stdout，编写对应 adapter 解析入图
+4. 脚本随仓库一起提交（`tools/**/*.py` 已在 .gitignore 放行）
 
 ## 内置工具
 
@@ -110,12 +120,22 @@ use_on:
 | naabu | 快速端口扫描 | https://github.com/projectdiscovery/naabu |
 | nmap | 服务识别 | https://nmap.org/download |
 | httpx | Web 指纹识别 | https://github.com/projectdiscovery/httpx |
+| observer_ward | Web 指纹识别（FingerprintHub + EHole 合并库） | https://github.com/emo-crab/observer_ward |
 | katana | Web 爬虫 | https://github.com/projectdiscovery/katana |
+| urlfinder | 被动 URL 发现 | https://github.com/projectdiscovery/urlfinder |
 | ffuf | Web Fuzzing / 虚拟主机发现 | https://github.com/ffuf/ffuf |
 | gobuster | 目录/DNS/虚拟主机多模式扫描 | https://github.com/OJ/gobuster |
 | nuclei | 漏洞扫描 | https://github.com/projectdiscovery/nuclei |
 
 每个工具目录应包含二进制文件，`tool.yaml` 配置模板已在仓库中。
+
+### 自研脚本工具（随仓库分发，无需下载）
+
+| 工具 | 功能 | 说明 |
+|------|------|------|
+| 403bypass | 403 访问绕过（路径变异/header覆盖/IP伪造/方法切换/编码，全量技术） | 独立 Python 脚本（`tools/403bypass/403bypass.py`），对爆破发现的 403 目标尝试绕过，成功者入图并留存原始数据包 |
+
+此外，**crt.sh 证书透明日志子域名发现**为纯 Python 被动收集，已内置在 `passive_recon` 流水线中（`tasks.py` 的 `_query_crtsh`），无需单独下载。
 
 ## 预置流水线
 
