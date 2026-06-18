@@ -1068,6 +1068,13 @@ class GraphWriter:
                     from_js=f.get("from_js", ""),
                     source=f.get("source", ""),
                 )
+            elif ftype == "secret":
+                result = self.write_secret(
+                    file_id=f.get("file_id", ""),
+                    secret_type=f.get("secret_type", ""),
+                    value_preview=f.get("value_preview", ""),
+                    line=f.get("line", 0),
+                )
             if result:
                 results.append(result)
         return results

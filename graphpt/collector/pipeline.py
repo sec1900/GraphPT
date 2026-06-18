@@ -469,6 +469,31 @@ _BATCH_TARGETS: dict[str, dict[str, Any]] = {
         # 命中则注入 -tags 精准扫，未命中则 {tags_arg} 为空 → 盲扫兜底。迭代模式。
         "mapping": {"url": "{url}", "tech": "{tags_arg}"},
     },
+    "jsfinder": {
+        # 消费图中已发现的 .js File 节点（katana/urlfinder 产出），批量分析。
+        # File 经 HTTPEndpoint-[:REFERENCES]->File 关系挂在端点下。
+        "query": """
+            MATCH (a:Asset {id: $asset_id})
+            CALL {
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(:HTTPEndpoint)-[:REFERENCES]->(f:File)
+              RETURN f
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(:HTTPEndpoint)-[:REFERENCES]->(f:File)
+              RETURN f
+              UNION
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(:HTTPEndpoint)-[:REFERENCES]->(f:File)
+              RETURN f
+            }
+            WITH DISTINCT f
+            WHERE f.url ENDS WITH '.js'
+              AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = f.url }
+            RETURN f.url AS url
+        """,
+        "mapping": {"url": "{urls_file}"},
+    },
 }
 
 

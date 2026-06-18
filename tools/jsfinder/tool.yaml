@@ -1,0 +1,7 @@
+desc: "JS 静态分析（提取隐藏 URL/API 接口/敏感信息/子域名）"
+command: "{bin} -list {urls_file}"
+use_on:
+  File:
+    desc: "抓取并分析 JS 文件，挖掘隐藏接口与泄露信息"
+    params:
+      urls_file: "{url}"

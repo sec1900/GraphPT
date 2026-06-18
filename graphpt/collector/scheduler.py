@@ -39,13 +39,16 @@ from typing import Any
 #
 # nuclei 单独置于 observer_ward 之后的一层:nuclei 的 tag 选择依赖 observer_ward
 # 写入的 tech[] 指纹，跨层串行保证指纹先入图（无需额外门控）。
+#
+# jsfinder（消费 File 节点）置于第 6 层:File 由 katana(第5层)/urlfinder(第1层) 产出，
+# 跨层串行保证 katana 先爬出 JS File，下一轮 jsfinder 才有目标分析。
 _DEPENDENCY_LAYERS: list[dict[str, Any]] = [
     {"layer": 1, "node": "RootDomain", "tools": ["crt", "subfinder", "urlfinder"]},
     {"layer": 2, "node": "Subdomain", "tools": ["dnsx"]},
     {"layer": 3, "node": "IP", "tools": ["naabu"]},
     {"layer": 4, "node": "IP/Port", "tools": ["nmap", "httpx"]},
     {"layer": 5, "node": "Endpoint", "tools": ["observer_ward", "katana", "ffuf", "gobuster"]},
-    {"layer": 6, "node": "Endpoint(tech)/DirEntry-403", "tools": ["nuclei", "403bypass"]},
+    {"layer": 6, "node": "Endpoint(tech)/DirEntry-403/File", "tools": ["nuclei", "403bypass", "jsfinder"]},
 ]
 
 

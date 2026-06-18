@@ -1372,6 +1372,110 @@ class ObserverWardAdapter(BaseAdapter):
         return findings
 
 
+class JsfinderAdapter(BaseAdapter):
+    """jsfinder JSONL 输出适配器 → http_endpoint / api_endpoint / subdomain / secret。
+
+    jsfinder 抓取并分析 JS 文件，输出每行一个 JSON finding，均带 from_js（来源 JS url）。
+    File 节点 id 是确定性的 file:md5(url)[:16]，故 secret/api_endpoint 可由 from_js
+    反推 file_id 关联回对应 File 节点，无需查询。
+
+    入图策略（findings 按列表顺序写入，父节点先于子节点）：
+      - subdomain：value=host，挂入资产图
+      - http_endpoint：从 JS 提取的隐藏 URL，crawl_status=not_fetched 供后续探测
+      - api_endpoint：API 风格 URL，带 params/api_signals/from_js + file_id（File-[:DEFINES_API]->）
+      - secret：脱敏后的敏感信息，file_id 关联（File-[:MAY_CONTAIN]->）
+    """
+
+    tool_name = "jsfinder"
+
+    @staticmethod
+    def _file_id_from_url(url: str) -> str:
+        """复刻 GraphWriter.write_file 的 id 公式：file:md5(url)[:16]。"""
+        import hashlib
+        return f"file:{hashlib.md5(url.encode()).hexdigest()[:16]}" if url else ""
+
+    def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:
+        import json as _json
+        from urllib.parse import urlsplit as _split
+
+        text = raw_output.decode("utf-8", errors="replace") if isinstance(raw_output, bytes) else raw_output
+        asset_id = ctx.get("asset_id", "")
+        findings: list[dict[str, Any]] = []
+        seen_hosts: set[str] = set()
+        seen_urls: set[str] = set()
+
+        for line in text.strip().splitlines():
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                obj = _json.loads(line)
+            except (_json.JSONDecodeError, ValueError):
+                continue
+
+            ftype = obj.get("type", "")
+            from_js = str(obj.get("from_js") or "").strip()
+
+            if ftype == "subdomain":
+                host = str(obj.get("value") or "").strip().strip(".").lower()
+                if not host or host in seen_hosts:
+                    continue
+                seen_hosts.add(host)
+                findings.append({
+                    "type": "subdomain",
+                    "value": host,
+                    "root_domain": obj.get("root_domain") or ".".join(host.split(".")[-2:]),
+                    "source": "jsfinder",
+                    "asset_id": asset_id,
+                })
+
+            elif ftype == "http_endpoint":
+                url = str(obj.get("url") or "").strip()
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                host = (_split(url).hostname or "").strip(".").lower()
+                findings.append({
+                    "type": "http_endpoint",
+                    "url": url,
+                    "method": obj.get("method", "GET"),
+                    "parent_id": f"sub:{host}" if host else "",
+                    "crawl_status": "not_fetched",
+                    "source": "jsfinder",
+                    "asset_id": asset_id,
+                })
+
+            elif ftype == "api_endpoint":
+                url = str(obj.get("url") or "").strip()
+                if not url:
+                    continue
+                findings.append({
+                    "type": "api_endpoint",
+                    "url": url,
+                    "method": obj.get("method", "GET"),
+                    "file_id": self._file_id_from_url(from_js),
+                    "params": obj.get("params", []),
+                    "param_source": obj.get("param_source", ""),
+                    "api_signals": obj.get("api_signals", []),
+                    "from_js": from_js,
+                    "source": "jsfinder",
+                })
+
+            elif ftype == "secret":
+                file_id = self._file_id_from_url(from_js)
+                if not file_id:
+                    continue  # secret 必须挂在 File 下，无 from_js 则跳过
+                findings.append({
+                    "type": "secret",
+                    "file_id": file_id,
+                    "secret_type": obj.get("secret_type", ""),
+                    "value_preview": obj.get("value_preview", ""),
+                    "line": obj.get("line", 0),
+                })
+
+        return findings
+
+
 register_adapter("subfinder", SubfinderAdapter)
 register_adapter("crt", CrtAdapter)
 register_adapter("urlfinder", UrlfinderAdapter)
@@ -1387,3 +1491,4 @@ register_adapter("gobuster", GobusterAdapter)
 register_adapter("katana", KatanaAdapter)
 register_adapter("nuclei", NucleiAdapter)
 register_adapter("403bypass", BypassAdapter)
+register_adapter("jsfinder", JsfinderAdapter)
