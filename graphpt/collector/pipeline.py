@@ -852,13 +852,6 @@ class PipelineExecutor:
 
         # 判断模式：{targets_file}/{domains_file}/{urls_file} → 批量文件，否则迭代
         batch_ph = _batch_placeholder_in(cmd_template)
-        # 兜底: targets.yaml 映射了 {urls_file} 但命令模板没用 -l 时，仍走批量(stdin 管道)
-        if not batch_ph:
-            mapping = _load_target_selectors().get(tool, {}).get("mapping", {})
-            for ph in _BATCH_PLACEHOLDERS:
-                if ph in mapping.values():
-                    batch_ph = ph
-                    break
 
         batch_ctx_key = ""
         batch_tmp_paths: list[str] = []
