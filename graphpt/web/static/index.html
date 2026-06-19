@@ -3128,7 +3128,7 @@ async function showNodeDetail(url) {
       n.secrets.forEach(s => {
         let ev = s.evidence||'';
         html += '<div style="font-size:12px">['+esc(s.type)+'] '+esc(s.preview);
-        if (ev) html += ' <a href="javascript:void(0)" onclick="window.open(\'/artifacts/\'+encodeURIComponent(\''+esc(ev.replace(/\\\\/g,\'/\'))+'\'))" style="color:var(--accent);font-size:10px">[evidence]</a>';
+        if (ev) html += ' <a href=\"/artifacts/' + encodeURIComponent(ev.replace(/\\\\/g, '/')) + '\" target=\"_blank\" style=\"color:var(--accent);font-size:10px\">[evidence]</a>';
         html += '</div>';
       });
     }
