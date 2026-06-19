@@ -84,13 +84,12 @@ def _neo4j():
 
 
 def _sanitize_params(**params):
-    """清洗参数：过滤空值，修复 Unicode 导致 $param 被吞的问题。"""
+    """清洗参数：过滤 None，保留空字符串（Neo4j 5.x 支持空串参数）。"""
     clean = {}
     for k, v in params.items():
-        if v is None or v == "" or (isinstance(v, str) and not v.strip()):
-            continue  # 跳过空参数（Neo4j driver 会吞掉空字符串的占位符）
+        if v is None:
+            continue
         if isinstance(v, str):
-            # 确保是合法 Unicode，问题字符用 replace 替代 remove
             v = v.encode("utf-8", errors="replace").decode("utf-8")
         clean[k] = v
     return clean
