@@ -1,5 +1,5 @@
 desc: "Web 指纹探测"
-command: "{bin} -l {urls_file} -title -status-code -tech-detect -content-length -json"
+command: "{bin} -json -timeout 10 -retries 1 -title -status-code -tech-detect -content-length"
 use_on:
   Subdomain:
     desc: "探测子域名是否有 Web 服务"

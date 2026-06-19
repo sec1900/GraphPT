@@ -16,7 +16,7 @@ from typing import Any
 from dotenv import load_dotenv
 load_dotenv()
 
-from graphpt.collector.pipeline import PipelineExecutor, _BATCH_TARGETS, _find_tool
+from graphpt.collector.pipeline import PipelineExecutor, _load_target_selectors, _find_tool
 from graphpt.collector.neo4j_client import _get_driver
 from graphpt.common.log import get_logger
 
@@ -40,7 +40,7 @@ def get_unscanned_summary(asset_id: str, tools: list[str] | None = None) -> dict
 
     with driver.session() as session:
         for tool in check_tools:
-            cfg = _BATCH_TARGETS.get(tool)
+            cfg = _load_target_selectors().get(tool)
             if not cfg:
                 continue
             query = cfg["query"]
@@ -133,7 +133,7 @@ def scan_all_unscanned(asset_id: str, tools: list[str] | None = None) -> dict[st
     for t in SCAN_ORDER:
         if tools and t not in tools:
             continue
-        if _BATCH_TARGETS.get(t) and _get_tool_command(t):
+        if _load_target_selectors().get(t) and _get_tool_command(t):
             run_tools.append(t)
 
     if not run_tools:

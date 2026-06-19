@@ -211,8 +211,10 @@
 <header>
   <h1>GraphPT</h1>
   <span class="sub">Admin Panel</span>
+  <input id="global-search" type="text" placeholder="Search subdomain/IP/URL..." style="margin-left:16px;padding:4px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;width:220px" onkeyup="if(event.key==='Enter')doSearch()">
   <a class="header-link" href="/docs" target="_blank">API Docs</a>
 </header>
+<div id="search-results" style="display:none;position:absolute;top:48px;left:300px;z-index:100;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;max-height:400px;overflow-y:auto;width:400px;box-shadow:0 4px 12px rgba(0,0,0,.3)"></div>
 
 <nav>
   <button data-page="dashboard" class="active">Dashboard</button>
@@ -222,6 +224,7 @@
   <button data-page="tasks">Pipelines</button>
   <button data-page="config">Config</button>
   <button data-page="agent">Agent</button>
+  <button data-page="logs">Logs</button>
   <button data-page="graph">Graph</button>
 </nav>
 
@@ -235,8 +238,16 @@
         <select id="dash-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
         <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
       </div>
+      <button class="btn" onclick="startFullScan()" id="btn-start-scan" style="margin-left:12px;background:var(--green)">Start Full Scan</button>
+      <label style="margin-left:12px;font-size:11px;color:var(--muted);cursor:pointer">
+        <input type="checkbox" id="dash-auto-refresh" onchange="toggleAutoDashboard()"> Auto (30s)
+      </label>
       <span class="spacer"></span>
       <span style="font-size:11px;color:var(--muted)" id="dash-asset-name"></span>
+    </div>
+    <div id="scan-progress-bar" style="display:none;margin:0 0 16px 0;padding:10px 16px;background:var(--surface);border:1px solid var(--border);border-radius:6px">
+      <div style="font-size:12px;color:var(--accent);margin-bottom:6px">Scan running...</div>
+      <div id="scan-progress-layers" style="font-size:11px;color:var(--muted)"></div>
     </div>
     <div class="card-grid" id="dash-cards"></div>
     <div class="section">
@@ -251,6 +262,10 @@
       <div class="section">
         <div class="section-title">Recent Changes <span style="font-size:10px;color:var(--muted)">(24h)</span></div>
         <table id="dash-changes"><tbody></tbody></table>
+      </div>
+      <div class="section">
+        <div class="section-title">Recent Errors <button onclick="clearErrors()" class="btn outline small" style="margin-left:8px;font-size:10px">Clear</button></div>
+        <table id="dash-errors"><tbody></tbody></table>
       </div>
     </div>
     <div class="loading" id="dash-loading">Loading</div>
@@ -489,6 +504,30 @@
     </div>
   </div>
 
+  <!-- ==================== Tool Logs ==================== -->
+  <div id="page-logs" class="page">
+    <div class="toolbar">
+      <div class="asset-sel">
+        <label style="color:var(--muted);font-size:12px;margin-right:4px">Tool:</label>
+        <select id="logs-tool-sel" onchange="loadLogList()"></select>
+      </div>
+      <button class="btn outline small" onclick="refreshLog()" id="logs-refresh-btn">Refresh</button>
+      <label style="color:var(--muted);font-size:11px;margin-left:auto;cursor:pointer">
+        <input type="checkbox" id="logs-auto-refresh" checked onchange="toggleAutoRefresh()">
+        Auto (3s)
+      </label>
+    </div>
+    <div style="display:flex;gap:12px;height:calc(100vh - 180px)">
+      <div style="width:280px;flex-shrink:0;overflow-y:auto;border:1px solid var(--border);border-radius:6px;background:var(--surface)">
+        <div id="logs-file-list" style="padding:8px;font-size:12px;color:var(--muted)">Select a tool...</div>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px" id="logs-current-file"></div>
+        <pre id="logs-content" style="flex:1;overflow:auto;background:#0d1117;color:#c9d1d9;padding:12px;border-radius:6px;border:1px solid var(--border);font-size:12px;line-height:1.5;margin:0;white-space:pre-wrap;word-break:break-all;font-family:var(--mono)"></pre>
+      </div>
+    </div>
+  </div>
+
   <!-- ==================== Graph Visualization ==================== -->
   <div id="page-graph" class="page">
     <div class="toolbar">
@@ -577,18 +616,32 @@
   </div>
 </div>
 
+<!-- Node Detail Modal -->
+<div class="modal-overlay" id="detail-modal-overlay" style="display:none" onclick="if(event.target===this)this.style.display='none'">
+  <div class="modal" style="max-width:600px">
+    <div id="detail-modal-body"></div>
+    <div class="actions" style="margin-top:12px">
+      <button class="btn outline" onclick="document.getElementById('detail-modal-overlay').style.display='none'">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- New Asset Modal -->
 <div class="modal-overlay" id="asset-modal-overlay" style="display:none">
-  <div class="modal" style="max-width:400px">
+  <div class="modal" style="max-width:420px">
     <h3>New Asset</h3>
-    <p style="color:var(--muted);font-size:12px;margin-bottom:16px">An asset = a target company/organization. All domains, IPs, scans are scoped to one company. Company name can be used to discover more domains.</p>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:16px">An asset = a target company/organization. All scans scoped here.</p>
     <div style="margin-bottom:10px">
       <label style="font-size:11px;color:var(--muted)">Company Name</label>
-      <input type="text" id="modal-asset-name" placeholder="Acme Corporation" />
+      <input type="text" id="modal-asset-name" placeholder="Acme Corporation" oninput="syncAssetId(this.value)" />
+    </div>
+    <div style="margin-bottom:10px">
+      <label style="font-size:11px;color:var(--muted)">Asset ID <span style="color:var(--orange)">*slug</span></label>
+      <input type="text" id="modal-asset-id" placeholder="acme-corp" />
     </div>
     <div style="margin-bottom:16px">
-      <label style="font-size:11px;color:var(--muted)">Asset ID <span style="color:var(--orange)">*slug, auto-generated</span></label>
-      <input type="text" id="modal-asset-id" placeholder="acme-corp" />
+      <label style="font-size:11px;color:var(--muted)">Root Domains <span style="color:var(--muted)">*comma-sep, e.g. acme.com, acme.cn</span></label>
+      <input type="text" id="modal-asset-domains" placeholder="acme.com" />
     </div>
     <div class="actions">
       <button class="btn outline" onclick="document.getElementById('asset-modal-overlay').style.display='none'">Cancel</button>
@@ -642,8 +695,36 @@ async function loadAssets() {
 }
 
 function renderAssetSelectors() {
-  const opts = assetList.map(a => `<option value="${esc(a.id)}" ${a.id===currentAsset?'selected':''}>${esc(a.name||a.id)} (${esc(a.id)})</option>`).join('') || '<option value="default">default</option>';
+  const opts = assetList.map(a => {
+    const stats = [a.root_count && `R:${a.root_count}`, a.sub_count && `S:${a.sub_count}`, a.ip_count && `I:${a.ip_count}`, a.endpoint_count && `E:${a.endpoint_count}`].filter(Boolean).join(' ');
+    return `<option value="${esc(a.id)}" ${a.id===currentAsset?'selected':''}>${esc(a.name||a.id)} ${stats ? '(' + stats + ')' : ''}</option>`;
+  }).join('') || '<option value="default">default</option>';
   document.querySelectorAll('#tgt-asset-sel, #exp-asset-sel, #dash-asset-sel, #vuln-asset-sel, #graph-asset-sel').forEach(el => { el.innerHTML = opts; el.value = currentAsset; });
+}
+
+async function clearErrors() {
+  if (!confirm('Clear all error logs?')) return;
+  try {
+    await fetch(API + '/errors?asset_id=' + currentAsset, {method:'DELETE'});
+    loadDashboard();
+    toast('Errors cleared');
+  } catch(e) { toast(e.message, false); }
+}
+
+async function deleteAsset() {
+  if (!currentAsset || currentAsset === 'default') return toast('Cannot delete default asset', false);
+  if (!confirm('Delete asset "' + currentAsset + '" and ALL its data? This cannot be undone.')) return;
+  try {
+    const res = await fetch(API + '/assets/' + currentAsset, { method: 'DELETE' });
+    const json = await res.json();
+    if (json.ok) {
+      toast('Deleted: ' + currentAsset);
+      await loadAssets();
+      if (currentAsset === json.data?.id) switchAsset(currentAsset);
+    } else {
+      toast(json.error, false);
+    }
+  } catch(e) { toast(e.message, false); }
 }
 
 function switchAsset(id) {
@@ -662,32 +743,45 @@ function loadCurrentPage() {
     case 'page-surfaces': loadExplorer(); break;
     case 'page-vulns': loadVulnerabilities(); break;
     case 'page-tasks': loadPipelines(); break;
+    case 'page-logs': loadLogs(); break;
     case 'page-graph': loadGraph(); break;
     case 'page-agent': loadAgent(); break;
+  }
+}
+
+function syncAssetId(val) {
+  const slug = val.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+  if (slug && !document.getElementById('modal-asset-id').value) {
+    document.getElementById('modal-asset-id').placeholder = slug;
   }
 }
 
 function openNewAssetModal() {
   document.getElementById('modal-asset-id').value = '';
   document.getElementById('modal-asset-name').value = '';
+  document.getElementById('modal-asset-domains').value = '';
+  document.getElementById('modal-asset-id').placeholder = 'acme-corp';
   document.getElementById('asset-modal-overlay').style.display = 'flex';
   document.getElementById('modal-asset-name').focus();
 }
 
 async function createAsset() {
-  const id = document.getElementById('modal-asset-id').value.trim().toLowerCase().replace(/\s+/g, '-');
+  const id = document.getElementById('modal-asset-id').value.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
   const name = document.getElementById('modal-asset-name').value.trim() || id;
-  if (!id) return toast('Asset ID is required (slug, e.g. project-alpha)', false);
+  const domainsRaw = document.getElementById('modal-asset-domains').value.trim();
+  const domains = domainsRaw ? domainsRaw.split(/[,\n]+/).map(d => d.trim()).filter(Boolean) : [];
+  if (!id) return toast('Asset ID is required (slug, e.g. acme-corp)', false);
   try {
     const res = await fetch(API + '/assets', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({id, name})
+      body: JSON.stringify({id, name, domains})
     });
     const json = await res.json();
     if (json.ok) {
       document.getElementById('asset-modal-overlay').style.display = 'none';
-      toast('Created: ' + name);
+      const extra = json.data.domains_seeded ? ' + ' + json.data.domains_seeded + ' domains' : '';
+      toast('Created: ' + name + extra);
       await loadAssets();
       switchAsset(id);
     } else {
@@ -793,50 +887,77 @@ async function loadDashboard() {
   document.getElementById('dash-loading').style.display = 'block';
   const assetName = (assetList.find(a => a.id === currentAsset) || {}).name || currentAsset;
   document.getElementById('dash-asset-name').textContent = assetName;
-  try {
-    const res = await fetch(aq(API + '/dashboard'));
-    const json = await res.json();
-    if (!json.ok) { toast(json.error, false); return; }
-    const d = json.data;
 
-    const cov = d.coverage || {};
+  // Use lightweight count API, plus recent endpoint
+  try {
+    const [cntRes, epRes, recentRes] = await Promise.all([
+      fetch(aq(API + '/dashboard/counts')),
+      fetch(aq(API + '/dashboard/endpoints?limit=15')),
+      fetch(aq(API + '/dashboard/recent?limit=10')),
+    ]);
+    const cnt = (await cntRes.json()).data || {};
+    const ep = (await epRes.json()).data || [];
+    const recent = (await recentRes.json()).data || {};
+
     const cards = [
-      {label:'Root Domains', value: d.root_domains, cls:'accent'},
-      {label:'Subdomains', value: d.subdomains, cls:'accent'},
-      {label:'IP Addresses', value: d.ips, cls:'green', sub: cov.unscanned_ips > 0 ? `${cov.unscanned_ips} unscanned` : ''},
-      {label:'Open Ports', value: d.ports, cls:'orange'},
-      {label:'HTTP Endpoints', value: d.http_endpoints, cls:'purple', sub: cov.unscanned_eps > 0 ? `${cov.unscanned_eps} need scan` : ''},
+      {label:'Root Domains', value: cnt.root_domains||0, cls:'accent'},
+      {label:'Subdomains', value: cnt.subdomains||0, cls:'accent'},
+      {label:'IP Addresses', value: cnt.ips||0, cls:'green'},
+      {label:'Open Ports', value: cnt.ports||0, cls:'orange'},
+      {label:'HTTP Endpoints', value: cnt.http_endpoints||0, cls:'purple'},
     ];
+
+    // Add scan progress bars
+    try {
+      const spRes = await fetch(aq(API + '/scan/progress?asset_id=' + currentAsset));
+      const sp = await spRes.json();
+      if (sp.ok && sp.data && sp.data.layers) {
+        const toolPcts = {};
+        sp.data.layers.forEach(l => l.tools.forEach(t => {
+          if (!t.active) toolPcts[t.tool] = t.scans > 0 ? 'done' : 'pending';
+          else toolPcts[t.tool] = 'running';
+        }));
+        const overall = sp.data.layers.reduce((sum, l) => {
+          const done = l.tools.filter(t => t.scans > 0).length;
+          return sum + done / Math.max(1, l.tools.length);
+        }, 0) / Math.max(1, sp.data.layers.length) * 100;
+        cards.push({label:'Scan Progress', value: Math.round(overall)+'%', cls:'accent'});
+      }
+    } catch(e) {}
+
     document.getElementById('dash-cards').innerHTML = cards.map(c =>
-      `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div>${c.sub ? `<div class="sub" style="font-size:10px;color:var(--orange);margin-top:2px">${c.sub}</div>` : ''}</div>`
+      `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div></div>`
     ).join('');
 
     // Endpoint status
-    let epRows = (d.endpoint_details || []).map(e =>
+    let epRows = ep.map(e =>
       `<tr><td><span class="badge ${e.status==='success'?'ok':e.status==='error'?'err':'warn'}">${e.status||'unknown'}</span></td><td>${e.code||'-'}</td><td>${e.count}</td></tr>`
     ).join('');
     document.getElementById('dash-endpoints').innerHTML = epRows || '<tr><td colspan="3" style="color:var(--muted)">No endpoints</td></tr>';
 
     // Recent subdomains
-    let subRows = (d.recent_subdomains || []).map(s =>
-      `<tr><td>${esc(s.value)}</td><td style="color:var(--muted)">${esc(s.source||'')}</td><td>${fmtTime(s.created_at)}</td></tr>`
+    let subRows = (recent.recent_subdomains || []).map(s =>
+      `<tr><td>${esc(s.value)}</td><td style="color:var(--muted)">${esc(s.root||'')}</td><td>${fmtTime(s.created_at)}</td></tr>`
     ).join('');
     document.getElementById('dash-recent-subs').innerHTML = subRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
 
-    // Recent changes (unified: new discoveries + property changes)
+    // Recent changes
+    let chRows = '';
+    (recent.recent_changes || []).forEach(c => {
+      chRows += `<tr><td><span class="badge warn">CHG</span> ${(c.fields||[]).join(', ')}</td><td>${esc(c.url||'')}</td><td>${fmtTime(c.changed_at)}</td></tr>`;
+    });
+    document.getElementById('dash-changes').innerHTML = chRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
+
+    // Error panel
     try {
-      const chRes = await fetch(aq(API + '/changes'));
-      const chJson = await chRes.json();
-      if (chJson.ok) {
-        const cd = chJson.data;
-        let rows = '';
-        (cd.new_nodes || []).slice(0, 15).forEach(n => {
-          rows += `<tr><td><span class="badge ok">NEW</span> ${esc(n.type)}</td><td>${esc(n.value||'')}</td><td>${fmtTime(n.discovered_at)}</td></tr>`;
+      const errRes = await fetch(aq(API + '/errors?limit=20'));
+      const errJson = await errRes.json();
+      if (errJson.ok) {
+        let errRows = '';
+        (errJson.data || []).forEach(e => {
+          errRows += `<tr><td><span class="badge err">${esc(e.kind)}</span></td><td><b>${esc(e.tool)}</b></td><td style="font-size:11px;color:var(--muted)">${esc(e.message||'').substring(0,120)}</td><td>${fmtTime(e.time)}</td></tr>`;
         });
-        (cd.property_changes || []).slice(0, 10).forEach(c => {
-          rows += `<tr><td><span class="badge warn">CHG</span> ${(c.fields||[]).join(', ')}</td><td>${esc(c.value||'')}</td><td>${fmtTime(c.changed_at)}</td></tr>`;
-        });
-        document.getElementById('dash-changes').innerHTML = rows || '<tr><td colspan="3" style="color:var(--muted)">None in last 24h</td></tr>';
+        document.getElementById('dash-errors').innerHTML = errRows || '<tr><td colspan="4" style="color:var(--green)">No errors</td></tr>';
       }
     } catch(e) { /* ignore */ }
   } catch(e) {
@@ -2717,6 +2838,261 @@ function pollAgent() {
       }
     });
   }, 1500);
+}
+
+// ============================================================
+// Tool Logs Viewer
+// ============================================================
+let _logsPoll = null;
+let _logsFile = null;
+
+async function loadLogs() {
+  const sel = document.getElementById('logs-tool-sel');
+  if (sel.options.length === 0) {
+    const tools = ['403bypass','crt','dnsx','enscan','ffuf','gobuster','httpx','katana','naabu','nmap','nuclei','observer_ward','secretfinder','subfinder','urlfinder'];
+    tools.forEach(t => { const o = document.createElement('option'); o.value=t; o.textContent=t; sel.appendChild(o); });
+  }
+  // 自动检测活跃工具
+  const r = await fetch('/api/logs/active').then(r => r.json());
+  if (r.ok && r.data.length > 0) {
+    const active = r.data[0]; // 取第一个活跃工具
+    sel.value = active.tool;
+    document.getElementById('logs-current-file').textContent = active.tool + ' (running)';
+    if (active.latest_log) {
+      document.getElementById('logs-file-list').innerHTML = '<div style="padding:8px;color:var(--accent);font-size:12px">' + active.latest_log.filename + ' (' + active.latest_log.total_lines + ' lines)</div>';
+      _logsFile = {tool: active.tool, filename: active.latest_log.filename};
+      const pre = document.getElementById('logs-content');
+      pre.textContent = active.latest_log.tail;
+      pre.scrollTop = pre.scrollHeight;
+    }
+  } else {
+    loadLogList();
+  }
+}
+
+async function loadLogList() {
+  const tool = document.getElementById('logs-tool-sel').value;
+  if (!tool) return;
+  const r = await fetch(`/api/tools/${tool}/logs`).then(r => r.json());
+  const list = document.getElementById('logs-file-list');
+  if (!r.ok || !r.data.length) {
+    list.innerHTML = '<div style="padding:8px;color:var(--muted)">No logs yet</div>';
+    return;
+  }
+  list.innerHTML = r.data.map(f => {
+    const d = new Date(f.mtime * 1000);
+    const ts = d.toLocaleString();
+    const size = f.size > 1024 ? (f.size/1024).toFixed(1)+'KB' : f.size+'B';
+    return `<div style="padding:6px 8px;cursor:pointer;border-radius:4px;margin:2px 0;font-size:12px"
+        onclick="openLog('${tool}','${f.name}')"
+        onmouseover="this.style.background='var(--hover)'" onmouseout="this.style.background=''">
+        <div style="color:var(--text)">${f.name}</div>
+        <div style="color:var(--muted);font-size:10px">${ts} · ${size}</div>
+      </div>`;
+  }).join('');
+}
+
+async function openLog(tool, filename) {
+  _logsFile = {tool, filename};
+  document.getElementById('logs-current-file').textContent = `${tool}/${filename}`;
+  await loadLogContent();
+}
+
+async function loadLogContent() {
+  if (!_logsFile) return;
+  const {tool, filename} = _logsFile;
+  const r = await fetch(`/api/tools/${tool}/logs/${filename}?tail=500`).then(r => r.json());
+  if (r.ok) {
+    const pre = document.getElementById('logs-content');
+    pre.textContent = r.data;
+    pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+function refreshLog() {
+  if (_logsFile) loadLogContent(); else loadLogList();
+}
+
+function toggleAutoRefresh() {
+  const on = document.getElementById('logs-auto-refresh').checked;
+  if (on) {
+    _logsPoll = setInterval(() => {
+      if (_logsFile) loadLogContent();
+      else refreshLog();
+    }, 3000);
+  } else {
+    if (_logsPoll) clearInterval(_logsPoll);
+    _logsPoll = null;
+  }
+}
+
+function refreshLog() {
+  if (_logsFile) { loadLogContent(); return; }
+  // Check for active tools
+  fetch('/api/logs/active').then(r => r.json()).then(d => {
+    if (d.ok && d.data.length > 0) {
+      const active = d.data[0];
+      document.getElementById('logs-current-file').textContent = active.tool + ' (running)';
+      if (active.latest_log) {
+        _logsFile = {tool: active.tool, filename: active.latest_log.filename};
+        const pre = document.getElementById('logs-content');
+        pre.textContent = active.latest_log.tail;
+        pre.scrollTop = pre.scrollHeight;
+      }
+    }
+  });
+}
+toggleAutoRefresh();
+
+// ============================================================
+// One-click Full Scan
+// ============================================================
+let _scanPoll = null;
+
+async function startFullScan() {
+  const btn = document.getElementById('btn-start-scan');
+  btn.disabled = true; btn.textContent = 'Previewing...';
+  try {
+    // Preview first
+    const r = await fetch('/api/scan/start', {method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({asset_id:currentAsset, dispatch:true})});
+    const d = await r.json();
+    if (d.ok) {
+      if (d.data.status === 'already_running') {
+        toast('Scan already running');
+      } else {
+        toast('Started: ' + d.data.preview.length + ' tools');
+      }
+      document.getElementById('scan-progress-bar').style.display = 'block';
+      pollScanProgress();
+    } else {
+      toast(d.error || 'Failed', false);
+    }
+  } catch(e) { toast(e.message, false); }
+  btn.disabled = false; btn.textContent = 'Start Full Scan';
+}
+
+async function refreshScanProgress() {
+  try {
+    const r = await fetch('/api/scan/progress?asset_id=' + currentAsset);
+    const d = await r.json();
+    if (!d.ok) return false;
+    const data = d.data;
+    let html = '';
+    for (const l of data.layers) {
+      const tools = l.tools.map(t => {
+        const mark = t.active ? ' <span style=\"color:var(--green)\">●</span>' : (t.scans > 0 ? ' ✓' : '');
+        return t.tool + ':' + t.scans + mark;
+      }).join(' | ');
+      html += '<div style=\"margin:2px 0\">L' + l.layer + ' [' + l.node + '] ' + tools + '</div>';
+    }
+    document.getElementById('scan-progress-layers').innerHTML = html;
+
+    if (data.nodes) {
+      document.getElementById('dash-asset-name').textContent =
+        'Nodes: R' + data.nodes.RootDomain + ' S' + data.nodes.Subdomain +
+        ' I' + data.nodes.IP + ' P' + data.nodes.Port +
+        ' E' + data.nodes.HTTPEndpoint + ' V' + data.nodes.Vulnerability + ' X' + data.nodes.Secret;
+    }
+
+    if (data.active_tools.length === 0 && data.scan_running === false) {
+      document.getElementById('btn-start-scan').style.background = '';
+      return false; // done
+    }
+    return true;
+  } catch(e) { return true; }
+}
+
+function pollScanProgress() {
+  document.getElementById('scan-progress-bar').style.display = 'block';
+  if (_scanPoll) clearInterval(_scanPoll);
+  _scanPoll = setInterval(async () => {
+    const alive = await refreshScanProgress();
+    if (!alive) { clearInterval(_scanPoll); _scanPoll = null; toast('Scan complete!'); }
+  }, 3000);
+}
+
+// Auto-refresh toggle
+let _autoRefresh = false;
+function toggleAutoDashboard() {
+  _autoRefresh = document.getElementById('dash-auto-refresh').checked;
+  if (_autoRefresh) { _autoTimer = setInterval(loadDashboard, 30000); }
+  else { if (_autoTimer) clearInterval(_autoTimer); }
+}
+let _autoTimer = null;
+
+// Check if scan already running on page load
+(async () => { try {
+  const r = await fetch('/api/scan/progress?asset_id=' + currentAsset);
+  const d = await r.json();
+  if (d.ok && (d.data.active_tools.length > 0 || d.data.scan_running)) {
+    document.getElementById('scan-progress-bar').style.display = 'block';
+    pollScanProgress();
+  }
+} catch(e){} })();
+
+// Global search
+async function doSearch() {
+  const q = document.getElementById('global-search').value.trim();
+  const box = document.getElementById('search-results');
+  if (!q) { box.style.display='none'; return; }
+  try {
+    const r = await fetch(aq('/api/search?q='+encodeURIComponent(q)+'&asset_id='+currentAsset));
+    const d = await r.json();
+    if (!d.ok) return;
+    const data = d.data;
+    let html = '';
+    if (data.subdomains.length) {
+      html += '<div style="color:var(--accent);font-size:11px;margin-bottom:4px">Subdomains ('+data.subdomains.length+')</div>';
+      data.subdomains.slice(0,5).forEach(s => html += '<div style="font-size:12px;padding:2px 0;cursor:pointer" onclick="document.getElementById(\'global-search\').value=\''+esc(s.value)+'\';document.getElementById(\'search-results\').style.display=\'none\'">'+esc(s.value)+'</div>');
+    }
+    if (data.ips.length) {
+      html += '<div style="color:var(--green);font-size:11px;margin:8px 0 4px">IPs ('+data.ips.length+')</div>';
+      data.ips.slice(0,5).forEach(s => html += '<div style="font-size:12px;padding:2px 0">'+esc(s.value)+'</div>');
+    }
+    if (data.endpoints.length) {
+      html += '<div style="color:var(--purple);font-size:11px;margin:8px 0 4px">Endpoints ('+data.endpoints.length+')</div>';
+      data.endpoints.slice(0,5).forEach(s => html += '<div style="font-size:12px;padding:2px 0;cursor:pointer" onclick="showNodeDetail(\''+esc(s.url)+'\')">['+s.sc+'] '+esc(s.url).substring(0,80)+'</div>');
+    }
+    box.innerHTML = html || '<div style="color:var(--muted);font-size:12px">No results</div>';
+    box.style.display = 'block';
+  } catch(e) {}
+}
+
+// Node detail popup
+async function showNodeDetail(url) {
+  try {
+    const r = await fetch(aq('/api/nodes/'+encodeURIComponent('ep:GET:'+url)));
+    const d = await r.json();
+    if (!d.ok) return;
+    const n = d.data;
+    let html = '<div style="max-height:500px;overflow-y:auto">';
+    html += '<h3>'+n.labels.join(', ')+'</h3>';
+    html += '<div style="font-size:12px;color:var(--muted);margin-bottom:8px">'+url+'</div>';
+    html += '<table style="font-size:12px">';
+    for (const [k,v] of Object.entries(n.properties)) {
+      if (k.startsWith('_')) continue;
+      let val = String(v||''); if (val.length > 100) val = val.substring(0,100)+'...';
+      html += '<tr><td style="color:var(--muted);padding-right:12px">'+esc(k)+'</td><td>'+esc(val)+'</td></tr>';
+    }
+    html += '</table>';
+    if (n.vulnerabilities.length) {
+      html += '<div style="margin-top:12px;font-weight:bold">Vulnerabilities:</div>';
+      n.vulnerabilities.forEach(v => html += '<div style="font-size:12px">['+esc(v.severity)+'] '+esc(v.title)+'</div>');
+    }
+    if (n.secrets.length) {
+      html += '<div style="margin-top:12px;font-weight:bold">Secrets:</div>';
+      n.secrets.forEach(s => {
+        let ev = s.evidence||'';
+        html += '<div style="font-size:12px">['+esc(s.type)+'] '+esc(s.preview);
+        if (ev) html += ' <a href="javascript:void(0)" onclick="window.open(\'/artifacts/\'+encodeURIComponent(\''+esc(ev.replace(/\\\\/g,\'/\'))+'\'))" style="color:var(--accent);font-size:10px">[evidence]</a>';
+        html += '</div>';
+      });
+    }
+    html += '</div>';
+    document.getElementById('detail-modal-body').innerHTML = html;
+    document.getElementById('detail-modal-overlay').style.display = 'flex';
+  } catch(e) {}
 }
 
 // ============================================================

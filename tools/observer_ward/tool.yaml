@@ -1,7 +1,7 @@
 desc: "Web 指纹识别（observer_ward，FingerprintHub + EHole 合并库）"
-command: "{bin} -t {url} -p res/knowledge/web_fingerprint_ehole.json --format json --silent"
+command: "{bin} -l {urls_file} -p res/knowledge/web_fingerprint_ehole.json --format json --silent"
 use_on:
   Endpoint:
-    desc: "对 Endpoint 做 Web 指纹识别，补全技术栈/产品/厂商"
+    desc: "对 Endpoint 做 Web 指纹识别，批量一次跑完"
     params:
-      url: "{url}"
+      urls_file: "{urls_file}"

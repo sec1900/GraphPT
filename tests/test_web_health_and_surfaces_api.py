@@ -511,7 +511,7 @@ def test_asset_union_branches_keep_asset_scope(monkeypatch):
     assert result["ok"] is True
     list_query, list_params = calls[0]
     count_query, count_params = calls[1]
-    assert "UNION\n              WITH a\n              MATCH (a)-[:HAS_IP]->(ip:IP)" in list_query
-    assert "UNION WITH a MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip" in count_query
+    assert "UNION\n              MATCH (a)-[:HAS_IP]->(ip:IP)" in list_query
+    assert "UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip" in count_query
     assert list_params["aid"] == "asset-a"
     assert count_params["aid"] == "asset-a"

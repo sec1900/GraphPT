@@ -114,6 +114,19 @@ class GraphWriter:
     def __init__(self, driver: GraphDatabase.driver) -> None:
         self._driver = driver
 
+    def _acquire_session(self, _session: Any = None) -> Any:
+        """复用外部 session 或创建新的。
+
+        write_batch 开一个 session → 传给每个 write_* → 一次事务写所有 finding。
+        不传 _session 时行为不变（每个 write_* 自己开 session）。
+        """
+        if _session is not None:
+            class _NoClose:
+                def __enter__(self): return _session
+                def __exit__(self, *a, **kw): pass
+            return _NoClose()
+        return self._driver.session()
+
     # ---- 单节点写入 ----
 
     def write_icp_record(
@@ -122,8 +135,7 @@ class GraphWriter:
         asset_id: str,
         *,
         company_name: str = "",
-        source: str = "",
-    ) -> dict[str, Any]:
+        source: str = "", _session: Any | None = None) -> dict[str, Any]:
         """写入 ICP 备案号节点。
 
         ICP 号关联到 Asset（公司），后续可建 COVERS 关系到 RootDomain。
@@ -132,7 +144,7 @@ class GraphWriter:
         icp_id = f"icp:{number}"
         now = _now_iso()
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             result = session.run(
                 """
                 MERGE (icp:ICPRecord {id: $icp_id})
@@ -156,11 +168,11 @@ class GraphWriter:
                 "created": bool(record["created"]) if record else True,
             }
 
-    def link_icp_to_domain(self, icp_number: str, domain: str) -> None:
+    def link_icp_to_domain(self, icp_number: str, domain: str, _session: Any | None = None) -> None:
         """建立 ICPRecord → RootDomain 的 COVERS 关系。"""
         icp_id = f"icp:{icp_number}"
         root_id = f"root:{domain}"
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             session.run(
                 """
                 MATCH (icp:ICPRecord {id: $icp_id})
@@ -178,8 +190,7 @@ class GraphWriter:
         source: str = "",
         icp: str = "",
         website: str = "",
-        website_name: str = "",
-    ) -> dict[str, Any]:
+        website_name: str = "", _session: Any | None = None) -> dict[str, Any]:
         """写入根域名节点（来自 enscan 公司→域名发现）。
 
         ICP备案号和 website 信息存入 RootDomain 属性，
@@ -188,7 +199,7 @@ class GraphWriter:
         root_id = f"root:{value}"
         now = _now_iso()
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             result = session.run(
                 """
                 MERGE (a:Asset {id: $asset_id})
@@ -224,8 +235,7 @@ class GraphWriter:
         asset_id: str,
         *,
         root_domain: str | None = None,
-        source: str = "",
-    ) -> dict[str, Any]:
+        source: str = "", _session: Any | None = None) -> dict[str, Any]:
         """幂等写入 Subdomain 节点并建立关系链。
 
         关系: Asset -[:HAS_ROOT]-> RootDomain -[:HAS_SUB]-> Subdomain
@@ -236,7 +246,7 @@ class GraphWriter:
         root_id = f"root:{root_domain}" if root_domain else f"root:{value}"
         now = _now_iso()
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             result = session.run(
                 """
                 MERGE (a:Asset {id: $asset_id})
@@ -277,8 +287,7 @@ class GraphWriter:
         subdomain_id: str = "",
         *,
         asset_id: str = "",
-        source: str = "",
-    ) -> dict[str, Any]:
+        source: str = "", _session: Any | None = None) -> dict[str, Any]:
         """写入 IP 节点并建立关系。
 
         两条路径（可同时存在）：
@@ -290,7 +299,7 @@ class GraphWriter:
         ip_id = f"ip:{ip}"
         now = _now_iso()
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             # DNS 变更检测（仅子域名路径）
             if subdomain_id:
                 old_ip = session.run(
@@ -381,14 +390,13 @@ class GraphWriter:
         protocol: str = "tcp",
         *,
         service_name: str = "",
-        source: str = "",
-    ) -> dict[str, Any]:
+        source: str = "", _session: Any | None = None) -> dict[str, Any]:
         """写入 Port 节点，可附带 Service 节点。"""
         port_id = f"port:{ip_id}:{port}/{protocol}"
         service_id = f"svc:{ip_id}:{port}/{protocol}"
         now = _now_iso()
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             old = session.run(
                 """
                 MATCH (i:IP {id: $ip_id})-[:HAS_PORT]->(p:Port {id: $port_id})
@@ -453,8 +461,7 @@ class GraphWriter:
         products: list[str] | None = None,
         vendors: list[str] | None = None,
         fingerprint_severity: str = "",
-        favicon_hash: str = "",
-    ) -> dict[str, Any]:
+        favicon_hash: str = "", _session: Any | None = None) -> dict[str, Any]:
         """幂等写入 HTTPEndpoint 节点。
 
         url 用 normalize_url() 去 fragment 后作为身份标识。
@@ -471,7 +478,7 @@ class GraphWriter:
         headers = response_headers or {}
         tech_list = tech or []
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             # 变化感知：对比已有 fingerprint
             old = session.run(
                 """
@@ -573,8 +580,7 @@ class GraphWriter:
         severity: str = "info",
         detail: str = "",
         evidence: str = "",
-        source: str = "",
-    ) -> dict[str, Any]:
+        source: str = "", _session: Any | None = None) -> dict[str, Any]:
         """写入 Vulnerability 节点，关联到 HTTPEndpoint。"""
         import hashlib
 
@@ -582,7 +588,7 @@ class GraphWriter:
         vuln_id = f"vuln:{hashlib.md5(identity.encode()).hexdigest()[:16]}"
         now = _now_iso()
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             session.run(
                 """
                 MERGE (v:Vulnerability {id: $vuln_id})
@@ -619,8 +625,7 @@ class GraphWriter:
         wordlist: str = "",
         findings_count: int = 0,
         started_at: str = "",
-        finished_at: str = "",
-    ) -> dict[str, Any]:
+        finished_at: str = "", _session: Any | None = None) -> dict[str, Any]:
         """记录一次扫描运行。幂等：同一 endpoint + tool + config 组合只保留最新一次。
 
         config 是工具参数的快照（如 '-w common.txt -t 50'），用于去重判断。
@@ -631,7 +636,7 @@ class GraphWriter:
         run_id = f"scan:{endpoint_id}:{tool}:{config_slug}"
         now = _now_iso()
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             session.run(
                 """
                 MERGE (sr:ScanRun {id: $run_id})
@@ -665,13 +670,12 @@ class GraphWriter:
         status_code: int = 0,
         content_type: str = "",
         size: int = 0,
-        source: str = "",
-    ) -> dict[str, Any]:
+        source: str = "", _session: Any | None = None) -> dict[str, Any]:
         """写入 DirEntry 节点，关联到 HTTPEndpoint。用于目录爆破结果。"""
         dir_id = f"dir:{endpoint_id}:{method}:{path}"
         now = _now_iso()
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             session.run(
                 """
                 MERGE (d:DirEntry {id: $dir_id})
@@ -702,8 +706,7 @@ class GraphWriter:
         final_status: int = 0,
         success: bool = False,
         asset_id: str = "",
-        source: str = "",
-    ) -> dict[str, Any]:
+        source: str = "", _session: Any | None = None) -> dict[str, Any]:
         """写入 403 绕过尝试结果，关联到 DirEntry 或 HTTPEndpoint。
 
         原始数据包（请求 + 响应）落盘到 artifacts/bypass/<asset>/<id>.http，
@@ -746,7 +749,7 @@ class GraphWriter:
                 packet_path = ""
                 packet_url = ""
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             session.run(
                 """
                 MERGE (b:BypassResult {id: $bypass_id})
@@ -782,8 +785,7 @@ class GraphWriter:
         size: int = 0,
         content_hash: str = "",
         local_path: str = "",
-        source: str = "",
-    ) -> dict[str, Any]:
+        source: str = "", _session: Any | None = None) -> dict[str, Any]:
         """写入 File 节点（下载的 JS/CSS/等），关联到 HTTPEndpoint。
 
         local_path: 下载到本地的文件路径，用于后续静态分析。
@@ -792,7 +794,7 @@ class GraphWriter:
         file_id = f"file:{hashlib.md5(url.encode()).hexdigest()[:16]}"
         now = _now_iso()
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             session.run(
                 """
                 MERGE (f:File {id: $file_id})
@@ -827,8 +829,7 @@ class GraphWriter:
         param_source: str = "",
         api_signals: list[str] | None = None,
         from_js: str = "",
-        source: str = "",
-    ) -> dict[str, Any]:
+        source: str = "", _session: Any | None = None) -> dict[str, Any]:
         """幂等写入 ApiEndpoint 节点（katana 爬取发现的接口）。
 
         设计原则：全量记录爬到的接口，不做激进过滤；命中的判定信号存入
@@ -866,7 +867,7 @@ class GraphWriter:
         param_list = sorted(set(params or []))
         signal_list = sorted(set(api_signals or []))
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             session.run(
                 """
                 MERGE (a:ApiEndpoint {id: $api_id})
@@ -922,11 +923,13 @@ class GraphWriter:
         source_url: str = "",
         file_id: str = "",
         line: int = 0,
-    ) -> dict[str, Any]:
+        evidence_path: str = "",
+        _session: Any | None = None) -> dict[str, Any]:
         """写入 Secret 节点，挂到来源 File/HTTPEndpoint。value_preview 只存脱敏预览。
 
         去重铁律：secret_id 由 来源 + 类型 + 预览 + 行号 确定性派生，
         重扫同一泄露不会堆出重复节点（幂等 MERGE）。
+        证据文件路径存在 evidence_path 字段，原始响应体不在图中。
 
         父节点匹配（二选一，优先 source_url）：
           - source_url：按 url 匹配 File 或 HTTPEndpoint（secretfinder 全量扫用）
@@ -955,156 +958,171 @@ class GraphWriter:
                 MERGE (f)-[:MAY_CONTAIN]->(s)
             """
 
-        with self._driver.session() as session:
+        with self._acquire_session(_session) as session:
             session.run(
                 """
                 MERGE (s:Secret {id: $secret_id})
                   ON CREATE SET
                     s.type = $secret_type, s.value_preview = $value_preview,
-                    s.line = $line, s.created_at = $now
-                  ON MATCH SET s.last_seen_at = $now
+                    s.line = $line, s.evidence_path = $evidence_path, s.created_at = $now
+                  ON MATCH SET s.last_seen_at = $now,
+                    s.evidence_path = CASE WHEN $evidence_path <> '' THEN $evidence_path ELSE s.evidence_path END
                 """ + attach,
                 secret_id=secret_id, source_url=source_url, file_id=file_id,
                 secret_type=secret_type, value_preview=value_preview,
-                line=line, now=now,
+                line=line, evidence_path=evidence_path, now=now,
             )
             return {"id": secret_id}
 
     # ---- 批量写入 ----
 
-    def write_batch(self, findings: list[dict[str, Any]], *, asset_id: str = "") -> list[dict[str, Any]]:
-        """批量写入 Finding 对象。返回写入结果列表，包含 id / created 等字段。"""
+    def write_batch(self, findings: list[dict[str, Any]], *, asset_id: str = "", _session: Any | None = None) -> list[dict[str, Any]]:
+        """批量写入 Finding 对象。所有 finding 共享一个 session，避免 N 次往返开销。"""
         results: list[dict[str, Any]] = []
-        for f in findings:
-            ftype = f.get("type", "")
-            result: dict[str, Any] = {}
-            if ftype == "subdomain":
-                result = self.write_subdomain(
-                    value=f["value"],
-                    asset_id=asset_id or f.get("asset_id", ""),
-                    root_domain=f.get("root_domain"),
-                    source=f.get("source", ""),
-                )
-            elif ftype == "ip":
-                result = self.write_ip(
-                    ip=f["value"],
-                    subdomain_id=f.get("parent_id", ""),
-                    asset_id=asset_id or f.get("asset_id", ""),
-                    source=f.get("source", ""),
-                )
-            elif ftype == "port":
-                result = self.write_port(
-                    ip_id=f.get("parent_id", ""),
-                    port=f["port"],
-                    protocol=f.get("protocol", "tcp"),
-                    service_name=f.get("service", ""),
-                    source=f.get("source", ""),
-                )
-            elif ftype == "http_endpoint":
-                result = self.write_http_endpoint(
-                    url=f["url"],
-                    method=f.get("method", "GET"),
-                    parent_id=f.get("parent_id", ""),
-                    status_code=f.get("status_code", 0),
-                    title=f.get("title", ""),
-                    body_hash=f.get("body_hash", ""),
-                    content_length=f.get("content_length", 0),
-                    response_headers=f.get("response_headers"),
-                    ssl_cert_cn=f.get("ssl_cert_cn", ""),
-                    ssl_cert_issuer=f.get("ssl_cert_issuer", ""),
-                    tech=f.get("tech", []),
-                    crawl_status=f.get("crawl_status", "success"),
-                    asset_id=asset_id or f.get("asset_id", ""),
-                    source=f.get("source", ""),
-                    url_fragment=f.get("url_fragment", ""),
-                    products=f.get("products", []),
-                    vendors=f.get("vendors", []),
-                    fingerprint_severity=f.get("fingerprint_severity", ""),
-                    favicon_hash=f.get("favicon_hash", ""),
-                )
-            elif ftype == "vulnerability":
-                result = self.write_vulnerability(
-                    endpoint_id=f.get("endpoint_id", ""),
-                    vuln_type=f.get("vuln_type", ""),
-                    title=f.get("title", ""),
-                    severity=f.get("severity", "info"),
-                    detail=f.get("detail", ""),
-                    evidence=f.get("evidence", ""),
-                    source=f.get("source", ""),
-                )
-            elif ftype == "domain":
-                result = self.write_domain(
-                    value=f["value"],
-                    asset_id=asset_id or f.get("asset_id", ""),
-                    source=f.get("source", ""),
-                    icp=f.get("icp", ""),
-                    website=f.get("website", ""),
-                    website_name=f.get("website_name", ""),
-                )
-            elif ftype == "icp_record":
-                result = self.write_icp_record(
-                    number=f["number"],
-                    asset_id=asset_id or f.get("asset_id", ""),
-                    company_name=f.get("company_name", ""),
-                    source=f.get("source", ""),
-                )
-                # Link ICP to all its domains
-                for domain in (f.get("domains") or []):
-                    self.link_icp_to_domain(f["number"], domain)
-            elif ftype == "dir_entry":
-                result = self.write_dir_entry(
-                    endpoint_id=f.get("parent_id", ""),
-                    path=f.get("path", ""),
-                    method=f.get("method", "GET"),
-                    status_code=f.get("status_code", 0),
-                    content_type=f.get("content_type", ""),
-                    size=f.get("size", 0),
-                    source=f.get("source", ""),
-                )
-            elif ftype == "file":
-                result = self.write_file(
-                    endpoint_id=f.get("parent_id", ""),
-                    url=f.get("url", ""),
-                    content_type=f.get("content_type", ""),
-                    size=f.get("size", 0),
-                    content_hash=f.get("content_hash", ""),
-                    source=f.get("source", ""),
-                )
-            elif ftype == "bypass_result":
-                result = self.write_bypass_result(
-                    target_id=f.get("target_id", "") or f.get("parent_id", ""),
-                    technique=f.get("technique", ""),
-                    raw_request=f.get("raw_request", ""),
-                    raw_response=f.get("raw_response", ""),
-                    final_status=f.get("final_status", 0),
-                    success=f.get("success", False),
-                    asset_id=asset_id or f.get("asset_id", ""),
-                    source=f.get("source", ""),
-                )
-            elif ftype == "api_endpoint":
-                result = self.write_api_endpoint(
-                    url=f.get("url", ""),
-                    method=f.get("method", "GET"),
-                    parent_id=f.get("parent_id", ""),
-                    file_id=f.get("file_id", ""),
-                    status_code=f.get("status_code", 0),
-                    content_type=f.get("content_type", ""),
-                    params=f.get("params", []),
-                    param_source=f.get("param_source", ""),
-                    api_signals=f.get("api_signals", []),
-                    from_js=f.get("from_js", ""),
-                    source=f.get("source", ""),
-                )
-            elif ftype == "secret":
-                result = self.write_secret(
-                    f.get("secret_type", ""),
-                    f.get("value_preview", ""),
-                    source_url=f.get("source_url", ""),
-                    file_id=f.get("file_id", ""),
-                    line=f.get("line", 0),
-                )
-            if result:
-                results.append(result)
+        with self._acquire_session(_session) as batch_session:
+            for f in findings:
+                ftype = f.get("type", "")
+                result: dict[str, Any] = {}
+                if ftype == "subdomain":
+                    result = self.write_subdomain(
+                        value=f["value"],
+                        asset_id=asset_id or f.get("asset_id", ""),
+                        root_domain=f.get("root_domain"),
+                        source=f.get("source", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "ip":
+                    result = self.write_ip(
+                        ip=f["value"],
+                        subdomain_id=f.get("parent_id", ""),
+                        asset_id=asset_id or f.get("asset_id", ""),
+                        source=f.get("source", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "port":
+                    result = self.write_port(
+                        ip_id=f.get("parent_id", ""),
+                        port=f["port"],
+                        protocol=f.get("protocol", "tcp"),
+                        service_name=f.get("service", ""),
+                        source=f.get("source", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "http_endpoint":
+                    result = self.write_http_endpoint(
+                        url=f["url"],
+                        method=f.get("method", "GET"),
+                        parent_id=f.get("parent_id", ""),
+                        status_code=f.get("status_code", 0),
+                        title=f.get("title", ""),
+                        body_hash=f.get("body_hash", ""),
+                        content_length=f.get("content_length", 0),
+                        response_headers=f.get("response_headers"),
+                        ssl_cert_cn=f.get("ssl_cert_cn", ""),
+                        ssl_cert_issuer=f.get("ssl_cert_issuer", ""),
+                        tech=f.get("tech", []),
+                        crawl_status=f.get("crawl_status", "success"),
+                        asset_id=asset_id or f.get("asset_id", ""),
+                        source=f.get("source", ""),
+                        url_fragment=f.get("url_fragment", ""),
+                        products=f.get("products", []),
+                        vendors=f.get("vendors", []),
+                        fingerprint_severity=f.get("fingerprint_severity", ""),
+                        favicon_hash=f.get("favicon_hash", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "vulnerability":
+                    result = self.write_vulnerability(
+                        endpoint_id=f.get("endpoint_id", ""),
+                        vuln_type=f.get("vuln_type", ""),
+                        title=f.get("title", ""),
+                        severity=f.get("severity", "info"),
+                        detail=f.get("detail", ""),
+                        evidence=f.get("evidence", ""),
+                        source=f.get("source", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "domain":
+                    result = self.write_domain(
+                        value=f["value"],
+                        asset_id=asset_id or f.get("asset_id", ""),
+                        source=f.get("source", ""),
+                        icp=f.get("icp", ""),
+                        website=f.get("website", ""),
+                        website_name=f.get("website_name", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "icp_record":
+                    result = self.write_icp_record(
+                        number=f["number"],
+                        asset_id=asset_id or f.get("asset_id", ""),
+                        company_name=f.get("company_name", ""),
+                        source=f.get("source", ""),
+                        _session=batch_session,
+                    )
+                    # Link ICP to all its domains
+                    for domain in (f.get("domains") or []):
+                        self.link_icp_to_domain(f["number"], domain, _session=batch_session)
+                elif ftype == "dir_entry":
+                    result = self.write_dir_entry(
+                        endpoint_id=f.get("parent_id", ""),
+                        path=f.get("path", ""),
+                        method=f.get("method", "GET"),
+                        status_code=f.get("status_code", 0),
+                        content_type=f.get("content_type", ""),
+                        size=f.get("size", 0),
+                        source=f.get("source", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "file":
+                    result = self.write_file(
+                        endpoint_id=f.get("parent_id", ""),
+                        url=f.get("url", ""),
+                        content_type=f.get("content_type", ""),
+                        size=f.get("size", 0),
+                        content_hash=f.get("content_hash", ""),
+                        source=f.get("source", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "bypass_result":
+                    result = self.write_bypass_result(
+                        target_id=f.get("target_id", "") or f.get("parent_id", ""),
+                        technique=f.get("technique", ""),
+                        raw_request=f.get("raw_request", ""),
+                        raw_response=f.get("raw_response", ""),
+                        final_status=f.get("final_status", 0),
+                        success=f.get("success", False),
+                        asset_id=asset_id or f.get("asset_id", ""),
+                        source=f.get("source", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "api_endpoint":
+                    result = self.write_api_endpoint(
+                        url=f.get("url", ""),
+                        method=f.get("method", "GET"),
+                        parent_id=f.get("parent_id", ""),
+                        file_id=f.get("file_id", ""),
+                        status_code=f.get("status_code", 0),
+                        content_type=f.get("content_type", ""),
+                        params=f.get("params", []),
+                        param_source=f.get("param_source", ""),
+                        api_signals=f.get("api_signals", []),
+                        from_js=f.get("from_js", ""),
+                        source=f.get("source", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "secret":
+                    result = self.write_secret(
+                        f.get("secret_type", ""),
+                        f.get("value_preview", ""),
+                        source_url=f.get("source_url", ""),
+                        file_id=f.get("file_id", ""),
+                        line=f.get("line", 0),
+                        evidence_path=f.get("evidence_path", ""),
+                        _session=batch_session,
+                    )
+                if result:
+                    results.append(result)
         return results
 
     # ---- 变化感知 ----
@@ -1261,75 +1279,6 @@ def list_ips_without_ports(asset_id: str) -> list[dict[str, str]]:
             asset_id=asset_id,
         )
         return [{"id": record["id"], "value": record["value"]} for record in result]
-
-
-def list_forbidden_targets(asset_id: str) -> list[dict[str, Any]]:
-    """返回 403 待绕过目标（DirEntry + HTTPEndpoint），尚无成功绕过记录的。
-
-    供后续 403 绕过工具消费。返回每个目标的:
-      id      节点 id（write_bypass_result 的 target_id）
-      url     可直接请求的完整 URL
-      kind    "dir_entry" | "http_endpoint"
-      method  原始请求方法
-
-    已有 success=True 的 BypassResult 的目标被排除（已绕过，无需重试）。
-    """
-    driver = _get_driver()
-    with driver.session() as session:
-        result = session.run(
-            """
-            // 路径1：爆破出的 403 目录/文件
-            MATCH (a:Asset {id: $asset_id})
-            CALL {
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
-                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)
-                    -[:EXPOSES]->(ep:HTTPEndpoint)-[:EXPOSES_PATH]->(d:DirEntry)
-              RETURN ep, d
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)
-                    -[:EXPOSES]->(ep:HTTPEndpoint)-[:EXPOSES_PATH]->(d:DirEntry)
-              RETURN ep, d
-            }
-            WITH DISTINCT ep, d
-            WHERE d.status_code = 403
-              AND NOT EXISTS {
-                MATCH (d)-[:BYPASS_ATTEMPT]->(b:BypassResult) WHERE b.success = true
-              }
-            RETURN d.id AS id,
-                   CASE WHEN ep.url ENDS WITH '/'
-                        THEN substring(ep.url, 0, size(ep.url) - 1) + d.path
-                        ELSE ep.url + d.path END AS url,
-                   'dir_entry' AS kind,
-                   coalesce(d.method, 'GET') AS method
-            UNION
-            // 路径2：本身就是 403 的 HTTPEndpoint
-            MATCH (a:Asset {id: $asset_id})
-            CALL {
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
-                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-            }
-            WITH DISTINCT ep
-            WHERE ep.status_code = 403
-              AND NOT EXISTS {
-                MATCH (ep)-[:BYPASS_ATTEMPT]->(b:BypassResult) WHERE b.success = true
-              }
-            RETURN ep.id AS id, ep.url AS url,
-                   'http_endpoint' AS kind, 'GET' AS method
-            """,
-            asset_id=asset_id,
-        )
-        return [
-            {"id": r["id"], "url": r["url"], "kind": r["kind"], "method": r["method"]}
-            for r in result
-        ]
 
 
 def list_unverified_nodes(asset_id: str) -> dict[str, list[dict[str, Any]]]:

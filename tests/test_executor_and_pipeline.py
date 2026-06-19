@@ -133,10 +133,13 @@ def test_mark_scanned_links_scanrun_to_target_nodes(monkeypatch):
     executor = PipelineExecutor({"stages": []}, asset_id="asset-1")
     executor._mark_scanned("ffuf", "https://api.example.com/admin", 2)
 
-    assert calls[0][1]["target"] == "https://api.example.com/admin"
+    # _mark_scanned 委托给 _mark_scanned_batch，使用 UNWIND $rows 批量写入
+    assert len(calls) == 1
+    rows = calls[0][1]["rows"]
+    assert len(rows) == 1
+    assert rows[0]["label"] == "https://api.example.com/admin"
+    assert calls[0][1]["tool"] == "ffuf"
     assert calls[0][1]["fc"] == 2
-    assert calls[1][1]["node_ids"] == ["ep:GET:https://api.example.com/admin"]
-    assert "MERGE (sr)-[:RAN]->(n)" in calls[1][0]
 
 
 def test_pipeline_rejects_unresolved_placeholders(monkeypatch):
@@ -160,7 +163,7 @@ def test_pipeline_rejects_unresolved_placeholders(monkeypatch):
 
 
 def test_batch_pipeline_marks_original_targets(monkeypatch):
-    marked: list[tuple[str, int]] = []
+    marked: list[tuple[list[str], int]] = []
 
     monkeypatch.setattr("graphpt.collector.pipeline._find_tool", lambda tool: sys.executable)
     monkeypatch.setattr(
@@ -168,8 +171,8 @@ def test_batch_pipeline_marks_original_targets(monkeypatch):
         lambda self, tool: [{"{targets_file}": "a.example.com"}, {"{targets_file}": "b.example.com"}],
     )
     monkeypatch.setattr(
-        "graphpt.collector.pipeline.PipelineExecutor._mark_scanned",
-        lambda self, tool, target_label, findings_count=0: marked.append((target_label, findings_count)),
+        "graphpt.collector.pipeline.PipelineExecutor._mark_scanned_batch",
+        lambda self, tool, labels, findings_count=0: marked.append((list(labels), findings_count)),
     )
     monkeypatch.setitem(pipeline.ADAPTER_MAP, "dummy_batch", None)
 
@@ -181,11 +184,13 @@ def test_batch_pipeline_marks_original_targets(monkeypatch):
     )
 
     assert result["status"] == "ok"
-    assert marked == [("a.example.com", 0), ("b.example.com", 0)]
+    assert len(marked) == 1
+    assert marked[0][0] == ["a.example.com", "b.example.com"]
+    assert marked[0][1] == 0
 
 
 def test_failed_batch_pipeline_does_not_mark_targets(monkeypatch):
-    marked: list[tuple[str, int]] = []
+    marked: list[tuple[list[str], int]] = []
 
     monkeypatch.setattr("graphpt.collector.pipeline._find_tool", lambda tool: sys.executable)
     monkeypatch.setattr(
@@ -193,8 +198,8 @@ def test_failed_batch_pipeline_does_not_mark_targets(monkeypatch):
         lambda self, tool: [{"{targets_file}": "a.example.com"}, {"{targets_file}": "b.example.com"}],
     )
     monkeypatch.setattr(
-        "graphpt.collector.pipeline.PipelineExecutor._mark_scanned",
-        lambda self, tool, target_label, findings_count=0: marked.append((target_label, findings_count)),
+        "graphpt.collector.pipeline.PipelineExecutor._mark_scanned_batch",
+        lambda self, tool, labels, findings_count=0: marked.append((list(labels), findings_count)),
     )
     monkeypatch.setitem(pipeline.ADAPTER_MAP, "dummy_batch", None)
 
@@ -212,7 +217,7 @@ def test_failed_batch_pipeline_does_not_mark_targets(monkeypatch):
 
 def test_batch_pipeline_preserves_per_target_metadata(monkeypatch):
     parsed_root_domains: list[str] = []
-    marked: list[str] = []
+    marked: list[list[str]] = []
 
     class DummyAdapter:
         def parse(self, raw_output, **ctx):
@@ -236,8 +241,8 @@ def test_batch_pipeline_preserves_per_target_metadata(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        "graphpt.collector.pipeline.PipelineExecutor._mark_scanned",
-        lambda self, tool, target_label, findings_count=0: marked.append(target_label),
+        "graphpt.collector.pipeline.PipelineExecutor._mark_scanned_batch",
+        lambda self, tool, labels, findings_count=0: marked.append(list(labels)),
     )
     monkeypatch.setattr(
         "graphpt.collector.pipeline.get_graph_writer",
@@ -254,7 +259,7 @@ def test_batch_pipeline_preserves_per_target_metadata(monkeypatch):
 
     assert result["status"] == "ok"
     assert parsed_root_domains == ["example.com", "example.org"]
-    assert marked == ["example.com", "example.org"]
+    assert marked == [["example.com"], ["example.org"]]
 
 
 def test_pipeline_preview_resolves_commands_without_execution(monkeypatch):
@@ -328,7 +333,7 @@ def test_local_pipeline_smoke_naabu_nmap_httpx_nuclei(monkeypatch):
             written.extend(findings)
             return [{"id": f"{finding.get('type')}:{idx}"} for idx, finding in enumerate(findings)]
 
-    def fake_run(cmd, **kwargs):
+    def fake_popen(cmd, **kwargs):
         text = " ".join(cmd)
         if "naabu" in text:
             stdout = '{"ip":"127.0.0.1","port":18767,"protocol":"tcp"}\n'
@@ -351,15 +356,27 @@ def test_local_pipeline_smoke_naabu_nmap_httpx_nuclei(monkeypatch):
             )
         else:
             stdout = ""
-        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        # 写入 log 文件（Popen 的 stdout 指向 log 文件）
+        log_file = kwargs.get("stdout")
+        if log_file:
+            log_file.write(stdout)
+            log_file.flush()
+            log_file.seek(0)
+        return SimpleNamespace(returncode=0, poll=lambda: 0, wait=lambda: None)
 
     monkeypatch.setattr("graphpt.collector.pipeline._find_tool", lambda tool: f"{tool}.exe")
     monkeypatch.setattr("graphpt.collector.pipeline._tool_config", lambda tool: {"command": "{bin}"})
-    monkeypatch.setattr("graphpt.collector.pipeline.subprocess.run", fake_run)
+    monkeypatch.setattr("graphpt.collector.pipeline.subprocess.Popen", fake_popen)
     monkeypatch.setattr("graphpt.collector.pipeline.get_graph_writer", lambda: FakeWriter())
     monkeypatch.setattr(
         "graphpt.collector.pipeline.PipelineExecutor._mark_scanned",
         lambda self, tool, target_label, findings_count=0: marked.append((tool, target_label)),
+    )
+    monkeypatch.setattr(
+        "graphpt.collector.pipeline.PipelineExecutor._mark_scanned_batch",
+        lambda self, tool, labels, findings_count=0: [
+            marked.append((tool, label)) for label in labels
+        ],
     )
 
     executor = PipelineExecutor(
@@ -406,9 +423,10 @@ def test_validate_pipeline_tools_reports_missing_config_and_binary(monkeypatch):
 
 
 def test_pipeline_target_selectors_do_not_register_missing_dirbuster():
-    assert "dirbuster" not in pipeline._BATCH_TARGETS
-    assert "ffuf" in pipeline._BATCH_TARGETS
-    assert "gobuster" in pipeline._BATCH_TARGETS
+    selectors = pipeline._load_target_selectors()
+    assert "dirbuster" not in selectors
+    assert "ffuf" in selectors
+    assert "gobuster" in selectors
 
 
 def test_company_recon_preview_resolves_default_commands():

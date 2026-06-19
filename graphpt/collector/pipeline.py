@@ -150,11 +150,16 @@ def _unresolved_placeholders(command: str) -> list[str]:
     return sorted(set(re.findall(r"\{[A-Za-z_]\w*\}", command or "")))
 
 
+def _base_tool(name: str) -> str:
+    """'httpx:subdomain' → 'httpx'。无别名原样返回。"""
+    return name.split(":", 1)[0]
+
+
 def _find_tool(tool: str) -> str | None:
     """懒加载 tasks._find_tool，避免 Celery app 注册时循环导入。"""
     from graphpt.collector.tasks import _find_tool as _tasks_find_tool
 
-    return _tasks_find_tool(tool)
+    return _tasks_find_tool(_base_tool(tool))
 
 
 def _split_command(command: str) -> list[str]:
@@ -165,6 +170,18 @@ def _split_command(command: str) -> list[str]:
 
 
 _BATCH_PLACEHOLDERS = ("{targets_file}", "{domains_file}", "{urls_file}", "{ips_file}")
+
+
+def _set_active_marker(tool: str, asset_id: str) -> None:
+    """标记工具正在运行（Redis, 5min TTL 自动过期, 供 Logs 面板自动发现）。"""
+    try:
+        import redis as _rds
+        _r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1,
+                         decode_responses=True)
+        _r.ping()
+        _r.setex(f"tool:active:{tool}", 300, asset_id)
+    except Exception:
+        pass
 
 
 def _batch_placeholder_in(command: str) -> str | None:
@@ -204,12 +221,27 @@ def _load_tools_config() -> dict[str, Any]:
 
 
 def _tool_config(tool: str) -> dict[str, Any]:
-    cfg = _load_tools_config().get(tool, {})
+    cfg = _load_tools_config().get(_base_tool(tool), {})
     return cfg if isinstance(cfg, dict) else {}
 
 
+# 别名后缀 → tool.yaml 的 use_on 节点类型
+# "gobuster:dns" → 后缀 "dns" → node_type "RootDomain" → 取 use_on.RootDomain.command
+_ALIAS_NODE_TYPE: dict[str, str] = {
+    "dns": "RootDomain",
+    "vhost": "IP",
+    "subdomain": "Subdomain",
+    "port": "Port",
+}
+
+
 def _tool_command(tool: str, node_type: str = "") -> str:
-    cfg = _tool_config(tool)
+    base = _base_tool(tool)
+    cfg = _tool_config(base)
+    # 别名自动推导 node_type: "gobuster:dns" → "RootDomain"
+    if not node_type and ":" in tool:
+        suffix = tool.split(":", 1)[1]
+        node_type = _ALIAS_NODE_TYPE.get(suffix, "")
     if node_type:
         use_on = cfg.get("use_on", {})
         rule = use_on.get(node_type, {}) if isinstance(use_on, dict) else {}
@@ -266,251 +298,66 @@ def validate_pipeline_tools(stages: list[dict[str, Any]]) -> list[dict[str, Any]
     return errors
 
 
-_BATCH_TARGETS: dict[str, dict[str, Any]] = {
-    "enscan": {
-        "query": "RETURN coalesce($company, '') AS company",
-        "mapping": {"company": "{targets_file}"},
-    },
-    "crt": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
-            WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = rd.value }
-            RETURN rd.value AS domain
-        """,
-        "mapping": {"domain": "{targets_file}"},
-    },
-    "subfinder": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
-            WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = rd.value }
-            RETURN rd.value AS domain
-        """,
-        "mapping": {"domain": "{targets_file}"},
-    },
-    "urlfinder": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
-            WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = rd.value }
-            RETURN rd.value AS domain
-        """,
-        "mapping": {"domain": "{targets_file}"},
-    },
-    "dnsx": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
-            WHERE NOT (s)-[:RESOLVES_TO]->(:IP)
-              AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.value }
-            RETURN s.value AS domain
-        """,
-        "mapping": {"domain": "{targets_file}"},
-    },
-    "naabu": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})
-            CALL {
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)
-              RETURN ip
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_IP]->(ip:IP)
-              RETURN ip
-            }
-            WITH DISTINCT ip
-            WHERE NOT (ip.value STARTS WITH '10.')
-              AND NOT (ip.value STARTS WITH '192.168.')
-              AND NOT (ip.value STARTS WITH '127.')
-              AND NOT (ip.value = '0.0.0.0')
-              AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ip.value }
-            RETURN ip.value AS ip
-        """,
-        "mapping": {"ip": "{targets_file}"},
-    },
-    "nmap": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})
-            CALL {
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)
-              RETURN ip
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_IP]->(ip:IP)
-              RETURN ip
-            }
-            WITH DISTINCT ip
-            MATCH (ip)-[:HAS_PORT]->(p:Port)
-            WITH DISTINCT ip, p.number AS port
-            ORDER BY port
-            WITH ip, collect(port) AS ports
-            WITH ip, ports,
-                 ip.value + '|' + reduce(s = '', port IN ports |
-                   s + CASE WHEN s = '' THEN '' ELSE ',' END + toString(port)
-                 ) AS scan_target
-            WHERE ports <> []
-              AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = scan_target }
-            RETURN ip.value AS ip, ports, scan_target, ip.id AS parent_id
-        """,
-        "mapping": {"ip": "{ip}", "ports": "{ports}", "scan_target": "{scan_target}", "parent_id": "{parent_id}"},
-    },
-    "httpx": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})
-            CALL {
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
-              WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.value }
-              RETURN s.value AS target
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(p:Port)
-              WITH ip.value + ':' + toString(p.number) AS target
-              WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
-              RETURN target
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_IP]->(ip:IP)-[:HAS_PORT]->(p:Port)
-              WITH ip.value + ':' + toString(p.number) AS target
-              WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
-              RETURN target
-            }
-            RETURN DISTINCT target AS url
-        """,
-        "mapping": {"url": "{urls_file}"},
-    },
-    "observer_ward": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})
-            CALL {
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-            }
-            WITH DISTINCT ep
-            WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
-            RETURN ep.url AS url, ep.id AS parent_id
-        """,
-        "mapping": {"url": "{url}", "parent_id": "{parent_id}"},
-    },
-    "katana": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})
-            CALL {
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-            }
-            WITH DISTINCT ep
-            WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
-            RETURN ep.url AS url, ep.id AS parent_id
-        """,
-        "mapping": {"url": "{url}", "parent_id": "{parent_id}"},
-    },
-    "ffuf": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})
-            CALL {
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-            }
-            WITH DISTINCT ep
-            WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
-            RETURN ep.url AS url, ep.id AS parent_id
-        """,
-        "mapping": {"url": "{url}", "parent_id": "{parent_id}"},
-    },
-    "gobuster": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})
-            CALL {
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-            }
-            WITH DISTINCT ep
-            WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
-            RETURN ep.url AS url, ep.id AS parent_id
-        """,
-        "mapping": {"url": "{url}", "parent_id": "{parent_id}"},
-    },
-    "nuclei": {
-        "query": """
-            MATCH (a:Asset {id: $asset_id})
-            CALL {
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-            }
-            WITH DISTINCT ep
-            WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
-            RETURN ep.url AS url, ep.tech AS tech
-        """,
-        # 指纹驱动：每个端点的 tech 在 _query_targets 里切词匹配 nuclei tag，
-        # 命中则注入 -tags 精准扫，未命中则 {tags_arg} 为空 → 盲扫兜底。迭代模式。
-        "mapping": {"url": "{url}", "tech": "{tags_arg}"},
-    },
-    "secretfinder": {
-        # 全量敏感信息检测：消费图中所有 File（katana/urlfinder 产出）
-        # + 所有 HTTPEndpoint（httpx/katana 产出）。抓内容过筛，只留命中。
-        # File 经 HTTPEndpoint-[:REFERENCES]->File 挂在端点下；
-        # HTTPEndpoint 经 Port-[:EXPOSES]->HTTPEndpoint 挂在端口下。
-        "query": """
-            MATCH (a:Asset {id: $asset_id})
-            CALL {
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-              UNION
-              WITH a
-              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
-            }
-            WITH DISTINCT ep
-            CALL {
-              WITH ep
-              RETURN ep.url AS url
-              UNION
-              WITH ep
-              MATCH (ep)-[:REFERENCES]->(f:File)
-              RETURN f.url AS url
-            }
-            WITH DISTINCT url
-            WHERE url IS NOT NULL AND url <> ''
-              AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = url }
-            RETURN url
-        """,
-        "mapping": {"url": "{urls_file}"},
-    },
-}
+# ---- 目标选择器（从 tools/*/targets.yaml 自动加载） ----
+
+_TARGET_SELECTORS: dict[str, dict[str, Any]] | None = None
+_TRANSFORMS: dict[str, Any] = {}  # 后处理函数注册表
+
+
+def _register_transform(name: str, func: Any) -> None:
+    """注册一个目标提取后处理函数（如 nuclei_tags）。"""
+    _TRANSFORMS[name] = func
+
+
+def _transform_nuclei_tags(tech: Any) -> str:
+    """指纹驱动：端点 tech[] 切词匹配 nuclei tag。
+
+    命中 → "-tags tag1,tag2"（精准扫）；未命中/无 tech → ""（盲扫兜底）。
+    nuclei 二进制缺失时 tag 集合为空，一律走盲扫兜底。
+    """
+    from graphpt.collector.nuclei_tags import load_nuclei_tags, match_tags
+
+    if not isinstance(tech, list):
+        tech = [tech] if tech else []
+    nuclei_bin = _find_tool("nuclei")
+    if not nuclei_bin:
+        return ""
+    tags = match_tags([str(t) for t in tech], load_nuclei_tags(nuclei_bin))
+    return f"-tags {','.join(tags)}" if tags else ""
+
+
+_register_transform("nuclei_tags", _transform_nuclei_tags)
+
+
+def _load_target_selectors() -> dict[str, dict[str, Any]]:
+    """扫描 tools/*/targets.yaml，构建选择器字典。
+
+    每个 targets.yaml 的 selectors 下可定义多个选择器（不同模式/层级），
+    选择器名即 _BATCH_TARGETS 的 key。
+
+    缓存：只加载一次，后续调用直接返回缓存结果。
+    """
+    global _TARGET_SELECTORS
+    if _TARGET_SELECTORS is not None:
+        return _TARGET_SELECTORS
+
+    from pathlib import Path as _Path
+    tools_dir = _Path(__file__).resolve().parent.parent.parent / "tools"
+    result: dict[str, dict[str, Any]] = {}
+    for yaml_file in sorted(tools_dir.glob("*/targets.yaml")):
+        try:
+            data = yaml.safe_load(yaml_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                continue
+            selectors = data.get("selectors", {})
+            if isinstance(selectors, dict):
+                for name, spec in selectors.items():
+                    if isinstance(spec, dict) and spec.get("query"):
+                        result[name] = spec
+        except Exception:
+            pass  # 单个文件解析失败不影响其他
+    _TARGET_SELECTORS = result
+    return result
 
 
 class PipelineManager:
@@ -756,27 +603,14 @@ class PipelineExecutor:
         return result
 
     def _query_targets(self, tool: str) -> list[dict[str, Any]]:
-        """按工具名从代码内置策略获取未扫描目标。"""
+        """按工具名从 targets.yaml 获取未扫描目标。"""
         if tool in self.target_overrides:
             targets = self.target_overrides.get(tool, [])
             return [dict(target) for target in targets if target] or [{}]
 
-        # 403bypass：目标选择已由 list_forbidden_targets 封装（选 403 节点 + 拼 URL
-        # + 排除已绕过成功的），不走 Cypher 模板。每个 403 目标一次脚本调用（迭代）。
-        if tool == "403bypass":
-            try:
-                from graphpt.collector.neo4j_client import list_forbidden_targets
-                targets = [
-                    {"{url}": t["url"], "{target_id}": t["id"]}
-                    for t in list_forbidden_targets(self.asset_id)
-                ]
-                return targets or [{}]
-            except Exception as exc:
-                raise RuntimeError(f"target_query_failed: {exc}") from exc
-
-        cfg = _BATCH_TARGETS.get(tool, {})
-        query = cfg.get("query", "")
-        mapping = cfg.get("mapping", {})
+        cfg = _load_target_selectors().get(tool, {})
+        query = str(cfg.get("query") or "").strip()
+        mapping = cfg.get("mapping", {}) or {}
         if not query:
             return [{}]  # 无配置 → 跑一次，不迭代
 
@@ -784,7 +618,6 @@ class PipelineExecutor:
             from graphpt.collector.neo4j_client import get_graph_writer
             w = get_graph_writer()
             with w._driver.session() as s:
-                # Pass all ctx values as Cypher parameters
                 qparams = {"asset_id": self.asset_id, "tool": tool}
                 for k, v in self.ctx.items():
                     if isinstance(v, (str, int, float, bool, type(None))):
@@ -797,62 +630,60 @@ class PipelineExecutor:
                         val = r.get(col)
                         if val is not None:
                             tgt[placeholder] = val
-                    if tool == "nuclei":
-                        tgt["{tags_arg}"] = self._nuclei_tags_arg(tgt.get("{tags_arg}"))
+
+                    # 后处理: targets.yaml 可指定 transform 对映射后的字段做二次加工
+                    transforms = cfg.get("transform", {}) or {}
+                    for field, func_name in transforms.items():
+                        func = _TRANSFORMS.get(func_name)
+                        if func:
+                            tgt["{" + field + "}"] = func(tgt.get("{" + field + "}"))
+
                     if tgt:
                         targets.append(tgt)
                 return targets or [{}]
         except Exception as exc:
             raise RuntimeError(f"target_query_failed: {exc}") from exc
 
-    def _nuclei_tags_arg(self, tech: Any) -> str:
-        """指纹驱动：端点 tech[] 切词匹配 nuclei tag。
-
-        命中 → "-tags tag1,tag2"（精准扫）；未命中/无 tech → ""（盲扫兜底）。
-        nuclei 二进制缺失时 tag 集合为空，一律走盲扫兜底。
-        """
-        from graphpt.collector.nuclei_tags import load_nuclei_tags, match_tags
-
-        if not isinstance(tech, list):
-            tech = [tech] if tech else []
-        nuclei_bin = _find_tool("nuclei")
-        if not nuclei_bin:
-            return ""
-        tags = match_tags([str(t) for t in tech], load_nuclei_tags(nuclei_bin))
-        return f"-tags {','.join(tags)}" if tags else ""
 
     def _mark_scanned(self, tool: str, target_label: str, findings_count: int = 0) -> None:
-        """标记一个目标已被某工具扫描。"""
+        # 委托批量版本（避免逐个建 session 的 O(n) 开销）
+        self._mark_scanned_batch(tool, [target_label or "default"], findings_count)
+
+    def _mark_scanned_batch(self, tool: str, labels: list[str], findings_count: int = 0) -> None:
+        """批量标记扫描目标，一次 Neo4j 事务写完。"""
+        if not labels:
+            return
         try:
+            import hashlib
             w = get_graph_writer()
             now = _now_iso()
-            import hashlib
-            label = target_label or "default"
-            run_id = f"scan:target:{hashlib.md5(f'{tool}:{label}'.encode()).hexdigest()[:16]}"
-            target_node_ids = _scan_target_node_ids(self.asset_id, tool, label)
-            with w._driver.session() as s:
-                s.run(
-                    "MERGE (sr:ScanRun {id: $rid}) "
-                    "SET sr.tool = $tool, sr.target = $target, "
-                    "    sr.findings_count = $fc, sr.last_run_at = $now, sr.finished_at = $now, "
-                    "    sr.started_at = coalesce(sr.started_at, $now), "
-                    "    sr.created_at = coalesce(sr.created_at, $now)",
-                    rid=run_id, tool=tool, target=label, fc=findings_count, now=now,
-                )
-                if target_node_ids:
+            # 每组最多 500 条，避免单事务过大
+            for batch_start in range(0, len(labels), 500):
+                batch = labels[batch_start:batch_start + 500]
+                rows = []
+                for label in batch:
+                    label = label or "default"
+                    rid = f"scan:target:{hashlib.md5(f'{tool}:{label}'.encode()).hexdigest()[:16]}"
+                    rows.append({"rid": rid, "label": label})
+                with w._driver.session() as s:
                     s.run(
                         """
-                        MATCH (sr:ScanRun {id: $rid})
-                        UNWIND $node_ids AS node_id
-                        MATCH (n)
-                        WHERE n.id = node_id
-                        MERGE (sr)-[:RAN]->(n)
+                        UNWIND $rows AS row
+                        MERGE (sr:ScanRun {id: row.rid})
+                        SET sr.tool = $tool, sr.target = row.label,
+                            sr.findings_count = $fc, sr.last_run_at = $now,
+                            sr.finished_at = $now,
+                            sr.started_at = coalesce(sr.started_at, $now),
+                            sr.created_at = coalesce(sr.created_at, $now)
                         """,
-                        rid=run_id,
-                        node_ids=target_node_ids,
+                        rows=rows, tool=tool, fc=findings_count, now=now,
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging
+            _log = logging.getLogger("graphpt.pipeline")
+            _log.warning("_mark_scanned_batch failed for tool=%s labels=%d: %s",
+                         tool, len(labels), exc)
+            raise
 
     def _preview_tool(self, tool: str, cmd_template: str, index: int, *, stage_name: str = "") -> dict[str, Any]:
         """Resolve one stage command without touching Neo4j or running subprocess."""
@@ -935,13 +766,21 @@ class PipelineExecutor:
           2. 对每个目标填入 ctx
           3. 解析模板 → subprocess 运行
           4. adapter 解析输出 → write_batch → _mark_scanned
+
+        tool 支持别名（如 "httpx:subdomain"）：冒号前是真实工具名，用于查找
+        二进制/适配器/配置；完整别名用于目标查询和 ScanRun 去重。
         """
 
-        bin_path = _find_tool(tool)
+        base = _base_tool(tool)  # "httpx:subdomain" → "httpx"
+
+        bin_path = _find_tool(base)
         if not bin_path:
             return {"stage": index, "name": stage_name, "tool": tool, "status": "error",
-                    "error": f"tool_not_found: {tool}"}
+                    "error": f"tool_not_found: {base}"}
         self.ctx["bin"] = bin_path
+
+        # 标记工具活跃（供 Logs 面板自动发现, 5min TTL 自动过期）
+        _set_active_marker(tool, self.asset_id)
 
         try:
             targets = self._query_targets(tool)
@@ -954,6 +793,13 @@ class PipelineExecutor:
 
         # 判断模式：{targets_file}/{domains_file}/{urls_file} → 批量文件，否则迭代
         batch_ph = _batch_placeholder_in(cmd_template)
+        # 兜底: targets.yaml 映射了 {urls_file} 但命令模板没用 -l 时，仍走批量(stdin 管道)
+        if not batch_ph:
+            mapping = _load_target_selectors().get(tool, {}).get("mapping", {})
+            for ph in _BATCH_PLACEHOLDERS:
+                if ph in mapping.values():
+                    batch_ph = ph
+                    break
 
         batch_ctx_key = ""
         batch_tmp_paths: list[str] = []
@@ -973,7 +819,8 @@ class PipelineExecutor:
                     return None
                 with tempfile.NamedTemporaryFile(
                     mode="w", suffix=".txt", delete=False,
-                    encoding="utf-8", prefix="graphpt_tgts_"
+                    encoding="utf-8", prefix="graphpt_tgts_",
+                    newline='\n'  # UNIX 换行, 否则 Windows \r\n 让 httpx 等工具 stdin 解析失败
                 ) as tmp:
                     for v in unique_values:
                         tmp.write(v + "\n")
@@ -998,9 +845,12 @@ class PipelineExecutor:
                 all_values = []
                 for tgt in targets:
                     all_values.extend(_values_from_target(tgt))
-                run_target = _batch_run(all_values)
-                if run_target:
-                    batch_targets.append(run_target)
+                # 大输入分组(500/组), 防 httpx stdin 一次性太多卡初始化
+                _CHUNK = int(os.getenv("GRAPHPT_CHUNK_SIZE", "100"))
+                for _ci in range(0, len(all_values), _CHUNK):
+                    run_target = _batch_run(all_values[_ci:_ci + _CHUNK])
+                    if run_target:
+                        batch_targets.append(run_target)
 
             if not batch_targets:
                 return {"stage": index, "name": stage_name, "tool": tool, "status": "ok",
@@ -1037,7 +887,8 @@ class PipelineExecutor:
                 if url_list:
                     with tempfile.NamedTemporaryFile(
                         mode="w", suffix=".txt", delete=False,
-                        encoding="utf-8", prefix="graphpt_urls_"
+                        encoding="utf-8", prefix="graphpt_urls_",
+                        newline='\n'
                     ) as tmp:
                         for u in url_list:
                             tmp.write(str(u) + "\n")
@@ -1058,42 +909,67 @@ class PipelineExecutor:
                 _cleanup_iteration_file()
                 continue
             cmd = _split_command(cmd_str)
-            # 工具输出写临时文件(实时可见), 同时 capture 到内存供 adapter 解析
+            # 工具输出写日志(流式,浏览器实时可见), 同时收齐供 adapter 解析
             import hashlib, time as _time
-            _tool_log = _PROJECT_ROOT / "tools" / tool / "logs"
+            _tool_log = _PROJECT_ROOT / "data" / "logs" / base
+            _tool_log.mkdir(parents=True, exist_ok=True)
             _tool_log.mkdir(parents=True, exist_ok=True)
             _log_file = _tool_log / f"{_time.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(cmd_str.encode()).hexdigest()[:8]}.log"
+            # 若上下文有 urls_file, 通过 stdin 管道传入 (httpx -l 在 Windows 上有 bug)
+            _stdin = None
+            _stdfile = ""
+            _urls = self.ctx.get("urls_file", "")
+            if _urls and os.path.isfile(_urls):
+                _stdfile = _urls
+                _stdin = open(_urls, "r", encoding="utf-8", errors="replace")
+            _STALE_TIMEOUT = 300   # 5 分钟日志文件无增长 → 判定卡死
+            _POLL_INTERVAL = int(os.getenv("GRAPHPT_POLL_INTERVAL", "30"))  # 巡检间隔(秒), 默认30
+
             try:
+                # stdout → log 文件(流式,浏览器 tail), 不经过 PIPE 避免工具缓冲卡死
                 with open(_log_file, "w", encoding="utf-8", errors="replace") as _lf:
-                    proc = subprocess.run(cmd, timeout=None,
-                                          text=True, encoding='utf-8', errors='replace',
-                                          env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
-                                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                    if proc.stdout:
-                        _lf.write(proc.stdout)
+                    proc = subprocess.Popen(cmd, text=True, encoding='utf-8', errors='replace',
+                                            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+                                            stdin=_stdin, stdout=_lf, stderr=subprocess.STDOUT)
+                    _last_size = 0
+                    _stale = 0
+                    while proc.poll() is None:
+                        _time.sleep(_POLL_INTERVAL)
+                        try:
+                            _cur = os.path.getsize(str(_log_file))
+                        except OSError:
+                            _cur = 0
+                        if _cur > _last_size:
+                            _last_size = _cur
+                            _stale = 0
+                        else:
+                            _stale += _POLL_INTERVAL
+                            if _stale >= _STALE_TIMEOUT:
+                                proc.kill()
+                                proc.wait()
+                                raise RuntimeError(
+                                    f"tool stale: no output for {_stale}s "
+                                    f"(log={_log_file}, size={_last_size})"
+                                )
+                stdout = _log_file.read_text(encoding="utf-8", errors="replace")
                 self.ctx["_last_tool_log"] = str(_log_file)
-            except subprocess.TimeoutExpired:
-                errors.append({
-                    "tool": tool,
-                    "target": _target_label(tgt),
-                    "kind": "timeout",
-                    "message": "tool execution timed out",
-                    "command": cmd,
-                })
-                _cleanup_iteration_file()
-                continue
             except Exception as exc:
+                msg = str(exc)
+                kind = "stale" if "stale" in msg else "exec_error"
                 errors.append({
                     "tool": tool,
                     "target": _target_label(tgt),
-                    "kind": "exec_error",
-                    "message": str(exc),
+                    "kind": kind,
+                    "message": msg,
                     "command": cmd,
                 })
                 _cleanup_iteration_file()
+                _stdin.close() if _stdin else None
                 continue
 
-            stdout = proc.stdout or ""
+            if _stdin:
+                _stdin.close()
+
             if proc.returncode != 0 and not stdout:
                 errors.append({
                     "tool": tool,
@@ -1118,7 +994,7 @@ class PipelineExecutor:
                 })
 
             # adapter 解析——如果工具写了文件，读文件；否则解析 stdout
-            adapter_cls = ADAPTER_MAP.get(tool)
+            adapter_cls = ADAPTER_MAP.get(base)
             findings: list[dict[str, Any]] = []
             if adapter_cls is not None:
                 try:
@@ -1160,6 +1036,10 @@ class PipelineExecutor:
                 _cleanup_iteration_file()
                 continue
 
+            # 确定是否需要标记已扫描
+            mark_needed = findings or proc.returncode == 0
+            mark_failed = False
+
             if findings:
                 try:
                     writer = get_graph_writer()
@@ -1175,23 +1055,38 @@ class PipelineExecutor:
                         "message": str(exc),
                         "command": cmd,
                     })
+                    mark_needed = False  # 写入失败,不标记,下次重扫
                     _cleanup_iteration_file()
                     continue
 
-            # 标记已扫描：批量模式按原始目标逐条标记，不能用临时文件路径。
-            if batch_ph is not None:
-                batch_target_labels = [str(label) for label in tgt.get("__batch_labels__", []) if label]
-                finding_labels = _target_labels_from_findings(findings)
-                labels_to_mark = (
-                    [label for label in batch_target_labels if label in finding_labels]
-                    if proc.returncode != 0
-                    else batch_target_labels
-                )
-                for label in labels_to_mark:
-                    self._mark_scanned(tool, label, len(findings))
-            else:
-                target_label = _target_label(tgt)
-                self._mark_scanned(tool, target_label, len(findings))
+            # 标记已扫描:与 write_batch 同 try 块保证原子性;
+            # 即使无 findings 但工具成功(returncode==0),也标记避免永远重扫空目标。
+            if mark_needed:
+                try:
+                    if batch_ph is not None:
+                        batch_target_labels = [str(label) for label in tgt.get("__batch_labels__", []) if label]
+                        if findings:
+                            finding_labels = _target_labels_from_findings(findings)
+                            labels_to_mark = (
+                                [label for label in batch_target_labels if label in finding_labels]
+                                if proc.returncode != 0
+                                else batch_target_labels
+                            )
+                        else:
+                            labels_to_mark = batch_target_labels
+                        self._mark_scanned_batch(tool, labels_to_mark, len(findings) if findings else 0)
+                    else:
+                        target_label = _target_label(tgt)
+                        self._mark_scanned(tool, target_label, len(findings) if findings else 0)
+                except Exception as exc:
+                    errors.append({
+                        "tool": tool,
+                        "target": _target_label(tgt),
+                        "kind": "mark_scanned_failed",
+                        "message": str(exc),
+                        "command": cmd,
+                    })
+                    mark_failed = True  # 标记失败不致命(findings 已入图且 MERGE 幂等)
 
             # 清理临时文件
             _cleanup_iteration_file()
@@ -1216,6 +1111,22 @@ class PipelineExecutor:
         if errors:
             result["errors"] = errors
             result["error"] = errors[0].get("message", "tool stage failed")
+            # 后台记录错误到 Neo4j（不阻塞，失败不影响结果）
+            try:
+                import graphpt.collector.neo4j_client as _nc
+                _w = _nc.get_graph_writer()
+                _now = _nc._now_iso()
+                with _w._driver.session() as _es:
+                    for _e in errors[:20]:
+                        _es.run("""
+                            CREATE (el:ErrorLog {tool: $t, asset_id: $aid,
+                                kind: $k, message: left($m, 500),
+                                target: $tg, created_at: $n})
+                        """, t=tool, aid=self.asset_id, k=_e.get("kind", "?"),
+                             m=str(_e.get("message", ""))[:500],
+                             tg=str(_e.get("target", ""))[:200], n=_now)
+            except Exception:
+                pass
         return result
 
     def _resolve_template(self, template: str) -> str:

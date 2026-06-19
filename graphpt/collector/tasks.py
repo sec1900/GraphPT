@@ -569,7 +569,16 @@ def scan_tool(self, tool: str, asset_id: str = "default"):
     scan_tool 跑单个工具，由调度器按依赖层动态选择派发哪些工具。
     """
     asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
-    result = _run_single_tool_pipeline(tool, asset_id=asset_id, stage_name=tool)
+    try:
+        result = _run_single_tool_pipeline(tool, asset_id=asset_id, stage_name=tool)
+    finally:
+        # 无论成败都释放锁并自动推进下一层
+        from graphpt.collector.scheduler import _release_lock, auto_advance
+        _release_lock(asset_id, tool)
+        try:
+            auto_advance(asset_id)
+        except Exception:
+            pass
     findings, written = _pipeline_counts(result.get("result", {}))
     return {
         "status": result.get("status", "error"),

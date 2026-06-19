@@ -1,7 +1,7 @@
 desc: "Web 爬虫"
-command: "{bin} -u {url} -jsonl -silent -jc -kf all -fx"
+command: "{bin} -list {urls_file} -jsonl -silent -jc -kf all -fx"
 use_on:
   Endpoint:
-    desc: "爬取 Endpoint 链接、JS 和接口（含表单参数）"
+    desc: "爬取 Endpoint 链接、JS 和接口，批量模式"
     params:
-      url: "{url}"
+      urls_file: "{urls_file}"

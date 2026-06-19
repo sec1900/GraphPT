@@ -92,9 +92,8 @@ def _load_secret_rules() -> list[dict]:
 
     找不到规则文件或缺 yaml 库时返回空列表（降级为只提 URL/API，不报错）。
     """
-    # 定位 res/secrets_rules.yaml：tools/secretfinder/secretfinder.py → 上三级是项目根
-    root = Path(__file__).resolve().parent.parent.parent
-    rules_path = root / "res" / "secrets_rules.yaml"
+    # 规则文件与工具同目录：tools/secretfinder/secrets_rules.yaml
+    rules_path = Path(__file__).resolve().parent / "secrets_rules.yaml"
     if not rules_path.is_file():
         return []
     try:
@@ -104,7 +103,9 @@ def _load_secret_rules() -> list[dict]:
         return []
 
     rules: list[dict] = []
-    for category, items in data.items():
+    # 新格式: {categories: {cat_name: [{name, regex, severity}]}}
+    cats = data.get("categories", data)
+    for category, items in cats.items():
         if not isinstance(items, list):
             continue
         for item in items:
@@ -306,7 +307,14 @@ def main() -> int:
     parser.add_argument("--max-bytes", type=int,
                         default=int(os.environ.get("GRAPHPT_SECRETFINDER_MAX_BYTES", _DEFAULT_MAX_BYTES)),
                         help="单个响应体大小上限字节（默认 2MB，超出截断）")
+    parser.add_argument("--evidence-dir", default="",
+                        help="证据目录：命中秘密时保存原始响应体到此目录，路径写入 finding")
     args = parser.parse_args()
+
+    evidence_dir: Path | None = None
+    if args.evidence_dir:
+        evidence_dir = Path(args.evidence_dir)
+        evidence_dir.mkdir(parents=True, exist_ok=True)
 
     list_path = Path(args.list_file)
     if not list_path.is_file():
@@ -327,13 +335,28 @@ def main() -> int:
 
     rules = _load_secret_rules()
     out = sys.stdout
+    import hashlib
 
     def _process(url: str) -> list[dict]:
-        """抓取→扫描→丢弃。响应体只在此函数内存活，不返回原文（筛网铁律）。"""
+        """抓取→扫描→存证据。命中秘密时原始响应体写入证据目录。"""
         content = _fetch(url, max_bytes=args.max_bytes)
         if not content:
             return []
-        return analyze(content, url, rules)
+        findings = analyze(content, url, rules)
+
+        # 存证据：只对命中秘密的 URL 保存原始响应体
+        has_secret = any(f.get("type") == "secret" for f in findings)
+        if has_secret and evidence_dir is not None:
+            evidence_path = evidence_dir / f"{hashlib.md5(url.encode()).hexdigest()[:12]}.txt"
+            evidence_path.write_text(
+                f"# Source: {url}\n# Length: {len(content)} bytes\n\n{content}",
+                encoding="utf-8", errors="replace"
+            )
+            for f in findings:
+                if f.get("type") == "secret":
+                    f["evidence"] = str(evidence_path)
+
+        return findings
 
     # 线程池并发抓取；结果按行写出（顺序无关，每行独立 JSON）
     concurrency = max(1, args.concurrency)

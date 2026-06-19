@@ -55,8 +55,7 @@ def test_tool_commands_match_adapter_output_contracts():
 
     katana = _tool_config("katana")["command"]
     assert "-jsonl" in katana
-    assert "{url}" in katana
-    assert "{targets_file}" not in katana
+    assert "{urls_file}" in katana  # batch mode
 
     ffuf = _tool_config("ffuf")
     assert all("-json" in command for command in _all_commands(ffuf))

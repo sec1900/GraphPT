@@ -4,7 +4,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, ANY
 
 from graphpt.collector.adapter import ADAPTER_MAP, SecretfinderAdapter
 
@@ -32,7 +32,7 @@ def test_scan_secrets_detects_and_masks():
     rules = secretfinder._load_secret_rules()
     text = 'config: AKIAIOSFODNN7EXAMPLE'
     found = secretfinder.scan_secrets(text, "https://x.acme.lab/c", rules)
-    aws = next(f for f in found if f["secret_type"] == "AWS Access Key")
+    aws = next(f for f in found if "AWS AccessKey" in f["secret_type"] or "AWS Access Key" in f["secret_type"])
     assert aws["type"] == "secret"
     assert aws["source_url"] == "https://x.acme.lab/c"
     assert "AKIAIOSFODNN7EXAMPLE" not in aws["value_preview"]
@@ -229,6 +229,7 @@ def test_write_batch_routes_secret_with_source_url():
     from graphpt.collector.neo4j_client import GraphWriter
 
     writer = GraphWriter.__new__(GraphWriter)
+    writer._driver = MagicMock()
     writer.write_secret = MagicMock(return_value={"id": "secret:abc"})
 
     findings = [{
@@ -240,5 +241,6 @@ def test_write_batch_routes_secret_with_source_url():
     writer.write_secret.assert_called_once_with(
         "AWS Access Key", "AKIA******MPLE",
         source_url="https://www.acme.lab/login", file_id="", line=7,
+        evidence_path="", _session=ANY,
     )
     assert results == [{"id": "secret:abc"}]

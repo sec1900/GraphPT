@@ -1,7 +1,11 @@
-desc: "JS 静态分析（提取隐藏 URL/API 接口/敏感信息/子域名）"
-command: "{bin} -list {urls_file}"
+desc: "全量敏感信息检测（抓取 File/HTTPEndpoint 内容找泄露，JS 额外提 URL/API/子域名）"
+command: "{bin} -list {urls_file} --evidence-dir tools/secretfinder/evidence"
 use_on:
   File:
-    desc: "抓取并分析 JS 文件，挖掘隐藏接口与泄露信息"
+    desc: "抓取并分析文件，挖掘隐藏接口与泄露信息"
+    params:
+      urls_file: "{url}"
+  HTTPEndpoint:
+    desc: "抓取端点响应体，过筛敏感信息"
     params:
       urls_file: "{url}"
