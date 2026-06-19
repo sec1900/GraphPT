@@ -404,24 +404,47 @@ async def list_assets():
         rows = _neo4j_query(
             """
             MATCH (a:Asset)
-            OPTIONAL MATCH (a)-[:HAS_ROOT]->(r:RootDomain)
-            OPTIONAL MATCH (r)-[:HAS_SUB]->(s:Subdomain)
-            OPTIONAL MATCH (s)-[:RESOLVES_TO]->(ip1:IP)
-            OPTIONAL MATCH (a)-[:HAS_IP]->(ip2:IP)
-            OPTIONAL MATCH (ip1)-[:HAS_PORT]->(p1:Port)
-            OPTIONAL MATCH (ip2)-[:HAS_PORT]->(p2:Port)
-            OPTIONAL MATCH (p1)-[:EXPOSES]->(ep1:HTTPEndpoint)
-            OPTIONAL MATCH (p2)-[:EXPOSES]->(ep2:HTTPEndpoint)
-            OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep3:HTTPEndpoint)
-            WITH a, r, s, ip1, ip2, p1, p2, ep1, ep2, ep3
-            WITH a,
-                count(DISTINCT r) AS root_cnt,
-                count(DISTINCT s) AS sub_cnt,
-                count(DISTINCT ip1) + count(DISTINCT ip2) AS ip_cnt,
-                count(DISTINCT p1) + count(DISTINCT p2) AS port_cnt,
-                count(DISTINCT ep1) + count(DISTINCT ep2) + count(DISTINCT ep3) AS ep_cnt
+            CALL (a) {
+              OPTIONAL MATCH (a)-[:HAS_ROOT]->(r:RootDomain)
+              RETURN count(r) AS root_cnt
+            }
+            CALL (a) {
+              OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
+              RETURN count(s) AS sub_cnt
+            }
+            CALL (a) {
+              OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)
+              RETURN count(ip) AS domain_ip_cnt
+            }
+            CALL (a) {
+              OPTIONAL MATCH (a)-[:HAS_IP]->(ip:IP)
+              RETURN count(ip) AS direct_ip_cnt
+            }
+            CALL (a) {
+              OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p:Port)
+              RETURN count(p) AS domain_port_cnt
+            }
+            CALL (a) {
+              OPTIONAL MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(p:Port)
+              RETURN count(p) AS direct_port_cnt
+            }
+            CALL (a) {
+              OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN count(ep) AS domain_ep_cnt
+            }
+            CALL (a) {
+              OPTIONAL MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN count(ep) AS direct_ep_cnt
+            }
+            CALL (a) {
+              OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN count(ep) AS subdomain_ep_cnt
+            }
             RETURN a.id AS id, coalesce(a.name, a.id) AS name, a.created_at AS created_at,
-                   root_cnt, sub_cnt, ip_cnt, port_cnt, ep_cnt
+                   root_cnt, sub_cnt,
+                   domain_ip_cnt + direct_ip_cnt AS ip_cnt,
+                   domain_port_cnt + direct_port_cnt AS port_cnt,
+                   domain_ep_cnt + direct_ep_cnt + subdomain_ep_cnt AS ep_cnt
             ORDER BY a.created_at DESC
             """
         )
