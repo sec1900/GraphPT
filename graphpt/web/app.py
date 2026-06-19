@@ -83,16 +83,38 @@ def _neo4j():
     return _neo4j_driver
 
 
+def _sanitize_params(**params):
+    """清洗参数：过滤空值，修复 Unicode 导致 $param 被吞的问题。"""
+    clean = {}
+    for k, v in params.items():
+        if v is None or v == "" or (isinstance(v, str) and not v.strip()):
+            continue  # 跳过空参数（Neo4j driver 会吞掉空字符串的占位符）
+        if isinstance(v, str):
+            # 确保是合法 Unicode，问题字符用 replace 替代 remove
+            v = v.encode("utf-8", errors="replace").decode("utf-8")
+        clean[k] = v
+    return clean
+
+
 def _neo4j_query(cypher: str, **params):
-    """执行 Neo4j 查询；连接或查询失败时显式报错。"""
-    if not _check_neo4j():
-        raise HTTPException(status_code=503, detail="neo4j unavailable")
-    driver = _neo4j()
-    try:
-        with driver.session() as session:
-            return list(session.run(cypher, **params))
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"neo4j query failed: {exc}") from exc
+    """执行 Neo4j 查询，连接失败自动重试 3 次。"""
+    import time as _time
+    params = _sanitize_params(**params)
+    last_exc = None
+    for attempt in range(3):
+        try:
+            if not _check_neo4j():
+                raise HTTPException(status_code=503, detail="neo4j unavailable")
+            driver = _neo4j()
+            with driver.session() as session:
+                return list(session.run(cypher, **params))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                _time.sleep(1)
+    raise HTTPException(status_code=500, detail=f"neo4j query failed after 3 retries: {last_exc}") from last_exc
 
 
 def _json_error(exc: Exception, *, status_code: int = 500) -> JSONResponse:
@@ -2103,7 +2125,7 @@ async def node_detail(node_id: str):
             "labels": list(r["n"].labels),
             "properties": props,
             "vulnerabilities": [{"title":v.get("title",""),"severity":v.get("severity","")} for v in (r["vulns"] or []) if v],
-            "secrets": [{"type":s.get("type",""),"preview":s.get("value_preview",""),"evidence":s.get("evidence_path","")} for s in (r["secrets"] or []) if s],
+            "secrets": [{"type":s.get("type",""),"preview":s.get("value_preview",""),"evidence":(s.get("evidence_path","") or "").replace(chr(92), "/")} for s in (r["secrets"] or []) if s],
         }}
     except HTTPException: raise
     except Exception as exc: return _json_error(exc)
@@ -2182,6 +2204,43 @@ async def scan_start(body: dict | None = None):
 
         threading.Thread(target=_bg_advance, daemon=True).start()
         return {"ok": True, "data": {"status": "processing", "preview": [], "note": "advance_once running in background"}}
+    except Exception as exc:
+        return _json_error(exc)
+
+
+@web_app.post("/api/scan/abort")
+async def scan_abort(body: dict | None = None):
+    """中止扫描：设置 Redis 信号，活性检测循环检测到后 kill 子进程。"""
+    body = body or {}
+    asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
+    try:
+        import redis as _rds
+        r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1, decode_responses=True)
+        r.ping()
+        r.setex(f"scan:abort:{asset_id}", 60, "1")
+        # 同时释放所有锁，让后续 advance 不会被挡
+        for k in r.keys(f"scheduler:lock:{asset_id}:*"):
+            r.delete(k)
+        return {"ok": True, "data": {"status": "aborted"}}
+    except Exception as exc:
+        return _json_error(exc)
+
+
+@web_app.get("/api/scan/history")
+async def scan_history(asset_id: str = "default", limit: int = 20):
+    """扫描历史：最近运行的扫描记录。"""
+    try:
+        rows = _neo4j_query("""
+            MATCH (sr:ScanRun)
+            WHERE sr.tool IS NOT NULL
+            WITH sr.tool AS tool, max(sr.last_run_at) AS last_run, count(sr) AS scans
+            RETURN tool, scans, last_run ORDER BY last_run DESC LIMIT $lim
+        """, lim=limit)
+        tools = [{"tool": r["tool"], "scans": r["scans"], "last_run": r["last_run"]} for r in rows]
+        # Summarize: last overall scan time and total scans
+        last = tools[0]["last_run"] if tools else None
+        total_scans = sum(t["scans"] for t in tools)
+        return {"ok": True, "data": {"tools": tools, "last_scan": last, "total_scans": total_scans}}
     except Exception as exc:
         return _json_error(exc)
 

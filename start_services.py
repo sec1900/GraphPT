@@ -1,0 +1,82 @@
+"""GraphPT 服务启动器 — 保持 Web + Celery 存活。"""
+import subprocess, sys, time, os, socket
+from pathlib import Path
+
+PROJECT = Path(__file__).parent
+
+
+def port_in_use(port: int) -> bool:
+    """检查端口是否已被占用。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("0.0.0.0", port))
+        s.close()
+        return False
+    except OSError:
+        return True
+
+
+def run_service(name: str, cmd: list[str], cwd: str, port: int = 0):
+    """运行服务。如果端口已被占用（说明已有一个实例在跑），则跳过。崩溃后等待几秒自动重启。"""
+    while True:
+        if port and port_in_use(port):
+            print(f"[{name}] Port {port} already in use. Assuming another instance is running.")
+            while port_in_use(port):
+                time.sleep(30)
+            print(f"[{name}] Port {port} freed. Restarting...")
+
+        print(f"[{name}] Starting...")
+        try:
+            proc = subprocess.Popen(cmd, cwd=cwd)
+            proc.wait()
+            code = proc.returncode
+            print(f"[{name}] Exited (code={code})")
+        except KeyboardInterrupt:
+            print(f"[{name}] Stopped")
+            return
+        except Exception as e:
+            print(f"[{name}] Error: {e}")
+
+        print(f"[{name}] Restarting in 5s...")
+        time.sleep(5)
+
+
+def main():
+    from concurrent.futures import ThreadPoolExecutor
+
+    services = [
+        {
+            "name": "celery-worker",
+            "cmd": [
+                sys.executable, "-m", "celery", "-A", "graphpt.collector.app", "worker",
+                "--loglevel=warning", "--concurrency=4", "--pool=solo",
+                "-Q", "collect,celery", "-n", "graphpt-worker-1",
+            ],
+        },
+        {
+            "name": "web-server",
+            "cmd": [
+                sys.executable, "-m", "uvicorn", "graphpt.web.app:web_app",
+                "--host", "0.0.0.0", "--port", "8080",
+            ],
+            "port": 8080,
+        },
+    ]
+
+    print("GraphPT Services Starting...")
+    print(f"Project: {PROJECT}")
+    print(f"Python:  {sys.executable}")
+    print()
+
+    with ThreadPoolExecutor(max_workers=len(services)) as pool:
+        futures = [pool.submit(run_service, s["name"], s["cmd"], str(PROJECT), s.get("port", 0))
+                   for s in services]
+        try:
+            for f in futures:
+                f.result()
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+
+
+if __name__ == "__main__":
+    main()

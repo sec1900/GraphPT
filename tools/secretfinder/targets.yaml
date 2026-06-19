@@ -1,0 +1,31 @@
+selectors:
+  secretfinder:
+    desc: 全量敏感信息检测 — 取未扫的HTTPEndpoint(活) + File URL
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.status_code > 0
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.status_code > 0
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.status_code > 0
+        RETURN ep
+      }
+      WITH DISTINCT ep
+      CALL (ep) {
+        RETURN ep.url AS url
+        UNION
+        MATCH (ep)-[:REFERENCES]->(f:File)
+        RETURN f.url AS url
+      }
+      WITH DISTINCT url
+      WHERE url IS NOT NULL AND url <> ''
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = url }
+      RETURN url
+    mapping:
+      url: "{urls_file}"

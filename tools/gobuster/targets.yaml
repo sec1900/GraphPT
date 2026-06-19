@@ -1,0 +1,50 @@
+selectors:
+  gobuster:
+    desc: "目录爆破(dir) — 取未扫的HTTPEndpoint（含Subdomain直连路径）"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        RETURN ep
+      }
+      WITH DISTINCT ep
+      WHERE ep.status_code > 0
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+      RETURN ep.url AS url, ep.id AS parent_id
+    mapping:
+      url: "{url}"
+      parent_id: "{parent_id}"
+  gobuster:dns:
+    desc: "DNS子域名爆破 — 取未扫的RootDomain"
+    query: |
+      MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
+      WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = rd.value }
+      RETURN rd.value AS domain
+    mapping:
+      domain: "{domain}"
+  gobuster:vhost:
+    desc: "虚拟主机发现 — 取非内网IP"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)
+        RETURN ip
+        UNION
+        MATCH (a)-[:HAS_IP]->(ip:IP)
+        RETURN ip
+      }
+      WITH DISTINCT ip
+      WHERE NOT (ip.value STARTS WITH '10.')
+        AND NOT (ip.value STARTS WITH '192.168.')
+        AND NOT (ip.value STARTS WITH '127.')
+        AND NOT (ip.value = '0.0.0.0')
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ip.value }
+      RETURN ip.value AS ip
+    mapping:
+      ip: "{ip}"

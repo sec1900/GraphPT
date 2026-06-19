@@ -235,7 +235,9 @@ class GraphWriter:
         asset_id: str,
         *,
         root_domain: str | None = None,
-        source: str = "", _session: Any | None = None) -> dict[str, Any]:
+        source: str = "",
+        cname: str = "",
+        _session: Any | None = None) -> dict[str, Any]:
         """幂等写入 Subdomain 节点并建立关系链。
 
         关系: Asset -[:HAS_ROOT]-> RootDomain -[:HAS_SUB]-> Subdomain
@@ -254,8 +256,9 @@ class GraphWriter:
                 MERGE (r:RootDomain {id: $root_id})
                   ON CREATE SET r.value = $root_domain, r.created_at = $now
                 MERGE (s:Subdomain {id: $sub_id})
-                  ON CREATE SET s.value = $value, s.sources = [$source], s.created_at = $now
-                  ON MATCH  SET s.last_seen_at = $now
+                  ON CREATE SET s.value = $value, s.sources = [$source], s.cname = $cname, s.created_at = $now
+                  ON MATCH  SET s.last_seen_at = $now,
+                    s.cname = CASE WHEN $cname <> '' THEN $cname ELSE s.cname END
                 WITH s, coalesce(s.sources, CASE WHEN s.source IS NOT NULL THEN [s.source] ELSE [] END) AS _cur
                 SET s.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
                 SET s.source = null
@@ -272,6 +275,7 @@ class GraphWriter:
                 sub_id=sub_id,
                 value=value,
                 source=source,
+                cname=cname or "",
                 now=now,
             )
             record = result.single()
@@ -422,7 +426,8 @@ class GraphWriter:
                 WITH p
                 MERGE (svc:Service {id: $service_id})
                   ON CREATE SET svc.name = $service_name, svc.sources = [$source], svc.created_at = $now
-                  ON MATCH  SET svc.last_seen_at = $now
+                  ON MATCH  SET svc.last_seen_at = $now,
+                    svc.name = CASE WHEN $service_name <> '' AND NOT $service_name STARTS WITH 'port_' THEN $service_name ELSE svc.name END
                 WITH p, svc
                 MERGE (p)-[:HAS_SERVICE]->(svc)
                 WITH svc, coalesce(svc.sources, []) AS _cur
@@ -989,6 +994,7 @@ class GraphWriter:
                         asset_id=asset_id or f.get("asset_id", ""),
                         root_domain=f.get("root_domain"),
                         source=f.get("source", ""),
+                        cname=f.get("cname", ""),
                         _session=batch_session,
                     )
                 elif ftype == "ip":

@@ -1,0 +1,6 @@
+selectors:
+  enscan:
+    desc: ICP备案/分支机构域名收集 — 取公司名
+    query: RETURN coalesce($company, '') AS company
+    mapping:
+      company: '{targets_file}'

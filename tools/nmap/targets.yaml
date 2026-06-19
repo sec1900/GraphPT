@@ -1,0 +1,17 @@
+selectors:
+  nmap:
+    desc: 服务识别 — 取有开放端口的IP(端口列表, 去重基于ip+端口组合)
+    query: "MATCH (a:Asset {id: $asset_id})\nCALL {\n  WITH a\n  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)\n\
+      \  RETURN ip\n  UNION\n  WITH a\n  MATCH (a)-[:HAS_IP]->(ip:IP)\n  RETURN ip\n\
+      }\nWITH DISTINCT ip\nMATCH (ip)-[:HAS_PORT]->(p:Port)\nWITH DISTINCT ip, p.number\
+      \ AS port\nORDER BY port\nWITH ip, collect(port) AS ports\nWITH ip, ports,\n\
+      \     ip.value + '|' + reduce(s = '', port IN ports |\n       s + CASE WHEN\
+      \ s = '' THEN '' ELSE ',' END + toString(port)\n     ) AS scan_target\nWHERE\
+      \ ports <> []\n  AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND\
+      \ sr.target = scan_target }\nRETURN ip.value AS ip, ports, scan_target, ip.id\
+      \ AS parent_id"
+    mapping:
+      ip: '{ip}'
+      ports: '{ports}'
+      scan_target: '{scan_target}'
+      parent_id: '{parent_id}'

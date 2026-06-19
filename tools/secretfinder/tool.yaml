@@ -1,5 +1,5 @@
 desc: "全量敏感信息检测（抓取 File/HTTPEndpoint 内容找泄露，JS 额外提 URL/API/子域名）"
-command: "{bin} -list {urls_file} --evidence-dir tools/secretfinder/evidence"
+command: "{bin} -list {urls_file} --evidence-dir data/evidence"
 use_on:
   File:
     desc: "抓取并分析文件，挖掘隐藏接口与泄露信息"

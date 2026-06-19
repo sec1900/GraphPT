@@ -172,6 +172,21 @@ def _split_command(command: str) -> list[str]:
 _BATCH_PLACEHOLDERS = ("{targets_file}", "{domains_file}", "{urls_file}", "{ips_file}")
 
 
+import atexit as _atexit
+_temp_files_cleanup: set[str] = set()
+
+def _register_temp_cleanup(path: str) -> None:
+    _temp_files_cleanup.add(path)
+
+def _cleanup_all_temps() -> None:
+    for p in list(_temp_files_cleanup):
+        try: os.unlink(p)
+        except OSError: pass
+    _temp_files_cleanup.clear()
+
+_atexit.register(_cleanup_all_temps)
+
+
 def _set_active_marker(tool: str, asset_id: str) -> None:
     """标记工具正在运行（Redis, 5min TTL 自动过期, 供 Logs 面板自动发现）。"""
     try:
@@ -621,7 +636,10 @@ class PipelineExecutor:
                 qparams = {"asset_id": self.asset_id, "tool": tool}
                 for k, v in self.ctx.items():
                     if isinstance(v, (str, int, float, bool, type(None))):
-                        qparams[k] = v
+                        if v is not None and v != "" and v != [] and v != {}:
+                            qparams[k] = v
+                # 清洗空值（Neo4j driver 会吞掉空字符串的 $param 占位符导致语法错误）
+                qparams = {k: v for k, v in qparams.items() if v is not None and v != ""}
                 rows = s.run(query, **qparams)
                 targets = []
                 for r in rows:
@@ -817,14 +835,17 @@ class PipelineExecutor:
                 unique_values = list(dict.fromkeys(values))
                 if not unique_values:
                     return None
+                (_PROJECT_ROOT / "data" / "tmp").mkdir(parents=True, exist_ok=True)
                 with tempfile.NamedTemporaryFile(
                     mode="w", suffix=".txt", delete=False,
                     encoding="utf-8", prefix="graphpt_tgts_",
-                    newline='\n'  # UNIX 换行, 否则 Windows \r\n 让 httpx 等工具 stdin 解析失败
+                    dir=str(_PROJECT_ROOT / "data" / "tmp"),
+                    newline='\n'
                 ) as tmp:
                     for v in unique_values:
                         tmp.write(v + "\n")
                     batch_tmp_paths.append(tmp.name)
+                    _register_temp_cleanup(tmp.name)
                 return {
                     **(metadata or {}),
                     "__batch__": tmp.name,
@@ -885,9 +906,11 @@ class PipelineExecutor:
                 if not isinstance(url_list, list):
                     url_list = [url_list] if url_list else []
                 if url_list:
+                    (_PROJECT_ROOT / "data" / "tmp").mkdir(parents=True, exist_ok=True)
                     with tempfile.NamedTemporaryFile(
                         mode="w", suffix=".txt", delete=False,
                         encoding="utf-8", prefix="graphpt_urls_",
+                        dir=str(_PROJECT_ROOT / "data" / "tmp"),
                         newline='\n'
                     ) as tmp:
                         for u in url_list:
@@ -935,6 +958,15 @@ class PipelineExecutor:
                     _stale = 0
                     while proc.poll() is None:
                         _time.sleep(_POLL_INTERVAL)
+                        # 检查中止信号
+                        try:
+                            import redis as _rds
+                            _r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1)
+                            if _r.ping() and _r.exists(f"scan:abort:{self.asset_id}"):
+                                proc.kill(); proc.wait()
+                                raise RuntimeError("scan aborted by user")
+                        except RuntimeError: raise
+                        except Exception: pass
                         try:
                             _cur = os.path.getsize(str(_log_file))
                         except OSError:
@@ -955,7 +987,7 @@ class PipelineExecutor:
                 self.ctx["_last_tool_log"] = str(_log_file)
             except Exception as exc:
                 msg = str(exc)
-                kind = "stale" if "stale" in msg else "exec_error"
+                kind = "aborted" if "abort" in msg.lower() else ("stale" if "stale" in msg else "exec_error")
                 errors.append({
                     "tool": tool,
                     "target": _target_label(tgt),
@@ -965,6 +997,9 @@ class PipelineExecutor:
                 })
                 _cleanup_iteration_file()
                 _stdin.close() if _stdin else None
+                # 用户中止不标记已扫描，下次恢复
+                if "abort" in str(exc).lower():
+                    mark_needed = False
                 continue
 
             if _stdin:

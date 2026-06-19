@@ -1,0 +1,11 @@
+selectors:
+  naabu:
+    desc: 端口扫描 — 取未扫过的非内网IP
+    query: "MATCH (a:Asset {id: $asset_id})\nCALL {\n  WITH a\n  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)\n\
+      \  RETURN ip\n  UNION\n  WITH a\n  MATCH (a)-[:HAS_IP]->(ip:IP)\n  RETURN ip\n\
+      }\nWITH DISTINCT ip\nWHERE NOT (ip.value STARTS WITH '10.')\n  AND NOT (ip.value\
+      \ STARTS WITH '192.168.')\n  AND NOT (ip.value STARTS WITH '127.')\n  AND NOT\
+      \ (ip.value = '0.0.0.0')\n  AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool\
+      \ = $tool AND sr.target = ip.value }\nRETURN ip.value AS ip"
+    mapping:
+      ip: '{targets_file}'

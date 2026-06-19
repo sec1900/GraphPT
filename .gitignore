@@ -21,6 +21,9 @@ artifacts/
 tools/**
 !tools/**/
 !tools/**/tool.yaml
+!tools/**/targets.yaml
+!tools/**/adapter.py
+!tools/**/secrets_rules.yaml
 !tools/**/README.md
 !tools/**/*.py
 # 但第三方工具自带的安装目录（如 nmap 的 zenmap）整体忽略，不要被 *.py 规则捞回来
@@ -58,3 +61,4 @@ bin/__pycache__/
 dump.rdb
 *.png
 .playwright-mcp/
+data/tmp/

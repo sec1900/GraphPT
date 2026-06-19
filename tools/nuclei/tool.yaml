@@ -1,5 +1,5 @@
 desc: "漏洞扫描（批量模式，全量模板）"
-command: "{bin} -list {urls_file} -jsonl -silent"
+command: "{bin} -list {urls_file} -jsonl -silent -rate-limit 5 -timeout 10 -retries 2"
 use_on:
   Endpoint:
     desc: "对 Endpoint 执行漏洞扫描，批量模式"

@@ -1,0 +1,8 @@
+selectors:
+  dnsx:
+    desc: DNS解析 — 取未解析的子域名
+    query: "MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)\n\
+      WHERE NOT (s)-[:RESOLVES_TO]->(:IP)\n  AND NOT EXISTS { MATCH (sr:ScanRun) WHERE\
+      \ sr.tool = $tool AND sr.target = s.value }\nRETURN s.value AS domain"
+    mapping:
+      domain: '{targets_file}'

@@ -239,6 +239,7 @@
         <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
       </div>
       <button class="btn" onclick="startFullScan()" id="btn-start-scan" style="margin-left:12px;background:var(--green)">Start Full Scan</button>
+      <button class="btn outline" onclick="abortScan()" id="btn-abort-scan" style="display:none;margin-left:4px;background:var(--red);color:#fff">Abort</button>
       <label style="margin-left:12px;font-size:11px;color:var(--muted);cursor:pointer">
         <input type="checkbox" id="dash-auto-refresh" onchange="toggleAutoDashboard()"> Auto (30s)
       </label>
@@ -922,6 +923,17 @@ async function loadDashboard() {
           return sum + done / Math.max(1, l.tools.length);
         }, 0) / Math.max(1, sp.data.layers.length) * 100;
         cards.push({label:'Scan Progress', value: Math.round(overall)+'%', cls:'accent'});
+      }
+    } catch(e) {}
+
+    // Scan history
+    try {
+      const hRes = await fetch(aq(API + '/scan/history?asset_id=' + currentAsset));
+      const h = await hRes.json();
+      if (h.ok && h.data.last_scan) {
+        const lastTime = fmtTime(h.data.last_scan);
+        cards.push({label:'Last Scan', value: lastTime, cls:'accent'});
+        cards.push({label:'Total Scans', value: h.data.total_scans, cls:'green'});
       }
     } catch(e) {}
 
@@ -1816,7 +1828,14 @@ function esc(s) {
 
 function fmtTime(t) {
   if (!t) return '-';
-  try { return new Date(t).toLocaleString(); } catch(e) { return t; }
+  try {
+    const diff = (Date.now() - new Date(t).getTime()) / 1000;
+    if (diff < 60) return 'just now';
+    if (diff < 3600) return Math.round(diff/60) + 'm ago';
+    if (diff < 86400) return Math.round(diff/3600) + 'h ago';
+    if (diff < 604800) return Math.round(diff/86400) + 'd ago';
+    return new Date(t).toLocaleDateString();
+  } catch(e) { return t; }
 }
 
 function fmtSize(n) {
@@ -2951,18 +2970,15 @@ let _scanPoll = null;
 
 async function startFullScan() {
   const btn = document.getElementById('btn-start-scan');
-  btn.disabled = true; btn.textContent = 'Previewing...';
+  const abort = document.getElementById('btn-abort-scan');
+  btn.disabled = true; btn.textContent = 'Scanning...';
+  abort.style.display = 'inline-block';
   try {
-    // Preview first
     const r = await fetch('/api/scan/start', {method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({asset_id:currentAsset, dispatch:true})});
     const d = await r.json();
     if (d.ok) {
-      if (d.data.status === 'already_running') {
-        toast('Scan already running');
-      } else {
-        toast('Started: ' + d.data.preview.length + ' tools');
-      }
+      toast('Scan dispatched to Celery workers');
       document.getElementById('scan-progress-bar').style.display = 'block';
       pollScanProgress();
     } else {
@@ -2970,6 +2986,17 @@ async function startFullScan() {
     }
   } catch(e) { toast(e.message, false); }
   btn.disabled = false; btn.textContent = 'Start Full Scan';
+  abort.style.display = 'none';
+}
+
+async function abortScan() {
+  if (!confirm('Abort all running scans?')) return;
+  try {
+    const r = await fetch('/api/scan/abort', {method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({asset_id:currentAsset})});
+    const d = await r.json();
+    if (d.ok) toast('Scan aborted');
+  } catch(e) { toast(e.message, false); }
 }
 
 async function refreshScanProgress() {
@@ -3006,11 +3033,27 @@ async function refreshScanProgress() {
 function pollScanProgress() {
   document.getElementById('scan-progress-bar').style.display = 'block';
   if (_scanPoll) clearInterval(_scanPoll);
+  let wasRunning = true;
   _scanPoll = setInterval(async () => {
     const alive = await refreshScanProgress();
-    if (!alive) { clearInterval(_scanPoll); _scanPoll = null; toast('Scan complete!'); }
+    if (!alive && wasRunning) {
+      clearInterval(_scanPoll); _scanPoll = null;
+      toast('Scan complete! All tools finished.');
+      document.getElementById('btn-start-scan').style.background = '';
+      // Browser notification
+      if (Notification.permission === 'granted') {
+        new Notification('GraphPT Scan Complete', {body: 'All tools finished for ' + currentAsset});
+      }
+      loadDashboard();
+    }
+    wasRunning = alive;
   }, 3000);
 }
+
+// Ask for notification permission on first user click
+document.addEventListener('click', () => {
+  if (Notification.permission === 'default') Notification.requestPermission();
+}, {once: true});
 
 // Auto-refresh toggle
 let _autoRefresh = false;

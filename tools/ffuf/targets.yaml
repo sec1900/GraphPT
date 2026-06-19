@@ -1,0 +1,22 @@
+selectors:
+  ffuf:
+    desc: Web Fuzz — 取未fuzz的HTTPEndpoint（含Subdomain直连路径）
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        RETURN ep
+      }
+      WITH DISTINCT ep
+      WHERE ep.status_code > 0
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+      RETURN ep.url AS url, ep.id AS parent_id
+    mapping:
+      url: "{url}"
+      parent_id: "{parent_id}"

@@ -1,0 +1,11 @@
+selectors:
+  subfinder:
+    desc: 子域名被动发现 — 取未扫过的根域名
+    query: 'MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
+
+      WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target =
+      rd.value }
+
+      RETURN rd.value AS domain'
+    mapping:
+      domain: '{targets_file}'

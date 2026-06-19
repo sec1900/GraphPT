@@ -1,0 +1,49 @@
+selectors:
+  httpx:
+    desc: "Web指纹探测 — 全量(子域名 + IP:Port, 兼容旧调用)"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
+        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.value }
+        RETURN s.value AS target
+        UNION
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(p:Port)
+        WITH ip.value + ':' + toString(p.number) AS target
+        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
+        RETURN target
+        UNION
+        MATCH (a)-[:HAS_IP]->(ip:IP)-[:HAS_PORT]->(p:Port)
+        WITH ip.value + ':' + toString(p.number) AS target
+        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
+        RETURN target
+      }
+      RETURN DISTINCT target AS url
+    mapping:
+      url: "{urls_file}"
+  httpx:subdomain:
+    desc: "Web指纹探测 — Layer 2: 仅扫子域名"
+    query: |
+      MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
+      WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.value }
+      RETURN s.value AS url
+    mapping:
+      url: "{urls_file}"
+  httpx:port:
+    desc: "Web指纹探测 — Layer 4: 仅扫IP:Port"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(p:Port)
+        WITH ip.value + ':' + toString(p.number) AS target
+        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
+        RETURN target
+        UNION
+        MATCH (a)-[:HAS_IP]->(ip:IP)-[:HAS_PORT]->(p:Port)
+        WITH ip.value + ':' + toString(p.number) AS target
+        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
+        RETURN target
+      }
+      RETURN DISTINCT target AS url
+    mapping:
+      url: "{urls_file}"

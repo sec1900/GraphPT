@@ -1,0 +1,19 @@
+selectors:
+  403bypass:
+    desc: 403绕过 — 取403状态的DirEntry + HTTPEndpoint (排除已绕过成功的)
+    query: "MATCH (a:Asset {id: $asset_id})\nCALL {\n  WITH a\n  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:EXPOSES_PATH]->(d:DirEntry)\n\
+      \  RETURN ep, d\n  UNION\n  WITH a\n  MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:EXPOSES_PATH]->(d:DirEntry)\n\
+      \  RETURN ep, d\n}\nWITH DISTINCT ep, d\nWHERE d.status_code = 403\n  AND NOT\
+      \ EXISTS { MATCH (d)-[:BYPASS_ATTEMPT]->(b:BypassResult) WHERE b.success = true\
+      \ }\nRETURN d.id AS id,\n       CASE WHEN ep.url ENDS WITH '/'\n           \
+      \ THEN substring(ep.url, 0, size(ep.url) - 1) + d.path\n            ELSE ep.url\
+      \ + d.path END AS url,\n       'dir_entry' AS kind,\n       coalesce(d.method,\
+      \ 'GET') AS method\nUNION\nMATCH (a:Asset {id: $asset_id})\nCALL {\n  WITH a\n\
+      \  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)\n\
+      \  RETURN ep\n  UNION\n  WITH a\n  MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)\n\
+      \  RETURN ep\n}\nWITH DISTINCT ep\nWHERE ep.status_code = 403\n  AND NOT EXISTS\
+      \ { MATCH (ep)-[:BYPASS_ATTEMPT]->(b:BypassResult) WHERE b.success = true }\n\
+      RETURN ep.id AS id, ep.url AS url, 'http_endpoint' AS kind, 'GET' AS method"
+    mapping:
+      url: '{url}'
+      id: '{target_id}'
