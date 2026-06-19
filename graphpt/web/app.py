@@ -254,6 +254,71 @@ async def dashboard_counts(asset_id: str = "default"):
         return _json_error(exc)
 
 
+@web_app.get("/api/dashboard/endpoints")
+async def dashboard_endpoints(asset_id: str = "default", limit: int = 15):
+    """最近发现的端点列表。"""
+    try:
+        rows = _neo4j_query(
+            """
+            MATCH (a:Asset {id: $aid})
+            CALL (a) {
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
+              UNION
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
+            }
+            RETURN DISTINCT ep.url AS url, ep.status_code AS status_code, ep.title AS title, ep.crawl_status AS status
+            ORDER BY ep.url
+            LIMIT $lim
+            """,
+            aid=asset_id, lim=min(limit, 50),
+        )
+        return {"ok": True, "data": [dict(r) for r in rows]}
+    except Exception as exc:
+        return _json_error(exc)
+
+
+@web_app.get("/api/dashboard/recent")
+async def dashboard_recent(asset_id: str = "default", limit: int = 10):
+    """最近变化。"""
+    try:
+        changes = _neo4j_query(
+            """
+            MATCH (a:Asset {id: $aid})
+            CALL (a) {
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              WHERE ep.changed_at IS NOT NULL
+              RETURN ep.url AS url, ep.title AS title, ep.changed_at AS ts, ep.changed_fields AS fields
+              UNION
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              WHERE ep.changed_at IS NOT NULL
+              RETURN ep.url AS url, ep.title AS title, ep.changed_at AS ts, ep.changed_fields AS fields
+            }
+            RETURN DISTINCT url, title, ts, fields
+            ORDER BY ts DESC
+            LIMIT $lim
+            """,
+            aid=asset_id, lim=min(limit, 50),
+        )
+        recent_subs = _neo4j_query(
+            """
+            MATCH (a:Asset {id: $aid})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
+            WHERE s.created_at IS NOT NULL
+            RETURN s.value AS subdomain, s.created_at AS ts
+            ORDER BY s.created_at DESC
+            LIMIT $lim2
+            """,
+            aid=asset_id, lim2=max(limit // 2, 3),
+        )
+        return {"ok": True, "data": {
+            "recent_changes": [dict(r) for r in changes],
+            "recent_subdomains": [dict(r) for r in recent_subs],
+        }}
+    except Exception as exc:
+        return _json_error(exc)
+
+
 @web_app.get("/api/dashboard")
 async def dashboard(asset_id: str = "default"):
     """返回仪表盘统计数据。"""
