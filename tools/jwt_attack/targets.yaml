@@ -8,10 +8,9 @@ selectors:
         AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.id }
       RETURN s.value_preview AS value, s.id AS target_id
       UNION
-      MATCH (a:Asset {id: $asset_id})
-      MATCH (ep:File)-[:MAY_CONTAIN]->(s:Secret)
+      MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:REFERENCES]->(f:File)-[:MAY_CONTAIN]->(s:Secret)
       WHERE s.secret_type CONTAINS 'jwt'
         AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.id }
       RETURN s.value_preview AS value, s.id AS target_id
     mapping:
-      token: '{value}'
+      value: '{token}'

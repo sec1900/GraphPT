@@ -13,7 +13,8 @@ selectors:
       WITH DISTINCT ep
       WHERE (ep.url CONTAINS '?' OR ep.method IN ['POST', 'PUT', 'PATCH'])
         AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
-      RETURN ep.url AS url
+      RETURN ep.url AS url, ep.method AS method
       LIMIT 50
     mapping:
       url: '{url}'
+      method: '{method}'

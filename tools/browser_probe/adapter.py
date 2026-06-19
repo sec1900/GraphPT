@@ -44,6 +44,7 @@ class BrowserProbeAdapter(BaseAdapter):
                     "type": "api_endpoint",
                     "url": url,
                     "method": obj.get("method", "GET"),
+                    "parent_id": ctx.get("parent_id", ""),
                     "source": obj.get("source", "browser_probe"),
                     "asset_id": asset_id,
                 })

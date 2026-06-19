@@ -8,7 +8,7 @@ selectors:
       \ }\nRETURN d.id AS id,\n       CASE WHEN ep.url ENDS WITH '/'\n           \
       \ THEN substring(ep.url, 0, size(ep.url) - 1) + d.path\n            ELSE ep.url\
       \ + d.path END AS url,\n       'dir_entry' AS kind,\n       coalesce(d.method,\
-      \ 'GET') AS method\nUNION\nMATCH (a:Asset {id: $asset_id})\nCALL {\n  WITH a\n\
+      \ 'GET') AS method, [] AS tech\nUNION\nMATCH (a:Asset {id: $asset_id})\nCALL {\n  WITH a\n\
       \  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)\n\
       \  RETURN ep\n  UNION\n  WITH a\n  MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)\n\
       \  RETURN ep\n}\nWITH DISTINCT ep\nWHERE ep.status_code = 403\n  AND NOT EXISTS\

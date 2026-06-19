@@ -114,6 +114,28 @@ Layer 7 · 验证 + 利用 ─ 确认漏洞、注入利用、窃取凭证
 
 
 ═══════════════════════════════════════════
+   第三轮审计 — adapter+targets+pipeline (11项)
+═══════════════════════════════════════════
+
+🔴 致命 — 调度器跑起来默默失败 (全部已修 ✅)
+─────────────────────────────────────
+D1. 403bypass UNION 列数不匹配             ✅ 第一段 RETURN 补 [] AS tech
+D2. jwt_attack mapping key 写错             ✅ value: '{token}'
+D3. sqlmap {output_dir} 无来源             ✅ 从命令中移除
+D4. oob {server}/{token} 无来源            ✅ 从命令中移除
+D5. 403bypass WAF {tech} 无来源            ✅ 已被 D1 修复 (tech 列已补)
+D6. cloud_metadata 缺 parent_id            ✅ CALL 子查询 + RETURN + mapping
+
+🟠 严重 — 数据污染 / 节点孤立 (全部已修 ✅)
+─────────────────────────────────────
+D7. enscan 公司名写 RootDomain             ⏭ 跳过 (不在调度器)
+D8. dnsx CNAME 缺 root_domain             ⏭ 跳过 (MERGE 幂等保护)
+D9. nuclei/sqlmap endpoint_id 硬编码 GET   ✅ 从 request 提取真实 method
+D10. jwt_attack 第二分支未限定 asset       ✅ 补全 HAS_ROOT→REFERENCES 路径
+D11. browser_probe api_endpoint 缺 parent  ✅ ctx.get("parent_id")
+
+
+═══════════════════════════════════════════
            长期方向 (Tier 4)
 ═══════════════════════════════════════════
 

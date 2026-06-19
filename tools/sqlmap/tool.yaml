@@ -1,7 +1,5 @@
-desc: "SQLi 自动化利用 — 验证 nuclei 发现的注入点"
-command: "python {bin} -u {url} --batch --random-agent --level=3 --risk=2 --flush-session --output-dir={output_dir}"
+desc: "SQLi 自动化利用 — 对所有带参数 URL 自动测试注入"
+command: "python {bin} -u {url} --batch --random-agent --level=3 --risk=2 --flush-session"
 use_on:
   Vulnerability:
     desc: "对 SQLi 漏洞做自动化利用验证"
-    params:
-      output_dir: "data/artifacts/sqlmap"

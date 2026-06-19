@@ -53,7 +53,8 @@ class NucleiAdapter(BaseAdapter):
             ).strip()
             evidence = str(obj.get("extracted-results") or obj.get("matcher-name") or obj.get("curl-command") or "")
             detail = str(info.get("description") or obj.get("template") or "")
-            endpoint_id = f"ep:GET:{endpoint_url}"
+            method = str(obj.get("request", "GET ")).split(" ", 1)[0] or "GET"
+            endpoint_id = f"ep:{method}:{endpoint_url}"
 
             key = (endpoint_id, template_id or title)
             if key in seen:

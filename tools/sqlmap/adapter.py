@@ -60,7 +60,7 @@ class SqlmapAdapter(BaseAdapter):
 
         findings.append({
             "type": "vulnerability",
-            "endpoint_id": f"ep:GET:{target_url}",
+            "endpoint_id": f"ep:{ctx.get('method', 'GET')}:{target_url}",
             "vuln_type": "sqli_confirmed",
             "title": f"SQL Injection ({', '.join(techniques)}) — {dbms}" if techniques else f"SQL Injection — {dbms}",
             "severity": "critical",
