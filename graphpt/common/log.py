@@ -71,9 +71,9 @@ def get_logger(name: str) -> logging.Logger:
             try:
                 from graphpt.common.paths import PROJECT_ROOT
 
-                log_dir = PROJECT_ROOT / "debug" / "logs"
+                log_dir = PROJECT_ROOT / "data" / "debug" / "logs"
             except Exception:  # noqa: BLE001
-                log_dir = Path.cwd() / "debug" / "logs"
+                log_dir = Path.cwd() / "data" / "debug" / "logs"
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
             file_handler = logging.FileHandler(log_dir / "graphpt.log.jsonl", encoding="utf-8")

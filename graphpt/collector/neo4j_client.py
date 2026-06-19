@@ -24,7 +24,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # ---- 连接 ----
 
-_URI = os.getenv("NEO4J_URI", "bolt://neo4j:7687")
+from dotenv import load_dotenv
+load_dotenv()
+
+_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 _USER = os.getenv("NEO4J_USER", "neo4j")
 _PASSWORD = os.getenv("NEO4J_PASSWORD", "graphpt123")
 
@@ -77,6 +80,9 @@ CREATE CONSTRAINT httpendpoint_id IF NOT EXISTS FOR (n:HTTPEndpoint) REQUIRE n.i
 CREATE CONSTRAINT file_id IF NOT EXISTS FOR (n:File) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT apiendpoint_id IF NOT EXISTS FOR (n:ApiEndpoint) REQUIRE n.id IS UNIQUE;
 CREATE CONSTRAINT vulnerability_id IF NOT EXISTS FOR (n:Vulnerability) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT oobinteraction_id IF NOT EXISTS FOR (n:OOBInteraction) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT credential_id IF NOT EXISTS FOR (n:Credential) REQUIRE n.id IS UNIQUE;
+CREATE CONSTRAINT scanrun_id IF NOT EXISTS FOR (n:ScanRun) REQUIRE n.id IS UNIQUE;
 
 // 索引 — 加速查询
 CREATE INDEX asset_name IF NOT EXISTS FOR (n:Asset) ON (n.name);
@@ -86,6 +92,7 @@ CREATE INDEX httpendpoint_url IF NOT EXISTS FOR (n:HTTPEndpoint) ON (n.url);
 CREATE INDEX httpendpoint_status IF NOT EXISTS FOR (n:HTTPEndpoint) ON (n.crawl_status);
 CREATE INDEX apiendpoint_path IF NOT EXISTS FOR (n:ApiEndpoint) ON (n.path);
 CREATE INDEX port_number IF NOT EXISTS FOR (n:Port) ON (n.number);
+CREATE INDEX scanrun_tool_asset IF NOT EXISTS FOR (n:ScanRun) ON (n.tool, n.asset_id);
 """
 
 
@@ -738,7 +745,7 @@ class GraphWriter:
             # asset_id 常含冒号等文件系统非法字符（asset:lab-acme），安全化为目录名
             import re as _re
             aid = _re.sub(r'[<>:"/\\|?*]', "_", asset_id or "default")
-            rel_dir = Path("artifacts") / "bypass" / aid
+            rel_dir = Path("data") / "artifacts" / "bypass" / aid
             abs_dir = _PROJECT_ROOT / rel_dir
             try:
                 abs_dir.mkdir(parents=True, exist_ok=True)
@@ -749,7 +756,7 @@ class GraphWriter:
                 )
                 (abs_dir / fname).write_text(packet_text, encoding="utf-8")
                 packet_path = str(rel_dir / fname).replace("\\", "/")
-                packet_url = "/" + packet_path
+                packet_url = "/artifacts/bypass/" + aid + "/" + fname
             except OSError:
                 packet_path = ""
                 packet_url = ""
@@ -919,6 +926,83 @@ class GraphWriter:
                     api_id=api_id, file_id=file_id,
                 )
             return {"id": api_id}
+
+    def _write_oob_callback(
+        self,
+        *,
+        protocol: str = "",
+        unique_id: str = "",
+        full_id: str = "",
+        remote_address: str = "",
+        raw_request: str = "",
+        timestamp: str = "",
+        asset_id: str = "",
+        _session: Any | None = None,
+    ) -> dict[str, Any]:
+        """记录 OOB 回调交互证据。"""
+        import hashlib
+        cb_id = f"oob:{hashlib.md5((unique_id or full_id).encode()).hexdigest()[:16]}"
+        now = _now_iso()
+        with self._acquire_session(_session) as session:
+            session.run(
+                """
+                MERGE (oob:OOBInteraction {id: $id})
+                  SET oob.protocol = $protocol,
+                      oob.full_id = $full_id,
+                      oob.remote_address = $remote_address,
+                      oob.raw_request = $raw_request,
+                      oob.timestamp = $timestamp,
+                      oob.created_at = $now
+                WITH oob
+                MATCH (a:Asset {id: $asset_id})
+                MERGE (a)-[:HAS_OOB]->(oob)
+                """,
+                id=cb_id, protocol=protocol, full_id=full_id,
+                remote_address=remote_address, raw_request=raw_request[:3000],
+                timestamp=timestamp, asset_id=asset_id, now=now,
+            )
+        return {"id": cb_id, "protocol": protocol}
+
+    def _write_weak_credential(
+        self,
+        *,
+        service: str = "",
+        host: str = "",
+        port: int = 0,
+        parent_id: str = "",
+        username: str = "",
+        password: str = "",
+        cred_type: str = "",
+        evidence: str = "",
+        severity: str = "high",
+        source: str = "",
+        _session: Any | None = None,
+    ) -> dict[str, Any]:
+        """写入弱口令/未授权 Credential 节点，关联到 IP。"""
+        import hashlib
+        cid = f"cred:{hashlib.md5(f'{host}:{port}:{username}:{password}:{service}'.encode()).hexdigest()[:16]}"
+        now = _now_iso()
+        with self._acquire_session(_session) as session:
+            session.run(
+                """
+                MERGE (c:Credential {id: $id})
+                  SET c.service = $service, c.host = $host, c.port = $port,
+                      c.username = $username, c.password = $password,
+                      c.cred_type = $cred_type, c.evidence = $evidence,
+                      c.severity = $severity, c.source = $source,
+                      c.created_at = coalesce(c.created_at, $now),
+                      c.last_seen = $now
+                WITH c
+                MATCH (ip:IP {id: $parent_id})
+                MERGE (ip)-[:HAS_CREDENTIAL]->(c)
+                """,
+                id=cid, service=service, host=host, port=port,
+                username=username, password=password,
+                cred_type=cred_type, evidence=evidence,
+                severity=severity, source=source, parent_id=parent_id,
+                now=now,
+            )
+        return {"id": cid, "service": service, "host": host, "port": port}
 
     def write_secret(
         self,
@@ -1125,6 +1209,32 @@ class GraphWriter:
                         file_id=f.get("file_id", ""),
                         line=f.get("line", 0),
                         evidence_path=f.get("evidence_path", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "oob_callback":
+                    # OOB 回调证据：记录回调交互，关联到资产
+                    result = self._write_oob_callback(
+                        protocol=f.get("protocol", ""),
+                        unique_id=f.get("unique_id", ""),
+                        full_id=f.get("full_id", ""),
+                        remote_address=f.get("remote_address", ""),
+                        raw_request=f.get("raw_request", "")[:3000],
+                        timestamp=f.get("timestamp", ""),
+                        asset_id=asset_id or f.get("asset_id", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "weak_credential":
+                    result = self._write_weak_credential(
+                        service=f.get("service", ""),
+                        host=f.get("host", ""),
+                        port=f.get("port", 0),
+                        parent_id=f.get("parent_id", ""),
+                        username=f.get("username", ""),
+                        password=f.get("password", ""),
+                        cred_type=f.get("cred_type", ""),
+                        evidence=f.get("evidence", ""),
+                        severity=f.get("severity", "high"),
+                        source=f.get("source", ""),
                         _session=batch_session,
                     )
                 if result:

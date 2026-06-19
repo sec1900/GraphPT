@@ -14,7 +14,7 @@ _PRIMARY_DIR_NAMES: dict[str, str] = {
     "inputs": "inputs",
     "state": ".graphpt/state",
     "findings": "findings",
-    "artifacts": "artifacts",
+    "artifacts": "data/artifacts",
     "cache": ".graphpt/cache",
     "reports": "reports",
 }

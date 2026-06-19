@@ -1,0 +1,7 @@
+desc: "弱口令爆破 — 40+ 协议默认凭据/弱口令检测"
+command: "{bin} -H {target_url} -c : -e nsr -w 5s -output-format json -q"
+use_on:
+  Port:
+    desc: "对 IP:Port 做弱口令爆破（空白/相同/反转 三种检测）"
+    params:
+      target_url: "{service}://{parent_ip}:{number}"

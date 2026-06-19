@@ -247,6 +247,7 @@ _ALIAS_NODE_TYPE: dict[str, str] = {
     "vhost": "IP",
     "subdomain": "Subdomain",
     "port": "Port",
+    "takeover": "Subdomain",
 }
 
 
@@ -322,6 +323,44 @@ _TRANSFORMS: dict[str, Any] = {}  # 后处理函数注册表
 def _register_transform(name: str, func: Any) -> None:
     """注册一个目标提取后处理函数（如 nuclei_tags）。"""
     _TRANSFORMS[name] = func
+
+
+def _transform_infer_service(target: Any) -> str:
+    """Port → service scheme 映射（给 brutespray 拼 service://host:port）。"""
+    port_to_service = {
+        21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns",
+        110: "pop3", 143: "imap", 389: "ldap", 445: "smb", 636: "ldaps",
+        873: "rsync", 993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle",
+        2049: "nfs", 3306: "mysql", 3389: "rdp", 5432: "postgres",
+        5900: "vnc", 5985: "winrm", 5986: "winrm", 6379: "redis",
+        8080: "http", 8443: "https", 9200: "elastic", 11211: "memcached", 27017: "mongodb",
+    }
+    target = str(target or "").strip()
+    if not target:
+        return target
+    parts = target.rsplit(":", 1)
+    if len(parts) == 2:
+        try:
+            port = int(parts[1])
+            svc = port_to_service.get(port, "")
+            if svc:
+                return f"{svc}://{target}"
+        except ValueError:
+            pass
+    return target
+
+
+_register_transform("infer_service_from_port", _transform_infer_service)
+
+
+def _transform_join_tech(tech: Any) -> str:
+    """tech[] → 逗号分隔字符串（给 403bypass --waf 用）。"""
+    if isinstance(tech, list):
+        return ",".join(str(t) for t in tech if t)
+    return str(tech or "")
+
+
+_register_transform("join_tech", _transform_join_tech)
 
 
 def _transform_nuclei_tags(tech: Any) -> str:
@@ -689,12 +728,14 @@ class PipelineExecutor:
                         UNWIND $rows AS row
                         MERGE (sr:ScanRun {id: row.rid})
                         SET sr.tool = $tool, sr.target = row.label,
+                            sr.asset_id = $asset_id,
                             sr.findings_count = $fc, sr.last_run_at = $now,
                             sr.finished_at = $now,
                             sr.started_at = coalesce(sr.started_at, $now),
                             sr.created_at = coalesce(sr.created_at, $now)
                         """,
-                        rows=rows, tool=tool, fc=findings_count, now=now,
+                        rows=rows, tool=tool, asset_id=self.asset_id,
+                        fc=findings_count, now=now,
                     )
         except Exception as exc:
             import logging
@@ -932,6 +973,26 @@ class PipelineExecutor:
                 _cleanup_iteration_file()
                 continue
             cmd = _split_command(cmd_str)
+
+            # OOB 自动注入：nuclei/httpx 等工具自动追加 -interactsh-url
+            _oob_used = False
+            if base in ("nuclei", "httpx", "httpx:port", "httpx:subdomain", "ffuf"):
+                try:
+                    from graphpt.collector.oob_service import get_oob_service
+                    _oob = get_oob_service()
+                    if not _oob.is_running:
+                        _oob_domain = _oob.start()
+                        if _oob_domain:
+                            cmd.append("-interactsh-url")
+                            cmd.append(_oob_domain)
+                            _oob_used = True
+                    elif _oob.domain:
+                        cmd.append("-interactsh-url")
+                        cmd.append(_oob.domain)
+                        _oob_used = True
+                except Exception:
+                    pass
+
             # 工具输出写日志(流式,浏览器实时可见), 同时收齐供 adapter 解析
             import hashlib, time as _time
             _tool_log = _PROJECT_ROOT / "data" / "logs" / base
@@ -1066,6 +1127,27 @@ class PipelineExecutor:
                     })
                     _cleanup_iteration_file()
                     continue
+
+            # 收集 OOB 回调（nuclei 等工具跑完后 poll interactsh）
+            if _oob_used:
+                try:
+                    from graphpt.collector.oob_service import get_oob_service
+                    _oob_svc = get_oob_service()
+                    _callbacks = _oob_svc.poll(timeout_s=10)
+                    for _cb in _callbacks:
+                        findings.append({
+                            "type": "oob_callback",
+                            "protocol": _cb.get("protocol", ""),
+                            "unique_id": _cb.get("unique_id", ""),
+                            "full_id": _cb.get("full_id", ""),
+                            "remote_address": _cb.get("remote_address", ""),
+                            "raw_request": _cb.get("raw_request", "")[:3000],
+                            "timestamp": _cb.get("timestamp", ""),
+                            "source": "interactsh",
+                            "asset_id": self.asset_id,
+                        })
+                except Exception:
+                    pass
 
             if proc.returncode != 0 and not findings:
                 _cleanup_iteration_file()

@@ -398,7 +398,7 @@ def _snapshot_tree_files(base_dir: Path, workspace_root: Path, snap: dict[str, f
 def snapshot_workspace(workspace_root: Path) -> dict[str, float]:
     """快照工作区文件（相对路径 → mtime），用于 diff 检测新文件。
 
-    扫描 workspace_root 直属文件，以及 artifacts/ 与 cache/res 的递归文件。
+    扫描 workspace_root 直属文件，以及 data/ 与 cache/res 的递归文件。
     """
     snap: dict[str, float] = {}
     try:
@@ -408,7 +408,7 @@ def snapshot_workspace(workspace_root: Path) -> dict[str, float]:
         for entry in os.scandir(resolved):
             if entry.is_file(follow_symlinks=False):
                 snap[entry.name] = entry.stat().st_mtime
-            elif entry.is_dir(follow_symlinks=False) and entry.name in {"artifacts", *cache_dir_names}:
+            elif entry.is_dir(follow_symlinks=False) and entry.name in {"data", *cache_dir_names}:
                 _snapshot_tree_files(Path(entry.path), resolved, snap)
     except OSError:
         pass  # 快照失败不阻塞主流程

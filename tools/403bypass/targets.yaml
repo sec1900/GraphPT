@@ -13,7 +13,10 @@ selectors:
       \  RETURN ep\n  UNION\n  WITH a\n  MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)\n\
       \  RETURN ep\n}\nWITH DISTINCT ep\nWHERE ep.status_code = 403\n  AND NOT EXISTS\
       \ { MATCH (ep)-[:BYPASS_ATTEMPT]->(b:BypassResult) WHERE b.success = true }\n\
-      RETURN ep.id AS id, ep.url AS url, 'http_endpoint' AS kind, 'GET' AS method"
+      RETURN ep.id AS id, ep.url AS url, 'http_endpoint' AS kind, 'GET' AS method, coalesce(ep.tech, []) AS tech"
     mapping:
       url: '{url}'
       id: '{target_id}'
+      tech: '{tech}'
+    transform:
+      tech: join_tech

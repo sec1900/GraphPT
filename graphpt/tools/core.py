@@ -479,7 +479,7 @@ def inspect_workspace_output_naming(workspace_root: Path, *, limit: int = 20) ->
     scan_roots = [
         workspace_root / ".graphpt" / "cache",
         workspace_root / "res",
-        workspace_root / "artifacts" / "evidence",
+        workspace_root / "data" / "artifacts" / "evidence",
     ]
     for scan_root in scan_roots:
         if not scan_root.exists() or not scan_root.is_dir():

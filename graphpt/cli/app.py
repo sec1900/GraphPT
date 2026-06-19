@@ -488,7 +488,7 @@ def _build_turn_context(browser_task_id: int | None = None) -> str:
 
     if ws and ws.exists():
         try:
-            af = sorted(ws.glob("artifacts/*"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]
+            af = sorted(ws.glob("data/artifacts/*"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]
             if af:
                 lines.append("[artifacts] " + ", ".join(p.name for p in af))
         except Exception:
@@ -567,19 +567,19 @@ def _build_cli_system_prompt() -> str:
         "所有 Read/Write/Edit/Grep/Glob 操作默认在此目录内。\n"
         "目录结构:\n"
         "  .graphpt/cache/         — 工具大输出(>8k)自动落这里,你不需要手动往里写\n"
-        "  artifacts/screenshots/ — 浏览器截图(PNG),调用 browser_take_screenshot 时存这里\n"
-        "  artifacts/responses/   — HTTP 响应留证(HTML/JSON)\n"
+        "  data/artifacts/screenshots/ — 浏览器截图(PNG),调用 browser_take_screenshot 时存这里\n"
+        "  data/artifacts/responses/   — HTTP 响应留证(HTML/JSON)\n"
         "  reports/               — 最终分析报告(Markdown)\n"
         "  findings/              — 漏洞证据(每个 finding 一个子目录: Write @evidence/<id>_<slug>)\n"
         "  operations/            — subagent 产物(target_model.json 等)\n\n"
         "文件放置规则:\n"
         "  1. Bash 命令输出自动处理,≤8k 内联返回,>8k 自动写 .graphpt/cache/,你不需要手动重定向\n"
         "  2. browser_snapshot 不需要落盘,结果已内联返回,直接分析即可\n"
-        "  3. browser_screenshot → artifacts/screenshots/xxx.png\n"
-        "  4. HTTP 响应留证 → artifacts/responses/xxx.html 或 xxx.json\n"
+        "  3. browser_screenshot → data/artifacts/screenshots/xxx.png\n"
+        "  4. HTTP 响应留证 → data/artifacts/responses/xxx.html 或 xxx.json\n"
         "  5. 分析报告 → reports/xxx.md\n"
         "  6. 漏洞证据 → findings/<id>/ 或 Write @evidence/<id>\n"
-        "  7. 禁止往 artifacts/ 根目录直接写文件\n\n"
+        "  7. 禁止往 data/artifacts/ 根目录直接写文件\n\n"
         "用户提到目标时，先确认是否已有侦察产物，有则基于已有成果推进。"
         "信息不足自己获取，不要停在原地等用户补充。\n"
     )
@@ -664,7 +664,7 @@ def _init_project_workspace() -> bool:
       .graphpt/cache/      工具中间产物（命令大输出等），会话结束可清理
       .graphpt/data/db/    SQLite 数据库
       findings/           漏洞证据（每个 finding 一个子目录，结构化）
-      artifacts/          人工可读的证据（截图、HTTP 响应、提取数据）
+      data/artifacts/     人工可读的证据（截图、HTTP 响应、提取数据）
         screenshots/      浏览器截图 (PNG)
         responses/        HTTP 响应体 (HTML/JSON)
       reports/            最终分析报告 (Markdown)
@@ -682,9 +682,9 @@ def _init_project_workspace() -> bool:
         ".graphpt/session",
         "findings",
         "operations",
-        "artifacts",
-        "artifacts/screenshots",
-        "artifacts/responses",
+        "data/artifacts",
+        "data/artifacts/screenshots",
+        "data/artifacts/responses",
         "reports",
     ]
     for sub in subdirs:

@@ -1,0 +1,7 @@
+desc: "浏览器驱动端点发现 — JS 渲染后提取隐藏链接/表单/API"
+command: "python {bin} --url {url} --json"
+use_on:
+  HTTPEndpoint:
+    desc: "对 HTTPEndpoint 做浏览器渲染，发现隐藏的链接/表单/API"
+    params:
+      url: "{url}"

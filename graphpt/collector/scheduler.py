@@ -38,10 +38,15 @@ def _count_active_assets(r: Any) -> int:
     """统计当前有活跃任务的资产数（至少 1，避免除零）。"""
     try:
         count = 0
-        for k in r.keys("scheduler:slots:*"):
-            v = r.get(k)
-            if v and int(v or 0) > 0:
-                count += 1
+        cursor = 0
+        while True:
+            cursor, keys = r.scan(cursor, match="scheduler:slots:*", count=100)
+            for k in keys:
+                v = r.get(k)
+                if v and int(v or 0) > 0:
+                    count += 1
+            if cursor == 0:
+                break
         return max(count, 1)
     except Exception:
         return 1
@@ -78,46 +83,106 @@ def _slot_release(r: Any, asset_id: str) -> None:
 # 而非图节点，由种子阶段（bootstrap_asset）触发。
 #
 # nuclei 单独置于 observer_ward 之后的一层:nuclei 的 tag 选择依赖 observer_ward
-# 写入的 tech[] 指纹，跨层串行保证指纹先入图（无需额外门控）。
+# 7 层攻击链：每层消费上一层的产出节点，跨层串行保证数据先入图。
 #
-# secretfinder（消费 File + HTTPEndpoint 节点）置于第 6 层:File 由 katana(第5层)产出，
-# HTTPEndpoint 由 httpx(第4层)/katana(第5层)产出，跨层串行保证内容先入图，
-# 下一轮 secretfinder 才有目标做敏感信息检测。
+# 层间关系由 Neo4j 节点依赖自然门控：
+#   RootDomain → Subdomain → IP → Port → HTTPEndpoint → Vulnerability/Secret
+# 上层工具没产出节点 → 下层 _query_targets 返回 0 → 不会空转。
 _DEPENDENCY_LAYERS: list[dict[str, Any]] = [
-    # Layer 1: 子域名发现 (被动 + 证书 + URL + DNS 爆破)
-    {"layer": 1, "node": "RootDomain", "tools": ["crt", "subfinder", "urlfinder", "gobuster:dns"]},
-    # Layer 2: 子域名 DNS 解析 + Web 指纹
-    {"layer": 2, "node": "Subdomain", "tools": ["dnsx", "httpx:subdomain"]},
-    # Layer 3: 端口扫描 + VHOST 探测
-    {"layer": 3, "node": "IP", "tools": ["naabu", "gobuster:vhost"]},
-    # Layer 4: 服务识别 + IP:Port Web 指纹
-    {"layer": 4, "node": "IP/Port", "tools": ["nmap", "httpx:port"]},
-    # Layer 5: Web 指纹 + 爬虫 + 目录爆破
-    {"layer": 5, "node": "Endpoint", "tools": ["observer_ward", "katana", "ffuf", "gobuster"]},
-    # Layer 6: 漏洞扫描(nuclei:targeted指纹精准 + nuclei盲扫兜底) + 403绕过 + 敏感信息检测
-    {"layer": 6, "node": "Endpoint(tech)/DirEntry-403/File", "tools": ["nuclei", "403bypass", "secretfinder"]},
+    # ═══════════════════════════════════════════════════════════════
+    # Layer 1: 攻击面发现 — 找到所有入口
+    # 输入: RootDomain 节点 (种子: bootstrap_asset / enscan)
+    # 输出: Subdomain 节点 (crt.sh 证书透明 / subfinder 被动 / urlfinder URL收集
+    #                    / gobuster DNS 爆破 / AXFR 域传送)
+    # 工具消费 RootDomain，产出 Subdomain
+    {"layer": 1, "node": "RootDomain",
+     "tools": ["crt", "subfinder", "urlfinder", "gobuster:dns", "dns_zonetransfer"]},
+
+    # ═══════════════════════════════════════════════════════════════
+    # Layer 2: DNS 解析 + 存活验证 — 把域名变成 IP
+    # 输入: Subdomain 节点 (Layer 1 产出)
+    # 输出: IP 节点 (dnsx A记录解析)
+    #       HTTPEndpoint 节点 (httpx:subdomain 直接对子域名做 HTTP 指纹)
+    #       Vulnerability 节点 (nuclei:takeover 检测悬空 CNAME)
+    # 工具消费 Subdomain，产出 IP + 子域名级别的 HTTPEndpoint
+    {"layer": 2, "node": "Subdomain",
+     "tools": ["dnsx", "httpx:subdomain", "nuclei:takeover"]},
+
+    # ═══════════════════════════════════════════════════════════════
+    # Layer 3: 端口扫描 — 发现 IP 上的开放端口
+    # 输入: IP 节点 (Layer 2 产出)
+    # 输出: Port 节点 (naabu 快速端口扫描)
+    #       HTTPEndpoint 节点 (gobuster:vhost 虚拟主机爆破)
+    # 工具消费 IP，产出 Port + VHOST 端点
+    {"layer": 3, "node": "IP",
+     "tools": ["naabu", "gobuster:vhost"]},
+
+    # ═══════════════════════════════════════════════════════════════
+    # Layer 4: 服务识别 + 弱口令 — 识别端口上的服务并测试凭据
+    # 输入: Port 节点 (Layer 3 产出)
+    # 输出: Service 节点 (nmap 服务版本识别)
+    #       HTTPEndpoint 节点 (httpx:port 对 IP:Port 做 HTTP 指纹)
+    #       Credential 节点 (brutespray 40+协议弱口令爆破)
+    # 工具消费 IP/Port，产出 Service + HTTPEndpoint + Credential
+    {"layer": 4, "node": "IP/Port",
+     "tools": ["nmap", "httpx:port", "brutespray"]},
+
+    # ═══════════════════════════════════════════════════════════════
+    # Layer 5: 端点发现 — 穷尽所有可访问的 HTTP 端点
+    # 输入: HTTPEndpoint 节点 (Layer 2/4 产出)
+    # 输出: HTTPEndpoint 节点 (observer_ward 技术栈指纹 / katana JS爬虫
+    #                         / ffuf 目录爆破 / gobuster dir爆破
+    #                         / browser_probe JS渲染发现)
+    #       File 节点 (katana JS文件下载)
+    #       DirEntry 节点 (ffuf/gobuster 发现的路径)
+    # 工具消费 HTTPEndpoint，产出更多 HTTPEndpoint + File + DirEntry
+    {"layer": 5, "node": "Endpoint",
+     "tools": ["observer_ward", "katana", "ffuf", "gobuster", "browser_probe"]},
+
+    # ═══════════════════════════════════════════════════════════════
+    # Layer 6: 漏洞发现 + 敏感信息 — 扫描漏洞、发现密钥、绕过访问控制
+    # 输入: HTTPEndpoint + File + DirEntry 节点 (Layer 5 产出)
+    # 输出: Vulnerability 节点 (nuclei 模板匹配漏洞)
+    #       Secret 节点 (secretfinder 密钥/令牌/密码泄露)
+    #       BypassResult 节点 (403bypass 访问控制绕过)
+    # 工具消费 HTTPEndpoint/DirEntry/File，产出 Vulnerability + Secret + BypassResult
+    {"layer": 6, "node": "Endpoint(tech)/DirEntry-403/File",
+     "tools": ["nuclei", "secretfinder", "403bypass"]},
+
+    # ═══════════════════════════════════════════════════════════════
+    # Layer 7: 验证 + 利用 — 确认漏洞、利用注入、窃取凭证
+    # 输入: Vulnerability + Secret 节点 (Layer 6 产出)
+    # 输出: Vulnerability 节点 (sqlmap 确认SQLi → critical)
+    #       Credential 节点 (云元数据窃取)
+    #       OOBInteraction 节点 (带外交互验证)
+    # 工具消费 Vulnerability/Secret，产出确认后的 Vulnerability + Credential
+    {"layer": 7, "node": "Vulnerability/Secret",
+     "tools": ["oob", "sqlmap", "jwt_attack", "cloud_metadata"]},
 ]
 
 
 def _count_targets(tool: str, asset_id: str) -> int:
-    """探测某工具当前有多少待处理目标（只查不跑，限时 10s）。"""
-    from graphpt.collector.pipeline import PipelineExecutor, _tool_command
-    import concurrent.futures
-
-    def _query():
-        executor = PipelineExecutor(
-            {"stages": [{"name": tool, "tool": tool, "command": _tool_command(tool)}]},
-            asset_id=asset_id,
-        )
-        return executor._query_targets(tool)
-
+    """探测某工具当前有多少待处理目标（直接查 Neo4j，不走 PipelineExecutor）。"""
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(_query)
-            targets = future.result(timeout=10)
+        from graphpt.collector.pipeline import _load_target_selectors
+
+        cfg = _load_target_selectors().get(tool, {})
+        query = str(cfg.get("query") or "").strip()
+        if not query:
+            return 1  # 无 targets.yaml 配置 → 跑一次
+
+        from graphpt.collector.neo4j_client import get_graph_writer
+        w = get_graph_writer()
+        with w._driver.session() as s:
+            qparams = {"asset_id": asset_id, "tool": tool}
+            qparams = {k: v for k, v in qparams.items() if v is not None and v != ""}
+            result = s.run(query, **qparams)
+            count = 0
+            for _ in result:
+                count += 1
+            return count
     except Exception:
         return 0
-    return len([t for t in targets if t])
 
 
 def progress(asset_id: str = "default") -> list[dict[str, Any]]:
@@ -139,8 +204,8 @@ def progress(asset_id: str = "default") -> list[dict[str, Any]]:
             for tool in spec["tools"]:
                 remaining = _count_targets(tool, asset_id)
                 done = s.run(
-                    "MATCH (sr:ScanRun {tool: $tool}) RETURN count(sr) AS c",
-                    tool=tool,
+                    "MATCH (sr:ScanRun {tool: $tool, asset_id: $asset_id}) RETURN count(sr) AS c",
+                    tool=tool, asset_id=asset_id,
                 ).single()["c"]
                 total = done + remaining
                 pct = (done / total * 100) if total > 0 else 0
@@ -209,9 +274,12 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
             task_id = None
             if dispatch:
                 task_id = _dispatch_tool(item["tool"], asset_id)
-                if _r and task_id:
-                    _r.setex(f"scheduler:lock:{asset_id}:{item['tool']}",
-                             _LOCK_TTL, task_id or "dispatched")
+                if task_id:
+                    if _r:
+                        _r.setex(f"scheduler:lock:{asset_id}:{item['tool']}",
+                                 _LOCK_TTL, task_id)
+                elif _r:
+                    _slot_release(_r, asset_id)  # dispatch 失败，释放已占槽位
             layer_dispatched.append({
                 "tool": item["tool"],
                 "targets": item["targets"],

@@ -47,11 +47,6 @@ if os.getenv("GRAPHPT_AUTO_SCAN", "").strip() in ("1", "true", "yes"):
             "schedule": crontab(minute=0, hour="*/12"),
             "options": {"queue": "collect"},
         },
-        "subdomain_enum": {
-            "task": "graphpt.collector.tasks.subdomain_enum",
-            "schedule": crontab(minute=0, hour="*/6"),
-            "options": {"queue": "collect"},
-        },
         "dns_resolve": {
             "task": "graphpt.collector.tasks.dns_resolve",
             "schedule": crontab(minute=30, hour="*/2"),

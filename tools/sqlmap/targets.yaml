@@ -1,0 +1,19 @@
+selectors:
+  sqlmap:
+    desc: "SQLi 检测 — 对所有带参数的 URL 自动测试注入"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        RETURN ep
+      }
+      WITH DISTINCT ep
+      WHERE (ep.url CONTAINS '?' OR ep.method IN ['POST', 'PUT', 'PATCH'])
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+      RETURN ep.url AS url
+      LIMIT 50
+    mapping:
+      url: '{url}'

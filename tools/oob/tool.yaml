@@ -1,0 +1,8 @@
+desc: "OOB 带外交互验证 — 轮询 interactsh 回调并关联漏洞"
+command: "{bin} -server {server} -token {token} -json -poll-interval 3"
+use_on:
+  Vulnerability:
+    desc: "对 SSRF/XXE/RCE/盲SQLi 漏洞做 OOB 回调验证"
+    params:
+      server: "GRAPHPT_OOB_INTERACTSH_SERVER"
+      token: "GRAPHPT_OOB_INTERACTSH_TOKEN"

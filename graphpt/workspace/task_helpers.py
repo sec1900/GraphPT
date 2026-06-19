@@ -202,7 +202,7 @@ def load_key_information(workspace_root: Path) -> str:
     ordered_files = [
         ("持久记忆", _workspace_key_info_path(workspace_root)),
         ("攻击计划", _workspace_record_process_path(workspace_root)),
-        ("最新摘要", workspace_root / "artifacts" / "latest_summary.md"),
+        ("最新摘要", workspace_root / "data" / "artifacts" / "latest_summary.md"),
     ]
     for title, path in ordered_files:
         if not path.exists():

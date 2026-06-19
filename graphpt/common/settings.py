@@ -11,7 +11,7 @@ DEFAULT_PARALLEL_WORKERS = 5
 DEFAULT_APPROVAL_MODE = "auto_approve"
 DEFAULT_APPROVAL_TIMEOUT_S = 10.0
 DEFAULT_SCHEDULER_MODE = "event"
-DEFAULT_DEBUG_DIR = "debug"
+DEFAULT_DEBUG_DIR = "data/debug"
 # run_command 工具单条命令执行超时的上限（秒）。慢扫描（全端口 nmap、大字典爆破）
 # 可调高此值；模型传入的 timeout_s 会被钳到 [1, 此上限]。
 DEFAULT_CMD_TIMEOUT_MAX_S = 86400.0

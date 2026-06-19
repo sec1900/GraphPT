@@ -3,9 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_WORKSPACE_PREFIXES = ("artifacts/", "reports/", "state/", "cache/", "findings/", "memory/")
+_WORKSPACE_PREFIXES = ("data/artifacts/", "reports/", "state/", "cache/", "findings/", "memory/")
 _WORKSPACE_PREFIX_PATTERN = re.compile(
-    r"(?i)(artifacts|reports|state|cache|findings|memory)[/\\][^:*?\"<>|\r\n]+"
+    r"(?i)(data/artifacts|artifacts|reports|state|cache|findings|memory)[/\\][^:*?\"<>|\r\n]+"
 )
 
 

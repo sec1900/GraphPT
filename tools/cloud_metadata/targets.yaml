@@ -1,0 +1,18 @@
+selectors:
+  cloud_metadata:
+    desc: "SSRF 漏洞 — 自动探测云平台元数据端点"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+        RETURN v, ep.url AS endpoint_url
+        UNION
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+        RETURN v, ep.url AS endpoint_url
+      }
+      WITH DISTINCT v, endpoint_url
+      WHERE v.type IN ['ssrf', 'server-side-request-forgery']
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = v.id }
+      RETURN v.id AS target_id, endpoint_url AS url
+    mapping:
+      url: '{url}'

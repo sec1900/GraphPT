@@ -1,0 +1,17 @@
+selectors:
+  jwt_attack:
+    desc: "JWT token 检测 — secretfinder 发现的 JWT"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_CONTAIN]->(s:Secret)
+      WHERE s.secret_type CONTAINS 'jwt'
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.id }
+      RETURN s.value_preview AS value, s.id AS target_id
+      UNION
+      MATCH (a:Asset {id: $asset_id})
+      MATCH (ep:File)-[:MAY_CONTAIN]->(s:Secret)
+      WHERE s.secret_type CONTAINS 'jwt'
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.id }
+      RETURN s.value_preview AS value, s.id AS target_id
+    mapping:
+      token: '{value}'

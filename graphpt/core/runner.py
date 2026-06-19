@@ -914,8 +914,6 @@ def _call_ai_raw_stream_single(
             retryable=not success_recorded,
             meta={"phase": "stream_read"},
         )
-        if not success_recorded:
-            breaker.record_failure(read_error)
         raise read_error from exc
     finally:
         resp.close()

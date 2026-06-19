@@ -1,20 +1,97 @@
 GraphPT 待办事项
 ================
+最后更新: 2026-06-20
 
-🔴 紧急（影响基本可用性）
-✅ 1. 断点续扫：_mark_scanned_batch 每 chunk 立即写 ScanRun，同一 try 块保证原子性。
-✅ 2. _mark_scanned_batch 错误不再吞：打日志 + re-raise，失败 chunk 下次重扫。
-✅ 3. 活性检测：proc.poll() 轮询 + 日志文件增长检测，5 分钟无产出 → kill，替代死等。
-✅ 4. Layer 2 vs Layer 4 httpx 拆分：httpx:subdomain / httpx:port 各自查各自的节点。
 
-🟡 重要（提升效率）
-✅ 5. 适配器拆分：15 个适配器移至 tools/<name>/adapter.py，基类 + 自动发现保留在 adapter.py。
-✅ 6. gobuster DNS/VHOST 接入调度链：gobuster:dns (Layer 1) + gobuster:vhost (Layer 3) + gobuster dir (Layer 5)。
-✅ 7. Web 面板实时日志查看：Tool 选择器 + 文件列表 + 内容阅读 + 3 秒自动刷新。
-✅ 8. Neo4j write_batch 优化：开一个 session，所有 finding 共享，代替每个 write_* 单独开。
-✅ 9. 提取器统一：pipeline.py _BATCH_TARGETS 硬编码字典 → tools/<name>/targets.yaml + 自动加载 + transform 注册表。
-✅ 10. 资产管理 API：GET/POST/PATCH/DELETE + 根域名种子 + 前端统计展示。
-✅ 11. 资源隔离：动态槽位 = max(1, GRAPHPT_CONCURRENCY / 活跃资产数)，env 可配。
+═══════════════════════════════════════════
+          已完成 (本轮全量修改)
+═══════════════════════════════════════════
 
-🟢 规划（长期方向）
-12. 报告导出：PDF/HTML/Markdown 报告生成。
+── 修复 ──
+
+1. runner.py:918 — breaker.record_failure() 未定义 NameError
+2. app.py:50 — Celery Beat 引用不存在的 subdomain_enum 任务
+3. scheduler.py — 调度 slot 泄漏：dispatch 失败未释放槽位
+4. progress() 全局 ScanRun 计数 → ScanRun + asset_id + 索引
+5. _count_targets 每次创建 PipelineExecutor → 直接 Cypher
+6. Redis KEYS * → SCAN 迭代
+7. 目录合并: artifacts/ + debug/ → data/
+8. neo4j_client 默认 localhost + dotenv 加载
+9. PoC 管理: res/nuclei-templates/ + res/poc/ 项目自包含
+
+── Tier 1: 攻击链闭环 ──
+
+10. OOB 带外交互验证
+    tools/oob/ + oob_service.py + pipeline auto-inject
+    ⚠ 需自建 interactsh server
+
+11. 弱口令检测
+    tools/brutespray/ 40+ 协议 Layer 4
+
+12. 子域名接管检测
+    nuclei:takeover Layer 2
+
+── Tier 2: 攻击平台 ──
+
+13. sqlmap 自动化 SQLi
+    tools/sqlmap/ Layer 7, 对参数化 URL 主动测试
+
+14. WAF 自适应绕过
+    403bypass + 6家WAF专用payload (Cloudflare/AWS/ModSecurity/F5/Imperva/Akamai)
+
+── Tier 3: 红队特色 ──
+
+15. 浏览器驱动端点发现
+    tools/browser_probe/ + Playwright Layer 5
+
+16. JWT 攻击
+    tools/jwt_attack/ alg=none / 弱HMAC / kid注入 Layer 7
+
+17. 云元数据 SSRF
+    tools/cloud_metadata/ AWS/GCP/Azure 凭证窃取 Layer 7
+
+18. DNS 域传送
+    tools/dns_zonetransfer/ AXFR Layer 1
+
+
+═══════════════════════════════════════════
+       7 层攻击链 (25 工具)
+═══════════════════════════════════════════
+
+Layer 1 · 攻击面发现 ─ 找到所有入口
+  crt / subfinder / urlfinder / gobuster:dns / dns_zonetransfer
+  产出: Subdomain
+
+Layer 2 · DNS解析 + 接管 ─ 域名→IP
+  dnsx / httpx:subdomain / nuclei:takeover
+  产出: IP
+
+Layer 3 · 端口扫描 ─ 发现开放端口
+  naabu / gobuster:vhost
+  产出: Port
+
+Layer 4 · 服务识别 + 弱口令 ─ 识别服务、测试凭据
+  nmap / httpx:port / brutespray
+  产出: Service + HTTPEndpoint + Credential
+
+Layer 5 · 端点发现 ─ 穷尽所有HTTP端点
+  observer_ward / katana / ffuf / gobuster / browser_probe
+  产出: HTTPEndpoint + File + DirEntry
+
+Layer 6 · 漏洞发现 ─ 扫描漏洞、检测密钥、绕过访问
+  nuclei / secretfinder / 403bypass
+  产出: Vulnerability + Secret + BypassResult
+
+Layer 7 · 验证 + 利用 ─ 确认漏洞、注入利用、窃取凭证
+  oob / sqlmap / jwt_attack / cloud_metadata
+  产出: 确认的 Vulnerability + Credential + OOBInteraction
+
+
+═══════════════════════════════════════════
+           长期方向 (Tier 4)
+═══════════════════════════════════════════
+
+19. C2 集成 — 发现 RCE 后自动部署 beacon
+20. 持久化检测 — WebShell / 计划任务
+21. 云资产枚举 — FOFA/Shodan API 接入
+22. 报告导出 — PDF/HTML/Markdown

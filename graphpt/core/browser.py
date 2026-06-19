@@ -94,7 +94,7 @@ def _browser_state(task_id: int) -> dict[str, Any]:
 def _browser_session_state_path(workspace_root: Path | None, task_id: int) -> tuple[Path | None, str]:
     if workspace_root is None:
         return None, ""
-    sessions_dir = workspace_root / "artifacts" / "browser_sessions"
+    sessions_dir = workspace_root / "data" / "artifacts" / "browser_sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
     path = sessions_dir / f"task_{int(task_id or 0)}_live_state.json"
     return path, str(path.relative_to(workspace_root)).replace("\\", "/")
@@ -883,7 +883,7 @@ def _sanitize_session_name(raw: str) -> str:
 
 
 def _session_artifact_path(workspace_root: Path, *, session_name: str) -> tuple[Path, str]:
-    sessions_dir = workspace_root / "artifacts" / "browser_sessions"
+    sessions_dir = workspace_root / "data" / "artifacts" / "browser_sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
     filename = _sanitize_session_name(session_name)
     if not filename.endswith(".json"):
@@ -1483,7 +1483,7 @@ def _exec_browser_screenshot(
 
     # 确定保存路径
     if workspace_root:
-        screenshots_dir = workspace_root / "artifacts" / "screenshots"
+        screenshots_dir = workspace_root / "data" / "artifacts" / "screenshots"
     else:
         screenshots_dir = Path("screenshots")
     screenshots_dir.mkdir(parents=True, exist_ok=True)
@@ -1520,12 +1520,12 @@ def _exec_browser_get_content(page: Any, args: dict[str, Any], *, workspace_root
     # 大内容写独立文件 + 返回 preview
     if workspace_root and len(content) > _PREVIEW_CHARS:
         _ws = Path(str(workspace_root))
-        _art_dir = _ws / "artifacts"
+        _art_dir = _ws / "data" / "artifacts"
         _art_dir.mkdir(parents=True, exist_ok=True)
         _fname = f"browser_{int(time.time())}.txt"
         try:
             (_art_dir / _fname).write_text(content, encoding="utf-8")
-            result["content_file"] = f"artifacts/{_fname}"
+            result["content_file"] = f"data/artifacts/{_fname}"
         except OSError:
             pass
         result["content"] = content[:_PREVIEW_CHARS] + f"\n\n... [完整内容 {len(content)} 字符，见 content_file]"

@@ -1,0 +1,9 @@
+selectors:
+  dns_zonetransfer:
+    desc: "DNS 域传送 — 对 RootDomain 的 NS 服务器尝试 AXFR"
+    query: |
+      MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
+      WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = rd.value }
+      RETURN rd.value AS value
+    mapping:
+      value: '{domain}'

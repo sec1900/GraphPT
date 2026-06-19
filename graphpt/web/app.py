@@ -32,7 +32,7 @@ web_app = FastAPI(title="GraphPT Admin", version="0.1.0")
 
 # 采集产物（403 绕过数据包等）静态服务：BypassResult.packet_url 指向 /artifacts/...
 # 浏览器直接打开即可查看原始请求/响应数据包。
-_ARTIFACTS_DIR = _PROJECT_ROOT / "artifacts"
+_ARTIFACTS_DIR = _PROJECT_ROOT / "data" / "artifacts"
 _ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 web_app.mount(
     "/artifacts",

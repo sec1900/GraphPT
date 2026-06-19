@@ -30,6 +30,7 @@ tools/**
 tools/nmap/zenmap/
 tools/nmap/ndiff.py
 res/toolkit/
+res/nuclei-templates/
 res/poc/
 res/skills/
 
