@@ -976,10 +976,13 @@ async def explorer_roots(asset_id: str = "default"):
             for r in rows
         ]
 
-        # 独立 IP（无 RootDomain 路径的）
+        # 独立 IP（排除已在 RootDomain→Subdomain 路径中的 IP）
         standalone = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})-[:HAS_IP]->(ip:IP)
+            WHERE NOT EXISTS {
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip)
+            }
             OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
             RETURN ip.id AS id, ip.value AS value, ip.sources AS sources,
                    ip.created_at AS created_at, count(DISTINCT p) AS port_cnt
