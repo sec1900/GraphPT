@@ -2197,13 +2197,16 @@ async def global_search(q: str = "", asset_id: str = "default", limit: int = 15)
 
 @web_app.get("/api/nodes/{node_id}")
 async def node_detail(node_id: str):
-    """节点属性 + 关联 Vuln/Secret。"""
+    """节点属性 + 关联子节点 + Vuln/Secret（穿透图路径）。"""
     try:
         rows = _neo4j_query("""
             MATCH (n) WHERE n.id = $nid
-            OPTIONAL MATCH (n)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
-            OPTIONAL MATCH (n)-[:MAY_CONTAIN]->(s:Secret)
-            RETURN n, collect(DISTINCT v)[..10] AS vulns, collect(DISTINCT s)[..10] AS secrets
+            CALL (n) { OPTIONAL MATCH (n)-[:HAS_PORT]->(p:Port) RETURN collect(DISTINCT {id: p.id, number: p.number, protocol: p.protocol})[..20] AS ports }
+            CALL (n) { OPTIONAL MATCH (n)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN collect(DISTINCT {url: ep.url, status: ep.status_code, title: ep.title})[..20] AS endpoints }
+            CALL (n) { OPTIONAL MATCH (n)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability) RETURN collect(DISTINCT {title: v.title, severity: v.severity, type: v.type})[..20] AS vulns }
+            CALL (n) { OPTIONAL MATCH (n)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(:HTTPEndpoint)-[:MAY_CONTAIN]->(s:Secret) RETURN collect(DISTINCT {type: s.secret_type, preview: s.value_preview})[..10] AS secrets }
+            CALL (n) { OPTIONAL MATCH (n)-[:HAS_CREDENTIAL]->(c:Credential) RETURN collect(DISTINCT {service: c.service, cred_type: c.cred_type})[..10] AS creds }
+            RETURN n, ports, endpoints, vulns, secrets, creds
         """, nid=node_id)
         if not rows: raise HTTPException(404, "node not found")
         r = rows[0]
@@ -2211,8 +2214,13 @@ async def node_detail(node_id: str):
         return {"ok": True, "data": {
             "labels": list(r["n"].labels),
             "properties": props,
-            "vulnerabilities": [{"title":v.get("title",""),"severity":v.get("severity","")} for v in (r["vulns"] or []) if v],
-            "secrets": [{"type":s.get("type",""),"preview":s.get("value_preview",""),"evidence":(s.get("evidence_path","") or "").replace(chr(92), "/")} for s in (r["secrets"] or []) if s],
+            "children": {
+                "ports": [dict(x) for x in (r["ports"] or []) if x and x.get("id")],
+                "endpoints": [dict(x) for x in (r["endpoints"] or []) if x and x.get("url")],
+            },
+            "vulnerabilities": [dict(x) for x in (r["vulns"] or []) if x and x.get("title")],
+            "secrets": [dict(x) for x in (r["secrets"] or []) if x and x.get("type")],
+            "credentials": [dict(x) for x in (r["creds"] or []) if x and x.get("service")],
         }}
     except HTTPException: raise
     except Exception as exc: return _json_error(exc)
