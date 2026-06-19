@@ -1007,7 +1007,7 @@ class PipelineExecutor:
                 _stdfile = _urls
                 _stdin = open(_urls, "r", encoding="utf-8", errors="replace")
             _STALE_TIMEOUT = 300   # 5 分钟日志文件无增长 → 判定卡死
-            _POLL_INTERVAL = int(os.getenv("GRAPHPT_POLL_INTERVAL", "30"))  # 巡检间隔(秒), 默认30
+            _POLL_INTERVAL = int(os.getenv("GRAPHPT_POLL_INTERVAL", "2"))  # 基础巡检间隔(秒), 默认2
 
             try:
                 # stdout → log 文件(流式,浏览器 tail), 不经过 PIPE 避免工具缓冲卡死
@@ -1017,8 +1017,18 @@ class PipelineExecutor:
                                             stdin=_stdin, stdout=_lf, stderr=subprocess.STDOUT)
                     _last_size = 0
                     _stale = 0
+                    _no_growth_cycles = 0   # 连续无增长的巡检周期数
                     while proc.poll() is None:
-                        _time.sleep(_POLL_INTERVAL)
+                        # 自适应巡检间隔：活跃 2s → 无增长 3 次 → 5s → 再 3 次 → 10s → 最多 30s
+                        if _no_growth_cycles < 3:
+                            _sleep = _POLL_INTERVAL           # 2s
+                        elif _no_growth_cycles < 6:
+                            _sleep = max(5, _POLL_INTERVAL)   # 5s
+                        elif _no_growth_cycles < 9:
+                            _sleep = max(10, _POLL_INTERVAL)  # 10s
+                        else:
+                            _sleep = max(30, _POLL_INTERVAL)  # 30s
+                        _time.sleep(_sleep)
                         # 检查中止信号
                         try:
                             import redis as _rds
@@ -1035,8 +1045,10 @@ class PipelineExecutor:
                         if _cur > _last_size:
                             _last_size = _cur
                             _stale = 0
+                            _no_growth_cycles = 0   # 有产出，重置为快速巡检
                         else:
-                            _stale += _POLL_INTERVAL
+                            _stale += _sleep
+                            _no_growth_cycles += 1
                             if _stale >= _STALE_TIMEOUT:
                                 proc.kill()
                                 proc.wait()
