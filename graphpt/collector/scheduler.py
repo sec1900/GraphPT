@@ -24,8 +24,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
+
+_log = logging.getLogger("graphpt.scheduler")
 
 # ---- 资源隔离 ----
 
@@ -57,18 +60,20 @@ def _slot_acquire(r: Any, asset_id: str) -> bool:
     active = _count_active_assets(r)
     limit = max(1, _MAX_CONCURRENCY // active)
     slot_key = f"scheduler:slots:{asset_id}"
-    current = int(r.get(slot_key) or 0)
-    if current >= limit:
+    current = r.incr(slot_key)  # 原子操作，先加再判断
+    r.expire(slot_key, 3600)    # 1h TTL 兜底
+    if current > limit:
+        r.decr(slot_key)        # 超限，回退
         return False
-    r.incr(slot_key)
-    r.expire(slot_key, 3600)  # 1h TTL 兜底
     return True
 
 
 def _slot_release(r: Any, asset_id: str) -> None:
-    """释放一个槽位。"""
+    """释放一个槽位（不低于 0）。"""
     try:
-        r.decr(f"scheduler:slots:{asset_id}")
+        key = f"scheduler:slots:{asset_id}"
+        if int(r.get(key) or 0) > 0:
+            r.decr(key)
     except Exception:
         pass
 
@@ -182,6 +187,7 @@ def _count_targets(tool: str, asset_id: str) -> int:
                 count += 1
             return count
     except Exception:
+        _log.warning("_count_targets_failed", exc_info=True, extra={"tool": tool, "asset_id": asset_id})
         return 0
 
 
@@ -241,6 +247,7 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
         _r.ping()
     except Exception:
         _r = None
+        _log.warning("advance_once_no_redis", extra={"asset_id": asset_id})
 
     all_dispatched: list[dict[str, Any]] = []
     has_any = False
@@ -254,10 +261,6 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
             if n <= 0:
                 continue
             has_any = True
-            lock_key = f"scheduler:lock:{asset_id}:{tool}"
-            if _r and _r.exists(lock_key):
-                skipped.append(tool)
-                continue
             ready.append({"tool": tool, "targets": n})
 
         if not ready:
@@ -268,7 +271,13 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
         slots_full = False
         for item in ready:
             if dispatch and _r:
+                # 原子设锁 + 槽位获取
+                lock_key = f"scheduler:lock:{asset_id}:{item['tool']}"
+                if not _r.set(lock_key, "pending", nx=True, ex=_LOCK_TTL):
+                    skipped.append(item["tool"])
+                    continue  # 已被其他 advance_once 派发
                 if not _slot_acquire(_r, asset_id):
+                    _r.delete(lock_key)  # 槽满，释放刚设的锁
                     slots_full = True
                     break
             task_id = None
@@ -276,10 +285,10 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
                 task_id = _dispatch_tool(item["tool"], asset_id)
                 if task_id:
                     if _r:
-                        _r.setex(f"scheduler:lock:{asset_id}:{item['tool']}",
-                                 _LOCK_TTL, task_id)
+                        _r.setex(lock_key, _LOCK_TTL, task_id)  # 更新锁值为 task_id
                 elif _r:
-                    _slot_release(_r, asset_id)  # dispatch 失败，释放已占槽位
+                    _r.delete(lock_key)         # 派发失败，清锁
+                    _slot_release(_r, asset_id)
             layer_dispatched.append({
                 "tool": item["tool"],
                 "targets": item["targets"],

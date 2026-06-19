@@ -12,10 +12,13 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger("graphpt.adapter")
 
 
 class Finding(dict):
@@ -87,7 +90,7 @@ def _discover_adapters() -> None:
             __sys.modules[module_name] = module  # 注册到 sys.modules，供 globals 注入查找
             spec.loader.exec_module(module)
         except Exception:
-            pass  # 单个适配器加载失败不影响其他
+            _log.warning("adapter_load_failed", exc_info=True, extra={"file": str(adapter_file)})
 
 
 # 模块首次导入时自动发现

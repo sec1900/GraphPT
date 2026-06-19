@@ -1058,6 +1058,11 @@ class PipelineExecutor:
                 })
                 _cleanup_iteration_file()
                 _stdin.close() if _stdin else None
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
                 # 用户中止不标记已扫描，下次恢复
                 if "abort" in str(exc).lower():
                     mark_needed = False
@@ -1073,7 +1078,7 @@ class PipelineExecutor:
                     "kind": "nonzero_exit",
                     "message": f"tool exited with code {proc.returncode}",
                     "return_code": proc.returncode,
-                    "stderr": (proc.stderr or "")[:2000],
+                    "log_file": str(_log_file),
                     "command": cmd,
                 })
                 _cleanup_iteration_file()
@@ -1085,7 +1090,7 @@ class PipelineExecutor:
                     "kind": "nonzero_exit",
                     "message": f"tool exited with code {proc.returncode}",
                     "return_code": proc.returncode,
-                    "stderr": (proc.stderr or "")[:2000],
+                    "log_file": str(_log_file),
                     "command": cmd,
                 })
 
@@ -1148,6 +1153,11 @@ class PipelineExecutor:
                         })
                 except Exception:
                     pass
+                finally:
+                    try:
+                        _oob_svc.stop()
+                    except Exception:
+                        pass
 
             if proc.returncode != 0 and not findings:
                 _cleanup_iteration_file()

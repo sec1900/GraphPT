@@ -18,6 +18,9 @@ from typing import Any
 from neo4j import GraphDatabase, Session
 
 from graphpt.common.asset_identity import normalize_url
+from graphpt.common.log import get_logger
+
+_log = get_logger(__name__)
 
 # 项目根目录（neo4j_client.py 在 graphpt/collector/ 下，上溯三级）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -1237,6 +1240,9 @@ class GraphWriter:
                         source=f.get("source", ""),
                         _session=batch_session,
                     )
+                else:
+                    _log.warning("write_batch_unrecognized_type",
+                                 extra={"ftype": ftype, "finding_keys": list(f.keys())[:5]})
                 if result:
                     results.append(result)
         return results
