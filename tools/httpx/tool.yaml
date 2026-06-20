@@ -2,9 +2,10 @@ desc: "Web 指纹探测"
 command: "{bin} -l {urls_file} -json -timeout 10 -retries 1 -title -status-code -tech-detect -content-length -silent -nc"
 use_on:
   Subdomain:
-    desc: "探测子域名是否有 Web 服务"
+    desc: "探测子域名是否有 Web 服务(迭代, -u 逐个)"
+    command: "{bin} -u {url} -json -timeout 10 -retries 1 -title -status-code -tech-detect -content-length -silent -nc"
     params:
-      urls_file: "{value}"
+      url: "{url}"
   IP:
     desc: "探测 IP 是否有 Web 服务"
     params:
