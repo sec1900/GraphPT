@@ -189,3 +189,14 @@ def run_server(host: str = "127.0.0.1", port: int = 8888, asset_id: str = "defau
         stats = TrafficIngestHandler.get_stats()
         print(f"  Stats: {stats['requests']} requests, {stats['domains']} domains, "
               f"{stats['endpoints']} endpoints, {stats['files']} files")
+
+
+if __name__ == "__main__":
+    import argparse
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(message)s")
+    p = argparse.ArgumentParser(description="GraphPT 被动流量采集代理")
+    p.add_argument("--host", default="127.0.0.1", help="监听地址 (默认 127.0.0.1)")
+    p.add_argument("--port", type=int, default=8888, help="监听端口 (默认 8888)")
+    p.add_argument("--asset-id", default="default", help="资产 ID (默认 default)")
+    args = p.parse_args()
+    run_server(host=args.host, port=args.port, asset_id=args.asset_id)
