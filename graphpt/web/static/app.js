@@ -2260,8 +2260,10 @@ function refreshLog() {
 }
 
 function toggleAutoRefresh() {
-  const on = document.getElementById('logs-auto-refresh').checked;
-  if (on) {
+  const cb = document.getElementById('logs-auto-refresh');
+  if (!cb) return;
+  const on = cb.checked;
+  if (on && document.getElementById('page-logs')?.classList.contains('active')) {
     _logsPoll = setInterval(() => {
       if (_logsFile) loadLogContent();
       else refreshLog();
