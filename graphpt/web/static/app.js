@@ -2625,9 +2625,9 @@ async function showNodeDetail(url) {
     } catch (e) { document.getElementById("page-reports").innerHTML = '<div class="loading">Failed: ' + esc(e.message) + '</div>'; }
   }
 
-loadHealth();
-loadDashboard();
-updatePipelineStatus();
+// Lazy init — don't block first render
+setTimeout(loadHealth, 100);
+setTimeout(loadDashboard, 200);
 if (!localStorage.getItem('graphpt_tutorial_done')) { tutOpen(); }
 
 // "?" button in header to reopen tutorial
