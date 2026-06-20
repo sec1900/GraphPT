@@ -247,15 +247,14 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
     同一工具。锁带 TTL 自动过期,防止任务崩溃后永久死锁。
     """
     import redis as _redis
-    _LOCK_TTL = 86400  # 锁硬超时 24 小时（安全兜底，正常由 _release_lock 释放）
-_HEARTBEAT_TTL = 3600      # 心跳 key TTL 1 小时
-_HEARTBEAT_STALE = 300     # 心跳超过 5 分钟无更新 → 判定任务已挂，自动释放
+    _LOCK_TTL = int(os.getenv("GRAPHPT_SCHEDULER_LOCK_TTL", "86400"))
+_HEARTBEAT_TTL = int(os.getenv("GRAPHPT_SCHEDULER_HEARTBEAT_TTL", "3600"))
+_HEARTBEAT_STALE = int(os.getenv("GRAPHPT_SCHEDULER_HEARTBEAT_STALE", "300"))
 
 
 def _redis_client():
-    import redis as _redis
-    return _redis.Redis(host="localhost", port=6379, socket_connect_timeout=2,
-                        decode_responses=True)
+    from graphpt.common.redis_client import get_redis
+    return get_redis(decode_responses=True, socket_connect_timeout=2)
 
 
 def _clear_stale_locks(asset_id: str) -> int:
@@ -321,11 +320,10 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
     锁超时自动清除——任务挂死后 5 分钟自动释放并重试。
     """
     import redis as _redis
-    _LOCK_TTL = 600    # 锁硬超时 10 分钟（正常任务完成后 _release_lock 主动释放）
-    _STALE_TIMEOUT = 300  # 锁超过 5 分钟无更新 → 判定任务已挂，自动释放重试
+    _LOCK_TTL = int(os.getenv("GRAPHPT_SCHEDULER_LOCK_TTL", "600"))
+    _STALE_TIMEOUT = int(os.getenv("GRAPHPT_SCHEDULER_HEARTBEAT_STALE", "300"))
     try:
-        _r = _redis.Redis(host="localhost", port=6379, socket_connect_timeout=2,
-                          decode_responses=True)
+        _r = _redis_client()
         _r.ping()
     except Exception:
         _r = None
@@ -409,9 +407,7 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
 def _release_lock(asset_id: str, tool: str) -> None:
     """任务完成后释放调度锁 + 槽位 + 心跳，触发下一轮 auto_advance。"""
     try:
-        import redis as _redis
-        _r = _redis.Redis(host="localhost", port=6379, socket_connect_timeout=2,
-                          decode_responses=True)
+        _r = _redis_client()
         _r.ping()
         _r.delete(f"scheduler:lock:{asset_id}:{tool}")
         _r.delete(f"scheduler:heartbeat:{asset_id}:{tool}")
@@ -429,10 +425,8 @@ def auto_advance(asset_id: str = "default") -> dict[str, Any]:
 
     用短锁防并发:多个工具同时完成时只有一条线程执行 advance_once。
     """
-    import redis as _redis
     try:
-        _r = _redis.Redis(host="localhost", port=6379, socket_connect_timeout=2,
-                          decode_responses=True)
+        _r = _redis_client()
         _r.ping()
         adv_lock = f"scheduler:advance:{asset_id}"
         if _r.set(adv_lock, "1", nx=True, ex=10):
@@ -471,15 +465,59 @@ _SCAN_STATE: dict[str, dict[str, Any]] = {}  # asset_id → {status, layer, tool
 _SCAN_STATE_LOCK = _threading.Lock()
 
 
+class ScanAborted(Exception):
+    """扫描被用户中止（区别于工具错误，需在整个调用链中识别并停止推进）。"""
+
+
+def _is_aborted(asset_id: str) -> bool:
+    """检查 Redis 中是否存在 active 的中止信号。"""
+    try:
+        _r = _redis_client()
+        _r.ping()
+        return bool(_r.exists(f"scan:abort:{asset_id}"))
+    except Exception:
+        pass
+    return False
+
+
+def clear_scan_state(asset_id: str) -> None:
+    """清除指定 asset 的内存扫描状态（F3: abort/unlock 时调用）。"""
+    with _SCAN_STATE_LOCK:
+        _SCAN_STATE.pop(asset_id, None)
+    # 同时清理 Redis 中的 abort 信号和残留锁
+    try:
+        _r = _redis_client()
+        _r.ping()
+        _r.delete(f"scan:abort:{asset_id}")
+        for pat in (f"scheduler:lock:{asset_id}:*", f"scheduler:heartbeat:{asset_id}:*"):
+            _keys = _r.keys(pat)
+            if _keys:
+                _r.delete(*_keys)
+    except Exception:
+        pass
+
+
 def _run_one_tool(tool: str, asset_id: str) -> dict[str, Any]:
     """直接执行单个工具（不经过 Celery）。
     复用 PipelineExecutor 的完整流程：选目标 → 跑工具 → adapter → 入图 → 标记已扫。
+
+    ScanAborted 和 pipeline 层抛出的 "scan aborted" RuntimeError 均不被吞掉，
+    向上传播以便 run_scan_layer / run_full_scan 停止推进。
     """
     from graphpt.collector.tasks import _run_single_tool_pipeline
 
     _update_heartbeat(asset_id, tool)
     try:
+        # 启动前先检查中止信号（快速路径：还没开始就不必创建 PipelineExecutor）
+        if _is_aborted(asset_id):
+            raise ScanAborted(f"scan aborted before {tool}")
         result = _run_single_tool_pipeline(tool, asset_id=asset_id, stage_name=tool)
+    except ScanAborted:
+        raise  # F2: 不吞中止信号，向上传播
+    except RuntimeError as exc:
+        if "scan aborted" in str(exc).lower():
+            raise ScanAborted(str(exc)) from exc
+        result = {"status": "error", "tool": tool, "error": str(exc)}
     except Exception as exc:
         result = {"status": "error", "tool": tool, "error": str(exc)}
     finally:
@@ -494,6 +532,8 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
     对层内每个 tool，先 _count_targets 判断有无待处理目标，
     有则通过 ThreadPoolExecutor 直接执行 _run_one_tool。
     所有工具完成后返回汇总结果。
+
+    ScanAborted 时取消剩余 future、清状态并向上传播（F2）。
 
     spec: _DEPENDENCY_LAYERS 中的一层，含 layer/node/tools。
     """
@@ -516,13 +556,15 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
     _log.info("layer_%d_start asset=%s tools=%s targets_ready=%d",
               layer_num, asset_id, ready, len(ready))
 
-    # 设锁（防并发调度）+ 更新全局状态
+    # 设锁（防并发调度）+ 更新全局状态（保留父级字段如 round）
     with _SCAN_STATE_LOCK:
-        _SCAN_STATE[asset_id] = {"status": "scanning", "layer": layer_num,
-                                  "tool": None, "tools_total": len(ready),
-                                  "tools_done": 0}
+        st = _SCAN_STATE.get(asset_id, {})
+        st.update({"status": "scanning", "layer": layer_num,
+                   "tool": None, "tools_total": len(ready),
+                   "tools_done": 0})
 
     results: list[dict[str, Any]] = []
+    aborted = False
 
     def _run(tool: str) -> dict[str, Any]:
         with _SCAN_STATE_LOCK:
@@ -530,20 +572,68 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
             st["tool"] = tool
         try:
             return _run_one_tool(tool, asset_id)
+        except ScanAborted:
+            raise  # F2: 向上传播，外层处理
         finally:
             with _SCAN_STATE_LOCK:
                 st = _SCAN_STATE.get(asset_id, {})
                 st["tools_done"] = st.get("tools_done", 0) + 1
 
+    # F1: 线程级硬超时 — 兜底安全网，防止 read1 阻塞导致轮询循环卡死。
+    # 基于 GRAPHPT_STALE_TIMEOUT × 2（默认 600s），给轮询循环充足余量。
+    _stale_base = int(os.getenv("GRAPHPT_STALE_TIMEOUT", "300"))
+    _PER_TOOL_HARD_TIMEOUT = max(_stale_base * 2, 600)
+
     with _cf.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_run, tool): tool for tool in ready}
-        for future in _cf.as_completed(futures):
-            tool = futures[future]
-            try:
-                results.append(future.result())
-            except Exception as exc:
-                results.append({"tool": tool, "status": "error", "error": str(exc)})
-                _log.error("layer_%d_tool_crash tool=%s error=%s", layer_num, tool, exc)
+        try:
+            for future in _cf.as_completed(futures, timeout=_PER_TOOL_HARD_TIMEOUT):
+                tool = futures[future]
+                try:
+                    # F1: 单工具硬超时 — future.result(timeout) 二次兜底
+                    results.append(future.result(timeout=_PER_TOOL_HARD_TIMEOUT))
+                except _cf.TimeoutError:
+                    _log.error("layer_%d_tool_hard_timeout tool=%s timeout=%ds",
+                              layer_num, tool, _PER_TOOL_HARD_TIMEOUT)
+                    results.append({"tool": tool, "status": "error",
+                                    "error": f"hard timeout after {_PER_TOOL_HARD_TIMEOUT}s"})
+                except ScanAborted:
+                    aborted = True
+                    # 取消所有未完成的 future
+                    for f in futures:
+                        f.cancel()
+                    break
+                except Exception as exc:
+                    results.append({"tool": tool, "status": "error", "error": str(exc)})
+                    _log.error("layer_%d_tool_crash tool=%s error=%s", layer_num, tool, exc)
+        except ScanAborted:
+            aborted = True
+            for f in futures:
+                f.cancel()
+        except _cf.TimeoutError:
+            # as_completed 本身超时：有工具超时未完成
+            _log.error("layer_%d_as_completed_timeout asset=%s timeout=%ds",
+                      layer_num, asset_id, _PER_TOOL_HARD_TIMEOUT)
+            for f in futures:
+                f.cancel()
+            # 收集已完成的结果
+            for f, tool in list(futures.items()):
+                if f.done() and not f.cancelled():
+                    try:
+                        results.append(f.result(timeout=0))
+                    except Exception:
+                        pass
+                elif not f.done():
+                    results.append({"tool": tool, "status": "error",
+                                    "error": f"hard timeout after {_PER_TOOL_HARD_TIMEOUT}s"})
+
+    if aborted:
+        # F2 + F3: 中止时清状态，返回 aborted
+        with _SCAN_STATE_LOCK:
+            st = _SCAN_STATE.get(asset_id, {})
+            st.update({"status": "aborted", "layer": layer_num, "aborted_at": time.time()})
+        _log.info("layer_%d_aborted asset=%s", layer_num, asset_id)
+        raise ScanAborted(f"scan aborted at layer {layer_num}")
 
     total_findings = sum(
         r.get("findings", 0) + r.get("written", 0)
@@ -569,63 +659,123 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
     }
 
 
+def _any_tool_has_targets(asset_id: str) -> bool:
+    """检查所有层的所有工具是否还有未扫描目标。返回 True 表示需要继续推进。"""
+    for spec in _DEPENDENCY_LAYERS:
+        for tool in spec["tools"]:
+            try:
+                if _count_targets(tool, asset_id) > 0:
+                    return True
+            except Exception:
+                pass  # 个别工具的查询可能失败，不影响整体判断
+    return False
+
+
 def run_full_scan(asset_id: str, *,
                   start_layer: int = 1,
                   max_workers: int | None = None) -> dict[str, Any]:
-    """执行完整 7 层攻击链。
+    """执行完整 7 层攻击链，自动循环直到所有目标扫完。
 
-    跨层串行（Layer N 的产出是 Layer N+1 的输入，靠 Neo4j 数据流自然门控），
-    层内并行（同层工具通过 ThreadPoolExecutor 同时跑）。
+    跨层串行，层内并行。每轮每工具最多 MAX_TARGETS 个目标。
+    一轮完成后检查是否还有未扫目标 → 有则继续下一轮，无则结束。
+    用户点击一次 Start，系统持续推到完，无需人工干预。
 
-    此函数直接在调用线程中运行（通常是 Web API 的后台线程），
-    不经过 Celery/Redis 队列，Windows/Linux 行为完全一致。
+    ScanAborted 时立即停止推进、清状态并返回 aborted。
     """
-    _log.info("full_scan_start asset=%s start_layer=%d", asset_id, start_layer)
+    _log.info("full_scan_start asset=%s", asset_id)
 
     with _SCAN_STATE_LOCK:
         _SCAN_STATE[asset_id] = {"status": "scanning", "layer": start_layer,
-                                  "tool": None, "tools_total": 0, "tools_done": 0,
+                                  "tool": None, "round": 0, "total_rounds": "?",
                                   "started_at": time.time()}
 
-    layer_results: list[dict[str, Any]] = []
+    all_layer_results: list[dict[str, Any]] = []
     final_status = "ok"
+    total_findings = 0
+    total_errors = 0
+    aborted_layer = 0
+    current_spec: dict[str, Any] = {}
+    round_num = 0
+    # 安全上限：防止无限循环（大资产可分多轮，此处设一个极高上限）
+    _MAX_ROUNDS = int(os.getenv("GRAPHPT_MAX_SCAN_ROUNDS", "5000"))
 
-    for spec in _DEPENDENCY_LAYERS:
-        if spec["layer"] < start_layer:
-            continue
+    try:
+        while round_num < _MAX_ROUNDS:
+            round_num += 1
 
-        # 每层开始前清理过期锁
-        try:
-            _clear_stale_locks(asset_id)
-        except Exception:
-            pass
+            # 每轮开始前检查是否还有目标
+            if not _any_tool_has_targets(asset_id):
+                _log.info("full_scan_all_clear asset=%s rounds=%d", asset_id, round_num - 1)
+                break
 
-        result = run_scan_layer(spec, asset_id, max_workers=max_workers)
+            # 检查中止信号
+            if _is_aborted(asset_id):
+                raise ScanAborted(f"scan aborted at round {round_num}")
 
-        layer_results.append(result)
+            with _SCAN_STATE_LOCK:
+                _SCAN_STATE[asset_id].update({
+                    "status": "scanning", "round": round_num,
+                    "layer": start_layer, "tool": None,
+                })
 
-        if result.get("status") == "error":
-            final_status = "partial"
-            _log.warning("full_scan_layer_error asset=%s layer=%d (continuing)", asset_id, spec["layer"])
-        if result.get("status") == "idle":
-            # 该层无目标，继续下一层（后续层可能有之前残留的数据）
-            continue
+            _log.info("full_scan_round_%d asset=%s", round_num, asset_id)
+            round_findings = 0
 
-    total_findings = sum(r.get("findings", 0) for r in layer_results)
-    total_errors = sum(r.get("errors", 0) for r in layer_results)
+            for spec in _DEPENDENCY_LAYERS:
+                current_spec = spec
+                if spec["layer"] < start_layer:
+                    continue
+
+                if _is_aborted(asset_id):
+                    raise ScanAborted(f"scan aborted at round {round_num} layer {spec['layer']}")
+
+                try:
+                    _clear_stale_locks(asset_id)
+                except Exception:
+                    pass
+
+                result = run_scan_layer(spec, asset_id, max_workers=max_workers)
+                all_layer_results.append(result)
+                round_findings += result.get("findings", 0)
+
+                if result.get("status") == "error":
+                    final_status = "partial"
+
+            total_findings += round_findings
+            total_errors += sum(r.get("errors", 0) for r in all_layer_results[-len(_DEPENDENCY_LAYERS):]
+                                if isinstance(r, dict))
+            _log.info("full_scan_round_%d_done asset=%s findings=%d",
+                      round_num, asset_id, round_findings)
+
+    except ScanAborted as exc:
+        aborted_layer = current_spec.get("layer", 0) if current_spec else 0
+        _log.info("full_scan_aborted asset=%s round=%d layer=%d", asset_id, round_num, aborted_layer)
+        with _SCAN_STATE_LOCK:
+            st = _SCAN_STATE.get(asset_id, {})
+            st.update({"status": "aborted", "aborted_at": time.time(),
+                       "aborted_layer": aborted_layer, "round": round_num})
+        return {
+            "status": "aborted",
+            "asset_id": asset_id,
+            "rounds": round_num,
+            "aborted_layer": aborted_layer,
+            "total_findings": total_findings,
+            "total_errors": total_errors,
+        }
 
     with _SCAN_STATE_LOCK:
-        _SCAN_STATE[asset_id] = {"status": "done" if final_status == "ok" else final_status,
-                                  "layer": None, "tool": None,
-                                  "finished_at": time.time()}
+        st = _SCAN_STATE.get(asset_id, {})
+        st.update({"status": "done" if final_status == "ok" else final_status,
+                   "layer": None, "tool": None, "round": round_num,
+                   "finished_at": time.time()})
 
-    _log.info("full_scan_done asset=%s status=%s findings=%d errors=%d layers=%d",
-              asset_id, final_status, total_findings, total_errors, len(layer_results))
+    _log.info("full_scan_done asset=%s status=%s rounds=%d findings=%d errors=%d",
+              asset_id, final_status, round_num, total_findings, total_errors)
 
     return {
         "status": final_status,
         "asset_id": asset_id,
-        "layers": layer_results,
+        "rounds": round_num,
         "total_findings": total_findings,
         "total_errors": total_errors,
     }

@@ -12,7 +12,7 @@ use_on:
     params:
       domain: "{value}"
   IP:
-    desc: "虚拟主机发现"
-    command: "{bin} vhost -u http://{ip} -w res/wordlists/dns_subdomains.txt -t 50"
+    desc: "虚拟主机发现 — Top100 常见 vhost 名"
+    command: "{bin} vhost -u http://{ip} -w res/wordlists/vhosts.txt -t 50"
     params:
       ip: "{value}"

@@ -66,10 +66,21 @@ class OobService:
         self._interactions: list[dict[str, Any]] = []
         self._lock = threading.Lock()
 
-    def start(self, *, timeout_s: float = 20) -> str:
-        """启动 interactsh-client，返回回调域名。失败返回空字符串。"""
+    def start(self, *, timeout_s: float | None = None) -> str:
+        if timeout_s is None:
+            timeout_s = float(os.getenv("GRAPHPT_OOB_START_TIMEOUT", "20"))
+        """启动 interactsh-client，返回回调域名。失败返回空字符串。
+
+        修复：旧进程未清理或假死时先 kill 再重启；超时/异常均确保 cleanup。
+        """
+        # 如果标记为 running 但进程实际已死，先清理再重启
         if self._running:
-            return self._domain
+            if self._proc is not None and self._proc.poll() is not None:
+                # 进程已退出但标记未清除 → 遗留状态，清理后重启
+                _log.warning("oob_process_dead_but_running_flag_set")
+                self._cleanup()
+            else:
+                return self._domain
 
         server = os.environ.get("GRAPHPT_OOB_INTERACTSH_SERVER", "").strip()
         token = os.environ.get("GRAPHPT_OOB_INTERACTSH_TOKEN", "").strip()
@@ -87,31 +98,51 @@ class OobService:
             )
         except FileNotFoundError:
             _log.warning("oob_interactsh_not_found", extra={"cmd": _INTERACTSH_BIN})
+            self._running = False
             return ""
 
         deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            if self._proc.poll() is not None:
-                err = self._proc.stderr.read()[:500] if self._proc.stderr else ""
-                _log.warning("oob_interactsh_exited", extra={"code": self._proc.returncode, "stderr": err})
-                self._proc = None
-                return ""
+        try:
+            import select as _sel
+            while time.time() < deadline:
+                if self._proc.poll() is not None:
+                    err = self._proc.stderr.read()[:500] if self._proc.stderr else ""
+                    _log.warning("oob_interactsh_exited", extra={"code": self._proc.returncode, "stderr": err})
+                    self._cleanup()
+                    return ""
 
-            line = self._proc.stdout.readline() if self._proc.stdout else ""
-            if not line:
+                # 非阻塞读取：用 select 检测 stdout 是否有数据，避免 readline() 永久阻塞
+                stdout = self._proc.stdout
+                if stdout:
+                    try:
+                        ready, _, _ = _sel.select([stdout], [], [], min(timeout_s, 1.0))
+                        if not ready:
+                            time.sleep(0.3)
+                            continue
+                    except (OSError, ValueError):
+                        continue
+                    line = stdout.readline()
+                else:
+                    time.sleep(0.3)
+                    continue
+                if not line:
+                    time.sleep(0.3)
+                    continue
+                try:
+                    data = json.loads(line.strip())
+                    domain = data.get("domain", "")
+                    if domain:
+                        self._domain = domain
+                        self._running = True
+                        _log.info("oob_started", extra={"domain": domain, "server": server or "public"})
+                        return domain
+                except json.JSONDecodeError:
+                    continue
                 time.sleep(0.3)
-                continue
-            try:
-                data = json.loads(line.strip())
-                domain = data.get("domain", "")
-                if domain:
-                    self._domain = domain
-                    self._running = True
-                    _log.info("oob_started", extra={"domain": domain, "server": server or "public"})
-                    return domain
-            except json.JSONDecodeError:
-                continue
-            time.sleep(0.3)
+        except Exception:
+            _log.warning("oob_startup_error")
+            self._cleanup()
+            return ""
 
         _log.warning("oob_startup_timeout", extra={"timeout_s": timeout_s})
         self._cleanup()
@@ -173,7 +204,6 @@ class OobService:
     def stop(self) -> None:
         self._cleanup()
         self._domain = ""
-        self._running = False
 
     def _cleanup(self) -> None:
         if self._proc:
@@ -183,9 +213,11 @@ class OobService:
             except Exception:
                 try:
                     self._proc.kill()
+                    self._proc.wait(timeout=3)
                 except Exception:
                     pass
             self._proc = None
+        self._running = False  # 始终重置，防止僵尸标记
 
     @property
     def domain(self) -> str:

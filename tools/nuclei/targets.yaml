@@ -24,8 +24,15 @@ selectors:
     desc: "子域名接管检测 — 对所有子域名扫描 takeover 模板"
     query: |
       MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(sub:Subdomain)
-      WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = 'nuclei:takeover' AND sr.target = sub.value }
-      RETURN DISTINCT 'http://' + sub.value AS url, 'https://' + sub.value AS url_tls
+      CALL {
+        WITH sub
+        RETURN 'http://' + sub.value AS target
+        UNION
+        RETURN 'https://' + sub.value AS target
+      }
+      WITH DISTINCT target
+      WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
+      RETURN target
       LIMIT 500
     mapping:
-      url: "{urls_file}"
+      target: "{urls_file}"

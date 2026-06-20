@@ -2,7 +2,7 @@ desc: "快速端口发现"
 command: "{bin} -list {targets_file} -tp 100 -silent -json"
 use_on:
   IP:
-    desc: "扫描 IP Top1000 端口(迭代, -host 逐个)"
-    command: "{bin} -host {ip} -tp 100 -silent -json"
+    desc: "扫描 IP Top100 端口(批量, -list 一次性跑完所有 IP)"
+    command: "{bin} -list {ips_file} -tp 100 -silent -json"
     params:
-      ip: "{ip}"
+      ips_file: "{ips_file}"

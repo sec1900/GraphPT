@@ -88,8 +88,8 @@ def _worker_heartbeat():
     import time as _time
     while True:
         try:
-            import redis as _rds
-            _r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1)
+            from graphpt.common.redis_client import get_redis
+            _r = get_redis(socket_connect_timeout=1)
             _r.ping()
             _r.setex(f"worker:heartbeat:graphpt-worker-1", 60, str(_time.time()))
         except Exception:

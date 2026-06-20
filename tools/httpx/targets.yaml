@@ -30,16 +30,18 @@ selectors:
     mapping:
       url: "{urls_file}"
   httpx:port:
-    desc: "Web指纹探测 — Layer 4: 仅扫IP:Port"
+    desc: "Web指纹探测 — Layer 4: 仅扫IP:Port（排除内网地址）"
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(p:Port)
+        WHERE NOT ip.value STARTS WITH '127.' AND NOT ip.value STARTS WITH '10.' AND NOT ip.value STARTS WITH '192.168.' AND NOT ip.value STARTS WITH '172.1'
         WITH ip.value + ':' + toString(p.number) AS target
         WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
         RETURN target
         UNION
         MATCH (a)-[:HAS_IP]->(ip:IP)-[:HAS_PORT]->(p:Port)
+        WHERE NOT ip.value STARTS WITH '127.' AND NOT ip.value STARTS WITH '10.' AND NOT ip.value STARTS WITH '192.168.' AND NOT ip.value STARTS WITH '172.1'
         WITH ip.value + ':' + toString(p.number) AS target
         WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
         RETURN target

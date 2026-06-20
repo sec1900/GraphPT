@@ -1820,7 +1820,7 @@ def _exec_browser_login_form(
             page.wait_for_load_state(wait_until if wait_until != "commit" else "load", timeout=timeout_ms)
     except Exception:  # noqa: BLE001
         pass
-    time.sleep(0.5)
+    time.sleep(3)
 
     probe = _auth_probe(page)
     auth_profile = _classify_auth_surface(page_url=str(page.url or current_url).strip(), probe=probe)
@@ -2040,7 +2040,7 @@ def _exec_browser_auth_auto(
             page.wait_for_load_state(wait_until if wait_until != "commit" else "load", timeout=timeout_ms)
     except Exception:  # noqa: BLE001
         pass
-    time.sleep(0.5)
+    time.sleep(3)
 
     probe = _auth_probe(page)
     auth_profile = _classify_auth_surface(page_url=str(page.url or current_url).strip(), probe=probe)

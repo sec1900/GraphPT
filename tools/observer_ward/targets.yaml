@@ -1,13 +1,15 @@
 selectors:
   observer_ward:
-    desc: Web指纹识别 — 取未指纹识别的HTTPEndpoint，批量一次跑完
+    desc: Web指纹识别 — 取未指纹识别的HTTPEndpoint（排除内网），批量一次跑完
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE NOT ip.value STARTS WITH '127.' AND NOT ip.value STARTS WITH '10.' AND NOT ip.value STARTS WITH '192.168.'
         RETURN ep
         UNION
-        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_IP]->(ip:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE NOT ip.value STARTS WITH '127.' AND NOT ip.value STARTS WITH '10.' AND NOT ip.value STARTS WITH '192.168.'
         RETURN ep
         UNION
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)

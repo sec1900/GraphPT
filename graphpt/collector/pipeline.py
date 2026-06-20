@@ -190,9 +190,8 @@ _atexit.register(_cleanup_all_temps)
 def _set_active_marker(tool: str, asset_id: str) -> None:
     """标记工具正在运行（Redis, 5min TTL 自动过期, 供 Logs 面板自动发现）。"""
     try:
-        import redis as _rds
-        _r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1,
-                         decode_responses=True)
+        from graphpt.common.redis_client import get_redis
+        _r = get_redis(decode_responses=True, socket_connect_timeout=1)
         _r.ping()
         _r.setex(f"tool:active:{tool}", 300, asset_id)
     except Exception:
@@ -697,6 +696,15 @@ class PipelineExecutor:
 
                     if tgt:
                         targets.append(tgt)
+
+                # 分批截断：大规模资产（上万子域名/IP）每次只取 N 个目标，
+                # ScanRun 去重保证下轮拿下一批，advance_once 反复推进直到全扫完。
+                _max = int(os.getenv("GRAPHPT_MAX_TARGETS", "0") or "0")
+                if _max > 0 and len(targets) > _max:
+                    import random
+                    # 随机采样而非取前 N：避免每次都扫同一批（当某批全失败无 ScanRun 时）
+                    targets = random.sample(targets, _max)
+
                 return targets or [{}]
         except Exception as exc:
             raise RuntimeError(f"target_query_failed: {exc}") from exc
@@ -999,7 +1007,9 @@ class PipelineExecutor:
             if _urls and os.path.isfile(_urls):
                 _stdfile = _urls
                 _stdin = open(_urls, "r", encoding="utf-8", errors="replace")
-            _TOOL_TIMEOUT = int(os.getenv("GRAPHPT_TOOL_TIMEOUT", "120"))  # 工具硬超时(秒)，默认2分钟
+            # 活性超时 — 统一由 GRAPHPT_STALE_TIMEOUT 控制（默认 300s）
+            _STALE_TIMEOUT = int(os.getenv("GRAPHPT_STALE_TIMEOUT", "300"))
+            _MAX_TOOL_TIME = int(os.getenv("GRAPHPT_MAX_TOOL_TIME", "0") or "0")  # 绝对上限，0=不限
             _POLL_INTERVAL = int(os.getenv("GRAPHPT_POLL_INTERVAL", "2"))
 
             try:
@@ -1020,17 +1030,30 @@ class PipelineExecutor:
                                         env=_proc_env,
                                         stdin=_stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 _start = _time.time()
+                _last_output = _start  # 活性计时：每次有输出时重置
                 _chunks: list[str] = []
                 with open(_log_file, "w", encoding="utf-8", errors="replace") as _lf:
                     while proc.poll() is None:
-                        _elapsed = _time.time() - _start
-                        # 硬超时
-                        if _elapsed > _TOOL_TIMEOUT:
+                        _now = _time.time()
+                        _elapsed = _now - _start
+                        _stale = _now - _last_output  # 距离上次输出多久了
+
+                        # 绝对上限（兜底安全网，默认 7200s=2h，设 0 关闭）
+                        if _MAX_TOOL_TIME > 0 and _elapsed > _MAX_TOOL_TIME:
                             proc.kill(); proc.wait()
                             raise RuntimeError(
-                                f"tool timeout: {_elapsed:.0f}s > {_TOOL_TIMEOUT}s "
+                                f"tool max time: {_elapsed:.0f}s > {_MAX_TOOL_TIME}s "
                                 f"(log={_log_file})"
                             )
+
+                        # 活性检测：无输出超过阈值 → 判定卡死
+                        if _stale > _STALE_TIMEOUT:
+                            proc.kill(); proc.wait()
+                            raise RuntimeError(
+                                f"tool stale: no output for {_stale:.0f}s > {_STALE_TIMEOUT}s "
+                                f"(log={_log_file})"
+                            )
+
                         # 读 PIPE (非阻塞)
                         try:
                             _chunk = proc.stdout.read1(65536) if hasattr(proc.stdout, 'read1') else proc.stdout.read(65536)
@@ -1038,8 +1061,10 @@ class PipelineExecutor:
                                 _chunks.append(_chunk)
                                 _lf.write(_chunk)
                                 _lf.flush()
+                                _last_output = _time.time()  # 有产出，重置活性时钟
                         except Exception:
                             pass
+
                         # 巡检间隔
                         if _elapsed < 30:
                             _sleep = _POLL_INTERVAL
@@ -1048,10 +1073,11 @@ class PipelineExecutor:
                         else:
                             _sleep = 15
                         _time.sleep(_sleep)
+
                         # 中止信号
                         try:
-                            import redis as _rds
-                            _r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1)
+                            from graphpt.common.redis_client import get_redis
+                            _r = get_redis(socket_connect_timeout=1)
                             if _r.ping() and _r.exists(f"scan:abort:{self.asset_id}"):
                                 proc.kill(); proc.wait()
                                 raise RuntimeError("scan aborted by user")

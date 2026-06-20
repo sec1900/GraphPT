@@ -44,8 +44,8 @@ def run_service(name: str, cmd: list[str], cwd: str, port: int = 0):
 def _clean_redis_on_startup():
     """清理上次非正常退出残留的调度锁和槽位，防止 worker 僵尸。"""
     try:
-        import redis as _redis
-        _r = _redis.Redis(host="localhost", port=6379, socket_connect_timeout=2)
+        from graphpt.common.redis_client import get_redis
+        _r = get_redis(socket_connect_timeout=2)
         _r.ping()
         removed = 0
         cursor = 0

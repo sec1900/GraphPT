@@ -10,4 +10,4 @@ use_on:
     desc: "对 Subdomain 执行子域名接管检测"
     params:
       urls_file: "{urls_file}"
-    command: "{bin} -list {urls_file} -jsonl -silent -timeout 10 -retries 1 -t http/takeovers/ -t dns/ -t res/nuclei-templates/ -t res/poc/"
+    command: "{bin} -list {urls_file} -jsonl -silent -rate-limit 10 -timeout 10 -retries 1 -t res/nuclei-templates/http/takeovers/ -t res/nuclei-templates/dns/"

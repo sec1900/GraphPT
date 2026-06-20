@@ -191,9 +191,8 @@ def _celery_health() -> dict:
     queue_stale = False
 
     try:
-        import redis as _redis
-        _r = _redis.Redis(host="localhost", port=6379, socket_connect_timeout=1,
-                          decode_responses=True)
+        from graphpt.common.redis_client import get_redis
+        _r = get_redis(decode_responses=True, socket_connect_timeout=1)
         if _r.ping():
             # 主检测：Redis 心跳 key
             cursor = 0
@@ -276,21 +275,52 @@ def _tool_config_health() -> dict:
 
 @web_app.get("/api/health")
 async def health():
-    """返回 Web 管理端依赖状态：Neo4j、Redis、Celery、工具配置。"""
-    neo4j = {"ok": _check_neo4j(), "uri": os.getenv("NEO4J_URI", "bolt://localhost:7687")}
-    redis_status = _redis_health()
-    celery_status = _celery_health()
-    tools = _tool_config_health()
-    overall = bool(neo4j["ok"] and redis_status.get("ok") and tools.get("ok"))
+    """返回 Web 管理端依赖状态：Neo4j、Redis、Celery、工具配置。
+
+    M1: 每项检测有独立超时保护，单项慢不拖垮整体响应。
+    """
+    import concurrent.futures as _hf
+
+    def _neo4j_check():
+        return {"ok": _check_neo4j(), "uri": os.getenv("NEO4J_URI", "bolt://localhost:7687")}
+
+    def _redis_check():
+        return _redis_health()
+
+    def _celery_check():
+        return _celery_health()
+
+    def _tools_check():
+        return _tool_config_health()
+
+    # M1: 并行执行所有健康检查，单项超时 3s，总体不超过 5s
+    with _hf.ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {
+            pool.submit(_neo4j_check): "neo4j",
+            pool.submit(_redis_check): "redis",
+            pool.submit(_celery_check): "celery",
+            pool.submit(_tools_check): "tools",
+        }
+        results = {}
+        for f in _hf.as_completed(futures, timeout=5):
+            key = futures[f]
+            try:
+                results[key] = f.result(timeout=4)
+            except (_hf.TimeoutError, Exception) as exc:
+                results[key] = {"ok": False, "error": str(exc) if str(exc) else "timeout"}
+        for key in ("neo4j", "redis", "celery", "tools"):
+            if key not in results:
+                results[key] = {"ok": False, "error": "check did not complete"}
+
+    overall = bool(
+        results["neo4j"].get("ok")
+        and results["redis"].get("ok")
+        and results["tools"].get("ok")
+    )
     return {
         "ok": True,
         "status": "ok" if overall else "degraded",
-        "data": {
-            "neo4j": neo4j,
-            "redis": redis_status,
-            "celery": celery_status,
-            "tools": tools,
-        },
+        "data": results,
     }
 
 
@@ -309,7 +339,7 @@ async def dashboard_counts(asset_id: str = "default"):
             "subdomains": "MATCH (:Asset {id: $aid})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(n:Subdomain) RETURN count(n) AS c",
             "ips": "MATCH (a:Asset {id: $aid}) CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip } RETURN count(DISTINCT ip) AS c",
             "ports": "MATCH (a:Asset {id: $aid}) CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p:Port) RETURN p UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(p:Port) RETURN p } RETURN count(DISTINCT p) AS c",
-            "http_endpoints": "MATCH (a:Asset {id: $aid}) CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep } RETURN count(DISTINCT ep) AS c",
+            "http_endpoints": "MATCH (a:Asset {id: $aid}) CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep UNION MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep } RETURN count(DISTINCT ep) AS c",
         }
         s = {}
         for k, v in q.items():
@@ -1777,8 +1807,8 @@ async def list_tasks():
             broker_ok = False
 
         try:
-            import redis as _redis
-            r = _redis.Redis(host="localhost", port=6379, db=0)
+            from graphpt.common.redis_client import get_redis
+            r = get_redis(socket_connect_timeout=1)
             queue_depth = r.llen("collect")
         except Exception:
             pass
@@ -2380,16 +2410,15 @@ async def scan_state_endpoint(asset_id: str = "default"):
 
 @web_app.post("/api/scheduler/unlock")
 async def scheduler_unlock(body: dict | None = None):
-    """手动清除调度锁：任务卡死时的紧急重置。
+    """手动清除调度锁 + 内存扫描状态（F3）：任务卡死时的紧急重置。
     body: {asset_id, tool?} — tool 可选，不传则清除该 asset 全部锁和心跳。
     """
     body = body or {}
     asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
     tool = (body.get("tool") or "").strip()
     try:
-        import redis as _rds
-        r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1,
-                       decode_responses=True)
+        from graphpt.common.redis_client import get_redis
+        r = get_redis(decode_responses=True, socket_connect_timeout=1)
         r.ping()
         if tool:
             r.delete(f"scheduler:lock:{asset_id}:{tool}")
@@ -2402,6 +2431,12 @@ async def scheduler_unlock(body: dict | None = None):
                 r.delete(k)
             for k in r.keys(f"scheduler:heartbeat:{asset_id}:*"):
                 r.delete(k)
+        # F3: 清除内存 _SCAN_STATE + Redis abort 信号，让前端立即看到 idle
+        try:
+            from graphpt.collector.scheduler import clear_scan_state
+            clear_scan_state(asset_id)
+        except Exception:
+            pass
         return {"ok": True, "data": {"status": "unlocked", "tools": unlocked}}
     except Exception as exc:
         return _json_error(exc)
@@ -2409,17 +2444,29 @@ async def scheduler_unlock(body: dict | None = None):
 
 @web_app.post("/api/scan/abort")
 async def scan_abort(body: dict | None = None):
-    """中止扫描：设置 Redis 信号，活性检测循环检测到后 kill 子进程。"""
+    """中止扫描：设置 Redis 信号 + 清除内存扫描状态（F2 + F3）。
+
+    Redis 信号触发工具轮询层的 proc.kill()；
+    内存状态清除让前端立即看到 "idle" 而非残留 "scanning"。
+    """
     body = body or {}
     asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
     try:
-        import redis as _rds
-        r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1, decode_responses=True)
+        from graphpt.common.redis_client import get_redis
+        r = get_redis(decode_responses=True, socket_connect_timeout=1)
         r.ping()
         r.setex(f"scan:abort:{asset_id}", 60, "1")
         # 同时释放所有锁，让后续 advance 不会被挡
         for k in r.keys(f"scheduler:lock:{asset_id}:*"):
             r.delete(k)
+        for k in r.keys(f"scheduler:heartbeat:{asset_id}:*"):
+            r.delete(k)
+        # F3: 清除内存 _SCAN_STATE，让前端立即看到 idle
+        try:
+            from graphpt.collector.scheduler import clear_scan_state
+            clear_scan_state(asset_id)
+        except Exception:
+            pass
         return {"ok": True, "data": {"status": "aborted"}}
     except Exception as exc:
         return _json_error(exc)
@@ -2427,14 +2474,14 @@ async def scan_abort(body: dict | None = None):
 
 @web_app.get("/api/scan/history")
 async def scan_history(asset_id: str = "default", limit: int = 20):
-    """扫描历史：最近运行的扫描记录。"""
+    """扫描历史：当前 asset 最近运行的扫描记录（S2: 按 asset_id 过滤）。"""
     try:
         rows = _neo4j_query("""
-            MATCH (sr:ScanRun)
+            MATCH (sr:ScanRun {asset_id: $aid})
             WHERE sr.tool IS NOT NULL
             WITH sr.tool AS tool, max(sr.last_run_at) AS last_run, count(sr) AS scans
             RETURN tool, scans, last_run ORDER BY last_run DESC LIMIT $lim
-        """, lim=limit)
+        """, aid=asset_id, lim=limit)
         tools = [{"tool": r["tool"], "scans": r["scans"], "last_run": r["last_run"]} for r in rows]
         # Summarize: last overall scan time and total scans
         last = tools[0]["last_run"] if tools else None
@@ -2446,7 +2493,10 @@ async def scan_history(asset_id: str = "default", limit: int = 20):
 
 @web_app.get("/api/scan/progress")
 async def scan_progress(asset_id: str = "default"):
-    """全量扫描进度：每个工具的 ScanRun 计数 + 活跃标记。"""
+    """全量扫描进度：每个工具的 ScanRun 计数 + 活跃标记。
+
+    修复 S1：ScanRun 和节点计数均按 asset_id 过滤，不再混入其他资产的全局数据。
+    """
     import redis as _rds
     try:
         from graphpt.collector.neo4j_client import _get_driver
@@ -2455,8 +2505,8 @@ async def scan_progress(asset_id: str = "default"):
         # 活跃标记
         active_tools = []
         try:
-            _r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1,
-                             decode_responses=True)
+            from graphpt.common.redis_client import get_redis
+            _r = get_redis(decode_responses=True, socket_connect_timeout=1)
             _r.ping()
             for k in _r.keys("tool:active:*"):
                 active_tools.append(k.replace("tool:active:", ""))
@@ -2464,15 +2514,69 @@ async def scan_progress(asset_id: str = "default"):
             pass
 
         with d.session() as s:
+            # S1: ScanRun 按 asset_id 过滤
             runs = {r["t"]: r["c"] for r in s.run(
-                "MATCH (sr:ScanRun) RETURN sr.tool AS t, count(sr) AS c"
+                "MATCH (sr:ScanRun {asset_id: $aid}) RETURN sr.tool AS t, count(sr) AS c",
+                aid=asset_id,
             )}
+
+            # S1: 节点计数按 asset 链过滤（非全局）
             nodes = {}
-            for label in ["RootDomain", "Subdomain", "IP", "Port", "HTTPEndpoint",
-                          "Vulnerability", "Secret"]:
-                nodes[label] = s.run(
-                    f"MATCH (n:{label}) RETURN count(n) AS c"
-                ).single()["c"]
+            nodes["RootDomain"] = s.run(
+                "MATCH (:Asset {id: $aid})-[:HAS_ROOT]->(n:RootDomain) RETURN count(DISTINCT n) AS c",
+                aid=asset_id,
+            ).single()["c"]
+            nodes["Subdomain"] = s.run(
+                "MATCH (:Asset {id: $aid})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(n:Subdomain) RETURN count(DISTINCT n) AS c",
+                aid=asset_id,
+            ).single()["c"]
+            nodes["IP"] = s.run(
+                """MATCH (a:Asset {id: $aid})
+                   CALL (a, a) {
+                     MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(n:IP) RETURN n
+                     UNION
+                     MATCH (a)-[:HAS_IP]->(n:IP) RETURN n
+                   } RETURN count(DISTINCT n) AS c""",
+                aid=asset_id,
+            ).single()["c"]
+            nodes["Port"] = s.run(
+                """MATCH (a:Asset {id: $aid})
+                   CALL (a, a) {
+                     MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(n:Port) RETURN n
+                     UNION
+                     MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(n:Port) RETURN n
+                   } RETURN count(DISTINCT n) AS c""",
+                aid=asset_id,
+            ).single()["c"]
+            nodes["HTTPEndpoint"] = s.run(
+                """MATCH (a:Asset {id: $aid})
+                   CALL (a, a) {
+                     MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(n:HTTPEndpoint) RETURN n
+                     UNION
+                     MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(n:HTTPEndpoint) RETURN n
+                     UNION
+                     MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(n:HTTPEndpoint) RETURN n
+                   } RETURN count(DISTINCT n) AS c""",
+                aid=asset_id,
+            ).single()["c"]
+            nodes["Vulnerability"] = s.run(
+                """MATCH (a:Asset {id: $aid})
+                   CALL (a, a) {
+                     MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[*1..5]->(n:Vulnerability) RETURN n
+                     UNION
+                     MATCH (a)-[:HAS_IP]->(:IP)-[*1..4]->(n:Vulnerability) RETURN n
+                   } RETURN count(DISTINCT n) AS c""",
+                aid=asset_id,
+            ).single()["c"]
+            nodes["Secret"] = s.run(
+                """MATCH (a:Asset {id: $aid})
+                   CALL (a, a) {
+                     MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[*1..5]->(n:Secret) RETURN n
+                     UNION
+                     MATCH (a)-[:HAS_IP]->(:IP)-[*1..4]->(n:Secret) RETURN n
+                   } RETURN count(DISTINCT n) AS c""",
+                aid=asset_id,
+            ).single()["c"]
 
         # 按 layer 组织
         from graphpt.collector.scheduler import _DEPENDENCY_LAYERS
@@ -2505,9 +2609,8 @@ async def scheduler_logs(asset_id: str = "default"):
     """返回当前运行中工具的实时日志（最近50行）。"""
     try:
         from pathlib import Path as _Path
-        import redis as _redis
-        _r = _redis.Redis(host="localhost", port=6379, socket_connect_timeout=2,
-                          decode_responses=True)
+        from graphpt.common.redis_client import get_redis
+        _r = get_redis(decode_responses=True, socket_connect_timeout=2)
         _r.ping()
         logs: dict[str, list[str]] = {}
         for key in _r.keys(f"scheduler:lock:{asset_id}:*"):
@@ -3145,8 +3248,8 @@ def active_tool_logs():
     _PROJECT_ROOT = _Path(__file__).resolve().parent.parent.parent
 
     try:
-        _r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1,
-                         decode_responses=True)
+        from graphpt.common.redis_client import get_redis
+        _r = get_redis(decode_responses=True, socket_connect_timeout=1)
         _r.ping()
         keys = _r.keys("tool:active:*")
     except Exception:
