@@ -1,7 +1,8 @@
 desc: "快速端口发现"
-command: "{bin} -list {targets_file} -p - -silent -json"
+command: "{bin} -list {targets_file} -top-ports 1000 -silent -json"
 use_on:
   IP:
-    desc: "扫描 IP 全端口(批量)"
+    desc: "扫描 IP Top1000 端口(迭代, -host 逐个)"
+    command: "{bin} -host {ip} -top-ports 1000 -silent -json"
     params:
-      targets_file: "{value}"
+      ip: "{ip}"

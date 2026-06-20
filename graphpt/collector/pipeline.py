@@ -1013,7 +1013,11 @@ class PipelineExecutor:
                         if _pxy:
                             for _pk in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                                 _proc_env[_pk] = _pxy
-                    except Exception: pass
+                            import sys as _sy; print(f"[PROXY] tool={tool} proxy={_pxy}", file=_sy.stderr, flush=True)
+                        else:
+                            import sys as _sy; print(f"[PROXY] tool={tool} NO_PROXY", file=_sy.stderr, flush=True)
+                    except Exception as _e:
+                        import sys as _sy; print(f"[PROXY] tool={tool} ERR={_e}", file=_sy.stderr, flush=True)
                     proc = subprocess.Popen(cmd, text=True, encoding='utf-8', errors='replace',
                                             env=_proc_env,
                                             stdin=_stdin, stdout=_lf, stderr=subprocess.STDOUT)
