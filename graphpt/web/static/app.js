@@ -679,17 +679,15 @@ function removeChildRows(parentRow, parentDepth) {
 }
 
 function findNode(nodeId) {
-  function walk(items) {
-    for (const item of items) {
-      if (item.id === nodeId) return item;
-      if (item._expanded && item._children) {
-        const found = walk(item._children);
-        if (found) return found;
-      }
-    }
-    return null;
-  }
-  return walk(treeRoots);
+  // Read node data from DOM (Assets table rows have data-nid/data-type/data-value)
+  const row = document.querySelector('tr[data-nid="' + nodeId.replace(/"/g, '\\"') + '"]');
+  if (!row) return null;
+  return {
+    id: row.dataset.nid,
+    type: row.dataset.type,
+    value: row.dataset.value,
+    parent_id: row.dataset.parentId || '',
+  };
 }
 
 let crumbPath = [];
@@ -891,8 +889,11 @@ document.addEventListener('click', () => {
   document.getElementById('ctx-menu').style.display = 'none';
 });
 
-var explorerTable = document.getElementById('explorer-table');
-if (explorerTable) explorerTable.addEventListener('contextmenu', function(e) {
+// Context menu on Assets page
+var assetsTable = document.getElementById('page-assets');
+if (assetsTable) assetsTable.addEventListener('contextmenu', function(e) {
+  const row = e.target.closest('tr[data-nid]');
+  if (!row || !row.dataset.nid) return;
   const row = e.target.closest('tr.ex-row');
   if (!row || !row.dataset.nid) return;
   e.preventDefault();
@@ -963,28 +964,19 @@ function renderToolContextMenu(filter) {
 
 async function runToolOnNode(tool) {
   document.getElementById('ctx-menu').style.display = 'none';
-  const value = nodeDisplayValue(_ctxMenuNode);
-  // Open Run dialog pre-filled
-  document.getElementById('pl-run-name').textContent = 'Ad-hoc: ' + tool + ' on ' + value.substring(0, 30);
-  document.getElementById('pl-run-name').dataset.name = '';
-  document.getElementById('pl-run-name').dataset.tool = tool;
-  document.getElementById('pl-run-name').dataset.value = value;
-  document.getElementById('pl-run-name').dataset.nodeType = normalizedNodeType(_ctxMenuNode);
-  document.getElementById('pl-run-name').dataset.node = JSON.stringify(nodePayload(_ctxMenuNode));
-  document.getElementById('pl-run-title').textContent = 'Run Tool';
-  if (_ctxMenuNode.type === 'IP' || _ctxMenuNode.type === 'standalone_ip') {
-    document.getElementById('pl-run-ip').value = value;
-    document.getElementById('pl-run-domain').value = '';
-  } else {
-    document.getElementById('pl-run-domain').value = value;
-    document.getElementById('pl-run-ip').value = '';
+  const node = _ctxMenuNode;
+  const value = nodeDisplayValue(node);
+  const payload = nodePayload(node);
+  const params = new URLSearchParams({asset_id: currentAsset, tool: tool});
+  for (const [k, v] of Object.entries(payload)) {
+    if (v && k !== 'type' && k !== 'id') params.append(k, String(v));
   }
-  document.getElementById('pl-run-company').value = '';
-  document.getElementById('pl-log').style.display = 'none';
-  document.getElementById('pl-log').textContent = '';
-  document.getElementById('pl-log-status').textContent = '';
-  document.getElementById('pl-run-btn').style.display = '';
-  document.getElementById('pl-run-overlay').style.display = 'flex';
+  try {
+    const r = await fetch(API + '/tools/' + tool + '/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({asset_id: currentAsset, ...payload})});
+    const d = await r.json();
+    if (d.ok) toast('Started ' + tool + ' on ' + value.substring(0, 30) + (d.preview ? ' (' + d.preview + ' targets)' : ''));
+    else toast(d.error || 'Failed to run ' + tool, false);
+  } catch(e) { toast(e.message, false); }
 }
 
 // ============================================================
@@ -2522,11 +2514,11 @@ async function showNodeDetail(url) {
       let h = '<div class="toolbar"><div class="asset-sel"><select onchange="switchAsset(this.value)">' + assetOptions(currentAsset) + '</select><button class="btn outline small" onclick="openNewAssetModal()">+</button></div>';
       h += '<span class="spacer"></span><button class="btn outline small" onclick="loadAssets()">Refresh</button></div>';
       h += '<div style="margin:12px 0 8px;font-weight:600">Seed Targets</div><table><thead><tr><th>Name</th><th>Type</th><th>Count</th><th>Created</th></tr></thead><tbody>';
-      if (td.length) td.forEach(x => h += '<tr><td><strong>' + esc(x.value) + '</strong></td><td>' + esc(x.type) + '</td><td>' + (x.sub_count || '') + '</td><td>' + fmtTime(x.created_at) + '</td></tr>');
+      if (td.length) td.forEach(x => h += '<tr data-nid="' + esc(x.id) + '" data-type="' + esc(x.type) + '" data-value="' + esc(x.value) + '" style="cursor:context-menu" title="Right-click for actions"><td><strong>' + esc(x.value) + '</strong></td><td>' + esc(x.type) + '</td><td>' + (x.sub_count || '') + '</td><td>' + fmtTime(x.created_at) + '</td></tr>');
       else h += '<tr><td colspan="4" style="color:var(--muted)">No seed targets. Click + to add.</td></tr>';
       h += '</tbody></table>';
       h += '<div style="margin:16px 0 8px;font-weight:600">Discovered Assets</div><table><thead><tr><th>Name</th><th>Detail</th><th>Created</th></tr></thead><tbody>';
-      if (ed.roots && ed.roots.length) ed.roots.forEach(x => h += '<tr><td><strong>' + esc(x.value) + '</strong></td><td>' + (x.subdomain_count || 0) + ' subs, ' + (x.ip_count || x.port_count || 0) + ' IPs</td><td>' + fmtTime(x.created_at) + '</td></tr>');
+      if (ed.roots && ed.roots.length) ed.roots.forEach(x => h += '<tr data-nid="' + esc(x.id) + '" data-type="root_domain" data-value="' + esc(x.value) + '" style="cursor:context-menu" title="Right-click for actions"><td><strong>' + esc(x.value) + '</strong></td><td>' + (x.subdomain_count || 0) + ' subs, ' + (x.ip_count || x.port_count || 0) + ' IPs</td><td>' + fmtTime(x.created_at) + '</td></tr>');
       else h += '<tr><td colspan="3" style="color:var(--muted)">No discoveries yet. Start a scan.</td></tr>';
       h += '</tbody></table>';
       document.getElementById("page-assets").innerHTML = h;
