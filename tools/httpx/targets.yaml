@@ -22,13 +22,13 @@ selectors:
     mapping:
       url: "{urls_file}"
   httpx:subdomain:
-    desc: "Web指纹探测 — Layer 2: 仅扫子域名(迭代模式, -u 逐个)"
+    desc: "Web指纹探测 — Layer 2: 仅扫子域名"
     query: |
       MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
       WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.value }
-      RETURN 'http://' + s.value AS url
+      RETURN s.value AS url
     mapping:
-      url: "{url}"
+      url: "{urls_file}"
   httpx:port:
     desc: "Web指纹探测 — Layer 4: 仅扫IP:Port"
     query: |

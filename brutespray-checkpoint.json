@@ -1,10 +1,10 @@
 {
   "FilePath": "brutespray-checkpoint.json",
   "completed_hosts": {
-    "127.0.0.1:6379:redis": true
+    "156.239.238.7:22:ssh": true
   },
   "attempted_creds": {},
   "successful_creds": null,
-  "start_time": "2026-06-20T05:48:19.8368105+08:00",
-  "last_save": "2026-06-20T05:48:25.349215+08:00"
+  "start_time": "2026-06-20T22:35:04.6004121+08:00",
+  "last_save": "2026-06-20T22:35:26.8138469+08:00"
 }

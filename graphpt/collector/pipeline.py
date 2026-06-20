@@ -1003,34 +1003,40 @@ class PipelineExecutor:
             _POLL_INTERVAL = int(os.getenv("GRAPHPT_POLL_INTERVAL", "2"))
 
             try:
-                # stdout → log 文件(流式,浏览器 tail), 不经过 PIPE 避免工具缓冲卡死
+                _proc_env = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+                # 注入代理
+                try:
+                    from graphpt.common.settings import get_proxy_url
+                    _pxy = get_proxy_url()
+                    if _pxy:
+                        for _pk in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                            _proc_env[_pk] = _pxy
+                except Exception: pass
+                # stdout → PIPE (Windows 兼容) → 边读边写 log 文件(浏览器可 tail)
+                proc = subprocess.Popen(cmd, text=True, encoding='utf-8', errors='replace',
+                                        env=_proc_env,
+                                        stdin=_stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                _start = _time.time()
+                _chunks: list[str] = []
                 with open(_log_file, "w", encoding="utf-8", errors="replace") as _lf:
-                    _proc_env = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
-                    # 注入代理（httpx/naabu 等工具需要）
-                    try:
-                        from graphpt.common.settings import get_proxy_url
-                        _pxy = get_proxy_url()
-                        if _pxy:
-                            for _pk in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-                                _proc_env[_pk] = _pxy
-                            import sys as _sy; print(f"[PROXY] tool={tool} proxy={_pxy}", file=_sy.stderr, flush=True)
-                        else:
-                            import sys as _sy; print(f"[PROXY] tool={tool} NO_PROXY", file=_sy.stderr, flush=True)
-                    except Exception as _e:
-                        import sys as _sy; print(f"[PROXY] tool={tool} ERR={_e}", file=_sy.stderr, flush=True)
-                    proc = subprocess.Popen(cmd, text=True, encoding='utf-8', errors='replace',
-                                            env=_proc_env,
-                                            stdin=_stdin, stdout=_lf, stderr=subprocess.STDOUT)
-                    _start = _time.time()
                     while proc.poll() is None:
                         _elapsed = _time.time() - _start
-                        # 硬超时：进程超过 _TOOL_TIMEOUT 直接 kill
+                        # 硬超时
                         if _elapsed > _TOOL_TIMEOUT:
                             proc.kill(); proc.wait()
                             raise RuntimeError(
                                 f"tool timeout: {_elapsed:.0f}s > {_TOOL_TIMEOUT}s "
                                 f"(log={_log_file})"
                             )
+                        # 读 PIPE (非阻塞)
+                        try:
+                            _chunk = proc.stdout.read1(65536) if hasattr(proc.stdout, 'read1') else proc.stdout.read(65536)
+                            if _chunk:
+                                _chunks.append(_chunk)
+                                _lf.write(_chunk)
+                                _lf.flush()
+                        except Exception:
+                            pass
                         # 巡检间隔
                         if _elapsed < 30:
                             _sleep = _POLL_INTERVAL
@@ -1039,7 +1045,7 @@ class PipelineExecutor:
                         else:
                             _sleep = 15
                         _time.sleep(_sleep)
-                        # 检查中止信号
+                        # 中止信号
                         try:
                             import redis as _rds
                             _r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1)
@@ -1048,7 +1054,13 @@ class PipelineExecutor:
                                 raise RuntimeError("scan aborted by user")
                         except RuntimeError: raise
                         except Exception: pass
-                stdout = _log_file.read_text(encoding="utf-8", errors="replace")
+                # 读剩余输出
+                _remaining, _ = proc.communicate(timeout=5)
+                if _remaining:
+                    _chunks.append(_remaining)
+                    with open(_log_file, "a", encoding="utf-8", errors="replace") as _lf:
+                        _lf.write(_remaining)
+                stdout = "".join(_chunks)
                 self.ctx["_last_tool_log"] = str(_log_file)
             except Exception as exc:
                 msg = str(exc)

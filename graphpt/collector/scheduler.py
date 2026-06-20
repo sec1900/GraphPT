@@ -113,8 +113,7 @@ _DEPENDENCY_LAYERS: list[dict[str, Any]] = [
     #       Vulnerability 节点 (nuclei:takeover 检测悬空 CNAME)
     # 工具消费 Subdomain，产出 IP + 子域名级别的 HTTPEndpoint
     {"layer": 2, "node": "Subdomain",
-     "tools": ["dnsx"]},
-    # FIXME: httpx:subdomain + nuclei:takeover 在 pipeline 中子进程创建失败，待修
+     "tools": ["dnsx", "httpx:subdomain", "nuclei:takeover"]},
 
     # ═══════════════════════════════════════════════════════════════
     # Layer 3: 端口扫描 — 发现 IP 上的开放端口
