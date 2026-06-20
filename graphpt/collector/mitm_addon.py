@@ -46,8 +46,8 @@ class GraphPTAddon:
         )
 
     def configure(self, updates):
-        if "graphpt_asset" in updates:
-            self._asset_id = updates["graphpt_asset"]
+        # updates 是 set[str]，实际值通过 self.<option_name> 访问
+        self._asset_id = str(getattr(self, "graphpt_asset", None) or "default")
 
     def request(self, flow):
         """每个 HTTP 请求通过时触发。"""
