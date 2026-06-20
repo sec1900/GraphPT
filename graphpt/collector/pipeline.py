@@ -999,8 +999,8 @@ class PipelineExecutor:
             if _urls and os.path.isfile(_urls):
                 _stdfile = _urls
                 _stdin = open(_urls, "r", encoding="utf-8", errors="replace")
-            _STALE_TIMEOUT = int(os.getenv("GRAPHPT_STALE_TIMEOUT", "300"))  # 日志无增长→判定卡死(秒)
-            _POLL_INTERVAL = int(os.getenv("GRAPHPT_POLL_INTERVAL", "2"))  # 基础巡检间隔(秒), 默认2
+            _TOOL_TIMEOUT = int(os.getenv("GRAPHPT_TOOL_TIMEOUT", "600"))  # 工具硬超时(秒)，默认10分钟
+            _POLL_INTERVAL = int(os.getenv("GRAPHPT_POLL_INTERVAL", "2"))
 
             try:
                 # stdout → log 文件(流式,浏览器 tail), 不经过 PIPE 避免工具缓冲卡死
@@ -1008,19 +1008,23 @@ class PipelineExecutor:
                     proc = subprocess.Popen(cmd, text=True, encoding='utf-8', errors='replace',
                                             env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
                                             stdin=_stdin, stdout=_lf, stderr=subprocess.STDOUT)
-                    _last_size = 0
-                    _stale = 0
-                    _no_growth_cycles = 0   # 连续无增长的巡检周期数
+                    _start = _time.time()
                     while proc.poll() is None:
-                        # 自适应巡检间隔：活跃 2s → 无增长 3 次 → 5s → 再 3 次 → 10s → 最多 30s
-                        if _no_growth_cycles < 3:
-                            _sleep = _POLL_INTERVAL           # 2s
-                        elif _no_growth_cycles < 6:
-                            _sleep = max(5, _POLL_INTERVAL)   # 5s
-                        elif _no_growth_cycles < 9:
-                            _sleep = max(10, _POLL_INTERVAL)  # 10s
+                        _elapsed = _time.time() - _start
+                        # 硬超时：进程超过 _TOOL_TIMEOUT 直接 kill
+                        if _elapsed > _TOOL_TIMEOUT:
+                            proc.kill(); proc.wait()
+                            raise RuntimeError(
+                                f"tool timeout: {_elapsed:.0f}s > {_TOOL_TIMEOUT}s "
+                                f"(log={_log_file})"
+                            )
+                        # 巡检间隔
+                        if _elapsed < 30:
+                            _sleep = _POLL_INTERVAL
+                        elif _elapsed < 120:
+                            _sleep = 5
                         else:
-                            _sleep = max(30, _POLL_INTERVAL)  # 30s
+                            _sleep = 15
                         _time.sleep(_sleep)
                         # 检查中止信号
                         try:
@@ -1031,24 +1035,6 @@ class PipelineExecutor:
                                 raise RuntimeError("scan aborted by user")
                         except RuntimeError: raise
                         except Exception: pass
-                        try:
-                            _cur = os.path.getsize(str(_log_file))
-                        except OSError:
-                            _cur = 0
-                        if _cur > _last_size:
-                            _last_size = _cur
-                            _stale = 0
-                            _no_growth_cycles = 0   # 有产出，重置为快速巡检
-                        else:
-                            _stale += _sleep
-                            _no_growth_cycles += 1
-                            if _stale >= _STALE_TIMEOUT:
-                                proc.kill()
-                                proc.wait()
-                                raise RuntimeError(
-                                    f"tool stale: no output for {_stale}s "
-                                    f"(log={_log_file}, size={_last_size})"
-                                )
                 stdout = _log_file.read_text(encoding="utf-8", errors="replace")
                 self.ctx["_last_tool_log"] = str(_log_file)
             except Exception as exc:
