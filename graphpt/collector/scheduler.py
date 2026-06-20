@@ -752,6 +752,34 @@ def run_full_scan(asset_id: str, *,
             _log.info("full_scan_round_%d_done asset=%s findings=%d",
                       round_num, asset_id, round_findings)
 
+            # G15: 更新累积进度供前端展示（每 5 轮或首末轮计算，避免频繁 Neo4j 查询）
+            if round_num == 1 or round_num % 5 == 0:
+                try:
+                    from graphpt.collector.neo4j_client import get_graph_writer
+                    w = get_graph_writer()
+                    with w._driver.session() as s:
+                        r = s.run(
+                            "MATCH (sr:ScanRun {asset_id: $aid}) "
+                            "RETURN count(sr) AS total_scanned",
+                            aid=asset_id,
+                        )
+                        scanned = r.single()["total_scanned"] if r.peek() else 0
+                    remaining = sum(
+                        _count_targets(tool, asset_id)
+                        for spec in _DEPENDENCY_LAYERS
+                        for tool in spec["tools"]
+                    )
+                    with _SCAN_STATE_LOCK:
+                        st = _SCAN_STATE.get(asset_id, {})
+                        st["cumulative"] = {
+                            "scanned": scanned,
+                            "remaining": max(0, remaining),
+                            "total_estimate": scanned + max(0, remaining),
+                            "rounds_done": round_num,
+                        }
+                except Exception:
+                    pass  # 进度统计失败不影响扫描
+
     except ScanAborted as exc:
         aborted_layer = current_spec.get("layer", 0) if current_spec else 0
         _log.info("full_scan_aborted asset=%s round=%d layer=%d", asset_id, round_num, aborted_layer)

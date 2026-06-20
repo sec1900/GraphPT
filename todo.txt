@@ -396,11 +396,13 @@ G13. nmap 缺 -sC(默认脚本) 和 -O(OS探测) — 丢失大量漏洞信息和
      -sT -sV -Pn -T4 → -sT -sV -sC -O -Pn -T4
      文件: tools/nmap/tool.yaml
 
-G14. 无命令注入/反序列化/文件上传检测 — L6 只靠 nuclei 模板
-     建议: 扩展 nuclei 模板覆盖或增加专用工具
+G14. 无命令注入/反序列化/文件上传检测 — L6 只靠 nuclei 模板                ⏭ 后续
+     需 FUZZ 参数化注入，短期内扩展 nuclei 模板覆盖，长期增加专用 FUZZ 工具。
 
-G15. 大规模资产无进度总览 — 看不到"已扫 300/11250"
-     建议: scan_state 增加 cumulative 字段，前端显示百分比
+G15. 大规模资产无进度总览 — 看不到"已扫 300/11250"                       ✅ 已修
+     _SCAN_STATE 增加 cumulative {scanned, remaining, total_estimate, rounds_done}
+     每轮结束后自动更新，前端可展示百分比和预估剩余
+     文件: scheduler.py run_full_scan
 
 G16. OOB 服务依赖公网 interactsh — 内网环境不可用
      建议: 支持自建 interactsh server 或回退到 DNSLog
