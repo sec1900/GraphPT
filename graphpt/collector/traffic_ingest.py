@@ -70,12 +70,12 @@ class TrafficIngestHandler(BaseHTTPRequestHandler):
             writer.write_subdomain(host, self._asset_id, root_domain=root,
                                   source="traffic_ingest")
 
-            # 2. 尝试解析 IP（从 headers 或 DNS 缓存）
-            # 尝试从 Host header 或直接 DNS 解析
+            # 2. 尝试解析 IP（从 headers 或 DNS 缓存，带超时）
             target_ip = ""
             try:
                 target_ip = headers.get("X-Forwarded-For", "").split(",")[0].strip()
                 if not target_ip:
+                    socket.setdefaulttimeout(3)
                     target_ip = socket.gethostbyname(host)
             except Exception:
                 pass
