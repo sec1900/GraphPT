@@ -1,47 +1,61 @@
 # GraphPT
 
-Graph-driven automated penetration testing platform. Automated tool chains handle reconnaissance and data collection, results flow into a Neo4j knowledge graph, and an AI Agent reads the graph to analyze attack paths and trigger targeted scans.
+Graph-driven automated penetration testing platform. One-click full scan across 8 attack layers, auto-loop until complete. Passive traffic intercept via mitmproxy feeds live browsing data into Neo4j.
 
 ## Architecture
 
 ```
-Pipeline Engine          Neo4j Graph DB          AI Agent + Web Admin
-  recon / scan / collect ──→ asset relationships ──→ graph analysis + scan trigger
+8-Layer Attack Chain        Neo4j Graph DB           Web Admin (7 tabs)
+  auto-loop ─────────────────→ asset graph ────────────→ dashboard + findings + report
+  per-tool batching (100)     vulnerability storage      one-click MITM intercept
+  activity-based timeout      relationship tracking      cumulative progress
 ```
-
-**Implemented:** tool orchestration, graph ingestion, Web Admin, graph visualization, vulnerability list, passive URL discovery, web fingerprinting, fingerprint-driven vuln scanning, 403 access bypass, and basic Graph Agent analysis/scan triggering.
-**Still missing:** report export, complete vulnerability verification workflow, reusable runbooks/scheduling, and automated tool installation.
 
 ## Quick Start
 
 ```bash
-# 1. Install dependencies
+# 1. Install
 python install.py
 
-# 2. Configure environment
-# Edit .env: Neo4j credentials, proxy, API keys
+# 2. Configure .env
+#    Neo4j credentials, proxy, API keys
 
-# 3. Start all services
+# 3. Start services
 python start.py
 
 # 4. Open browser
-# http://127.0.0.1:8080
-```
+#    http://127.0.0.1:8080
 
-## Stop
-
-```bash
-# Stop all services
+# 5. Stop
 python stop.py
 ```
+
+## 8-Layer Attack Chain
+
+```
+L1  [RootDomain]    crt + subfinder + urlfinder + gobuster:dns      → Subdomain
+L2  [Subdomain]     dnsx + nuclei:takeover                         → IP + Vulnerability
+L3  [Subdomain]     httpx:subdomain                                → HTTPEndpoint
+L4  [IP]            naabu + gobuster:vhost                         → Port
+L5  [IP/Port]       nmap + httpx:port + brutespray                 → Service + Credential
+L6  [Endpoint]      observer_ward + katana + ffuf + gobuster       → HTTPEndpoint + File
+L7  [Vuln/Secret]   nuclei + secretfinder + 403bypass              → Vulnerability + Secret
+L8  [Exploit]       oob + sqlmap + jwt_attack + cloud_metadata     → Confirmed Vuln
+```
+
+Auto-loop: click Start once, system processes 100 targets per tool per round, iterates until all done. Abort anytime, restart cleanly.
+
+## MITM Traffic Intercept
+
+Click **Intercept** on Dashboard to start mitmproxy on configurable port. Set browser proxy, install CA cert (Download Cert), browse normally — all HTTP/HTTPS traffic auto-ingested into Neo4j as Subdomain, IP, HTTPEndpoint, File nodes.
 
 ## Configuration
 
 | File | Purpose |
 |------|---------|
-| `tools/<name>/tool.yaml` | Per-tool command template and use_on rules |
-| `graphpt/collector/pipelines.yaml` | Multi-stage pipeline definitions |
-| `.env` | Runtime environment (Neo4j, Redis, proxy, keys) |
+| `.env` | All runtime config (14 sections, fully documented) |
+| `tools/<name>/tool.yaml` | Per-tool command template |
+| `tools/<name>/targets.yaml` | Per-tool target selector (Cypher) |
 
 ### tool.yaml format
 
