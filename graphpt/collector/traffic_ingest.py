@@ -172,10 +172,11 @@ class TrafficIngestHandler(BaseHTTPRequestHandler):
             pass
 
     def do_CONNECT(self):
-        """HTTPS CONNECT 隧道 — 记录域名后返回 200，浏览器透传。"""
+        """HTTPS CONNECT 隧道 — 透传 TCP，只记录域名不解密。"""
         host_port = self.path.strip("/")
         host = host_port.split(":")[0] if ":" in host_port else host_port
-        # 记录域名
+        port = int(host_port.split(":")[1]) if ":" in host_port else 443
+        # 记录域名入图
         try:
             parts = host.split(".")
             root = ".".join(parts[-2:]) if len(parts) >= 2 else host
@@ -184,13 +185,50 @@ class TrafficIngestHandler(BaseHTTPRequestHandler):
                                   source="traffic_ingest")
         except Exception:
             pass
-        # 返回 405 — 不拦截 TLS，浏览器会直连但我们已记录域名
+        # 建立到目标服务器的连接，透传 TCP
+        target_sock = None
         try:
-            self.send_response(405, "CONNECT not intercepted")
-            self.send_header("X-GraphPT", "domain-recorded")
+            target_sock = socket.create_connection((host, port), timeout=10)
+            self.send_response(200, "Connection Established")
             self.end_headers()
+            self.wfile.flush()
+            # 双向透传
+            self._tunnel(self.connection, target_sock)
         except Exception:
-            pass
+            try:
+                self.send_error(502, "Bad Gateway")
+            except Exception:
+                pass
+        finally:
+            if target_sock:
+                try:
+                    target_sock.close()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _tunnel(client, target, bufsize=8192):
+        """双向透传 TCP 数据。"""
+        import select as _sel
+        client.setblocking(False)
+        target.setblocking(False)
+        while True:
+            try:
+                r, _, _ = _sel.select([client, target], [], [], 30)
+                if not r:
+                    break
+                if client in r:
+                    data = client.recv(bufsize)
+                    if not data:
+                        break
+                    target.sendall(data)
+                if target in r:
+                    data = target.recv(bufsize)
+                    if not data:
+                        break
+                    client.sendall(data)
+            except Exception:
+                break
 
     do_PUT = do_POST
     do_DELETE = do_POST
