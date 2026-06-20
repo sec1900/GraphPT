@@ -142,10 +142,16 @@ class TrafficIngestHandler(BaseHTTPRequestHandler):
         if not url.startswith("http"):
             host = self.headers.get("Host", "localhost")
             url = f"http://{host}{self.path}"
-        self._parse_and_ingest("GET", url, dict(self.headers), body)
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+        try:
+            self._parse_and_ingest("GET", url, dict(self.headers), body)
+        except Exception:
+            pass  # 解析失败不影响代理
+        try:
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
 
     def do_POST(self):
         content_length = int(self.headers.get("Content-Length", 0))
@@ -154,10 +160,16 @@ class TrafficIngestHandler(BaseHTTPRequestHandler):
         if not url.startswith("http"):
             host = self.headers.get("Host", "localhost")
             url = f"http://{host}{self.path}"
-        self._parse_and_ingest("POST", url, dict(self.headers), body)
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+        try:
+            self._parse_and_ingest("POST", url, dict(self.headers), body)
+        except Exception:
+            pass
+        try:
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
 
     do_PUT = do_POST
     do_DELETE = do_POST
