@@ -2445,13 +2445,22 @@ def _mitm_redis():
     import redis
     return redis.Redis(host="localhost", port=6379, socket_connect_timeout=1, decode_responses=True)
 
+_mitm_alive_cache: dict[int, tuple[float, bool]] = {}
+
 def _mitm_alive(pid: int) -> bool:
+    now = time.time()
+    cached = _mitm_alive_cache.get(pid)
+    if cached and now - cached[0] < 30:
+        return cached[1]
     try:
         kernel32 = ctypes.windll.kernel32
         handle = kernel32.OpenProcess(0x0400, False, pid)
-        if handle: kernel32.CloseHandle(handle); return True
-    except Exception: pass
-    return False
+        alive = bool(handle)
+        if handle: kernel32.CloseHandle(handle)
+    except Exception:
+        alive = False
+    _mitm_alive_cache[pid] = (now, alive)
+    return alive
 
 
 @web_app.post("/api/mitm/start")

@@ -2265,7 +2265,7 @@ function toggleAutoRefresh() {
     _logsPoll = setInterval(() => {
       if (_logsFile) loadLogContent();
       else refreshLog();
-    }, 3000);
+    }, 10000);
   } else {
     if (_logsPoll) clearInterval(_logsPoll);
     _logsPoll = null;
@@ -2408,7 +2408,7 @@ function pollScanProgress() {
       loadDashboard();
     }
     wasRunning = alive;
-  }, 3000);
+  }, 10000);
 }
 
 // Ask for notification permission on first user click
@@ -2460,7 +2460,7 @@ async function toggleMitm() {
         const addrSpan = statusDiv?.querySelector('span');
         if (addrSpan) addrSpan.textContent = '\u{1F4F7} Listening on 127.0.0.1:' + port;
         // Poll stats every 5s
-        if (!_mitmPoll) _mitmPoll = setInterval(refreshMitmStats, 5000);
+        if (!_mitmPoll) _mitmPoll = setInterval(refreshMitmStats, 15000);
         refreshMitmStats();
         toast('Intercept started on :' + port + ' → asset: ' + assetId);
       } else {
@@ -2510,7 +2510,7 @@ async function refreshMitmStats() {
     const addrSpan = status.querySelector('span');
     if (addrSpan) addrSpan.textContent = '\u{1F4F7} Listening on 127.0.0.1:' + port;
     document.getElementById('mitm-asset-label').textContent = sd.data.asset_id || '';
-    if (!_mitmPoll) _mitmPoll = setInterval(refreshMitmStats, 5000);
+    if (!_mitmPoll) _mitmPoll = setInterval(refreshMitmStats, 15000);
     refreshMitmStats();
   }
 } catch(e){} })();
@@ -2589,7 +2589,7 @@ async function showNodeDetail(url) {
         fetch(API + "/explorer?asset_id=" + currentAsset)
       ]);
       const td = (await t.json()).data || [], ed = (await r.json()).data || {roots: []};
-      let h = '<div class="toolbar"><div class="asset-sel"><select onchange="switchAsset(this.value)">' + assetOptions(currentAsset) + '</select><button class="btn outline small" onclick="openNewAssetModal()">+</button></div>';
+      let h = '<div class="toolbar"><div class="asset-sel"><select onchange="switchAsset(this.value)">' + (assetList.length ? assetList.map(function(a){return '<option value=\"'+esc(a.id)+'\"'+(a.id===currentAsset?' selected':'')+'>'+esc(a.name||a.id)+'</option>'}).join('') : '<option value=\"'+currentAsset+'\">'+currentAsset+'</option>') + '</select><button class="btn outline small" onclick="openNewAssetModal()">+</button></div>';
       h += '<span class="spacer"></span><button class="btn outline small" onclick="loadAssets()">Refresh</button></div>';
       h += '<div style="margin:12px 0 8px;font-weight:600">Seed Targets</div><table><thead><tr><th>Name</th><th>Type</th><th>Count</th><th>Created</th></tr></thead><tbody>';
       if (td.length) td.forEach(x => h += '<tr data-nid="' + esc(x.id) + '" data-type="' + esc(x.type) + '" data-value="' + esc(x.value) + '" style="cursor:context-menu" title="Right-click for actions"><td><strong>' + esc(x.value) + '</strong></td><td>' + esc(x.type) + '</td><td>' + (x.sub_count || '') + '</td><td>' + fmtTime(x.created_at) + '</td></tr>');
@@ -2612,7 +2612,7 @@ async function showNodeDetail(url) {
         fetch(API + "/report?asset_id=" + currentAsset)
       ]);
       const vd = (await v.json()).data || [], rm = r.ok ? await r.text() : '';
-      let h = '<div class="toolbar"><div class="asset-sel"><select onchange="switchAsset(this.value)">' + assetOptions(currentAsset) + '</select></div>';
+      let h = '<div class="toolbar"><div class="asset-sel"><select onchange="switchAsset(this.value)">' + (assetList.length ? assetList.map(function(a){return '<option value=\"'+esc(a.id)+'\"'+(a.id===currentAsset?' selected':'')+'>'+esc(a.name||a.id)+'</option>'}).join('') : '<option value=\"'+currentAsset+'\">'+currentAsset+'</option>') + '</select></div>';
       h += '<span class="spacer"></span><a href="' + API + '/report?asset_id=' + currentAsset + '" class="btn" download>Download .md</a> <a href="' + API + '/report?asset_id=' + currentAsset + '&format=json" class="btn outline" download>Download .json</a></div>';
       h += '<div style="margin:16px 0 8px;font-weight:600">Findings (' + vd.length + ')</div><table><thead><tr><th>Sev</th><th>Title</th><th>Endpoint</th></tr></thead><tbody>';
       if (vd.length) vd.forEach(x => h += '<tr><td>' + severityBadge(x.severity) + '</td><td>' + esc(x.title || '?') + '</td><td>' + (x.url ? '<a href="' + esc(x.url) + '" target="_blank">' + esc((x.url || '').substring(0, 60)) + '</a>' : '-') + '</td></tr>');
