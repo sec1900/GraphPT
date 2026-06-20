@@ -1,19 +1,20 @@
 selectors:
   brutespray:
-    desc: "弱口令检测 — SSH/FTP/RDP/MySQL/Redis/SMB 等服务端口"
+    desc: "弱口令检测 — SSH/FTP/RDP/MySQL/Redis/HTTP/SMB 等服务端口"
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(p:Port)
-        WHERE p.number IN [21, 22, 23, 25, 53, 110, 143, 389, 445, 636, 873, 993, 995, 1433, 1521, 2049, 3306, 3389, 5432, 5900, 5985, 5986, 6379, 9200, 11211, 27017]
+        WHERE p.number IN [21, 22, 23, 25, 53, 80, 110, 143, 389, 443, 445, 636, 873, 993, 995, 1433, 1521, 2049, 3306, 3389, 5432, 5900, 5985, 5986, 6379, 8080, 8443, 9200, 11211, 27017]
         WITH ip.value + ':' + toString(p.number) AS raw, ip.value AS host, p.number AS port,
              CASE p.number
                WHEN 21 THEN 'ftp' WHEN 22 THEN 'ssh' WHEN 23 THEN 'telnet' WHEN 25 THEN 'smtp'
-               WHEN 53 THEN 'dns' WHEN 110 THEN 'pop3' WHEN 143 THEN 'imap' WHEN 389 THEN 'ldap'
-               WHEN 445 THEN 'smb' WHEN 636 THEN 'ldaps' WHEN 873 THEN 'rsync' WHEN 993 THEN 'imaps'
-               WHEN 995 THEN 'pop3s' WHEN 1433 THEN 'mssql' WHEN 1521 THEN 'oracle' WHEN 2049 THEN 'nfs'
-               WHEN 3306 THEN 'mysql' WHEN 3389 THEN 'rdp' WHEN 5432 THEN 'postgres'
-               WHEN 5900 THEN 'vnc' WHEN 5985 THEN 'winrm' WHEN 5986 THEN 'winrm' WHEN 6379 THEN 'redis'
+               WHEN 53 THEN 'dns' WHEN 80 THEN 'http' WHEN 110 THEN 'pop3' WHEN 143 THEN 'imap'
+               WHEN 389 THEN 'ldap' WHEN 443 THEN 'https' WHEN 445 THEN 'smb' WHEN 636 THEN 'ldaps'
+               WHEN 873 THEN 'rsync' WHEN 993 THEN 'imaps' WHEN 995 THEN 'pop3s' WHEN 1433 THEN 'mssql'
+               WHEN 1521 THEN 'oracle' WHEN 2049 THEN 'nfs' WHEN 3306 THEN 'mysql' WHEN 3389 THEN 'rdp'
+               WHEN 5432 THEN 'postgres' WHEN 5900 THEN 'vnc' WHEN 5985 THEN 'winrm' WHEN 5986 THEN 'winrm'
+               WHEN 6379 THEN 'redis' WHEN 8080 THEN 'http' WHEN 8443 THEN 'https'
                WHEN 9200 THEN 'elastic' WHEN 11211 THEN 'memcached' WHEN 27017 THEN 'mongodb'
                ELSE '' END AS svc
         WITH raw, host, port, svc,
@@ -23,15 +24,16 @@ selectors:
         RETURN target, host, port
         UNION
         MATCH (a)-[:HAS_IP]->(ip:IP)-[:HAS_PORT]->(p:Port)
-        WHERE p.number IN [21, 22, 23, 25, 53, 110, 143, 389, 445, 636, 873, 993, 995, 1433, 1521, 2049, 3306, 3389, 5432, 5900, 5985, 5986, 6379, 9200, 11211, 27017]
+        WHERE p.number IN [21, 22, 23, 25, 53, 80, 110, 143, 389, 443, 445, 636, 873, 993, 995, 1433, 1521, 2049, 3306, 3389, 5432, 5900, 5985, 5986, 6379, 8080, 8443, 9200, 11211, 27017]
         WITH ip.value + ':' + toString(p.number) AS raw, ip.value AS host, p.number AS port,
              CASE p.number
                WHEN 21 THEN 'ftp' WHEN 22 THEN 'ssh' WHEN 23 THEN 'telnet' WHEN 25 THEN 'smtp'
-               WHEN 53 THEN 'dns' WHEN 110 THEN 'pop3' WHEN 143 THEN 'imap' WHEN 389 THEN 'ldap'
-               WHEN 445 THEN 'smb' WHEN 636 THEN 'ldaps' WHEN 873 THEN 'rsync' WHEN 993 THEN 'imaps'
-               WHEN 995 THEN 'pop3s' WHEN 1433 THEN 'mssql' WHEN 1521 THEN 'oracle' WHEN 2049 THEN 'nfs'
-               WHEN 3306 THEN 'mysql' WHEN 3389 THEN 'rdp' WHEN 5432 THEN 'postgres'
-               WHEN 5900 THEN 'vnc' WHEN 5985 THEN 'winrm' WHEN 5986 THEN 'winrm' WHEN 6379 THEN 'redis'
+               WHEN 53 THEN 'dns' WHEN 80 THEN 'http' WHEN 110 THEN 'pop3' WHEN 143 THEN 'imap'
+               WHEN 389 THEN 'ldap' WHEN 443 THEN 'https' WHEN 445 THEN 'smb' WHEN 636 THEN 'ldaps'
+               WHEN 873 THEN 'rsync' WHEN 993 THEN 'imaps' WHEN 995 THEN 'pop3s' WHEN 1433 THEN 'mssql'
+               WHEN 1521 THEN 'oracle' WHEN 2049 THEN 'nfs' WHEN 3306 THEN 'mysql' WHEN 3389 THEN 'rdp'
+               WHEN 5432 THEN 'postgres' WHEN 5900 THEN 'vnc' WHEN 5985 THEN 'winrm' WHEN 5986 THEN 'winrm'
+               WHEN 6379 THEN 'redis' WHEN 8080 THEN 'http' WHEN 8443 THEN 'https'
                WHEN 9200 THEN 'elastic' WHEN 11211 THEN 'memcached' WHEN 27017 THEN 'mongodb'
                ELSE '' END AS svc
         WITH raw, host, port, svc,
