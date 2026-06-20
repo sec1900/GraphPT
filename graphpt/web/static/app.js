@@ -2427,6 +2427,39 @@ function toggleAutoDashboard() {
 }
 let _autoTimer = null;
 
+// ---- MITM Intercept toggle ----
+async function toggleMitm() {
+  const btn = document.getElementById('btn-mitm-toggle');
+  const status = document.getElementById('mitm-status');
+  const info = document.getElementById('mitm-info');
+  try {
+    const sr = await fetch(API + '/mitm/status');
+    const sd = await sr.json();
+    if (sd.ok && sd.data.running) {
+      // Stop
+      await fetch(API + '/mitm/stop', {method:'POST'});
+      btn.textContent = '\u{1F4F7} Intercept';
+      btn.style.background = '';
+      status.style.display = 'none';
+      toast('Intercept stopped');
+    } else {
+      // Start
+      const r = await fetch(API + '/mitm/start', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:currentAsset,port:8888})});
+      const d = await r.json();
+      if (d.ok) {
+        btn.textContent = '\u{1F4F7} Stop Intercept';
+        btn.style.background = 'var(--accent)';
+        btn.style.color = '#fff';
+        status.style.display = 'block';
+        info.textContent = 'Proxy: 127.0.0.1:8888 | CA: http://mitm.it | Asset: ' + (d.data.asset_id||currentAsset);
+        toast('Intercept started on :8888');
+      } else {
+        toast(d.error||'Failed', false);
+      }
+    }
+  } catch(e) { toast(e.message, false); }
+}
+
 // Check if scan already running on page load
 (async () => { try {
   const r = await fetch('/api/scan/progress?asset_id=' + currentAsset);

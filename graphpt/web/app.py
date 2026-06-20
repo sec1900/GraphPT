@@ -2434,6 +2434,83 @@ async def scan_completed(asset_id: str = "default"):
         return _json_error(exc)
 
 
+# ============================================================
+# MITM 代理控制 — 一键启停 mitmproxy 流量拦截
+# ============================================================
+
+_mitm_proc: subprocess.Popen | None = None
+_mitm_asset: str = ""
+
+
+@web_app.post("/api/mitm/start")
+async def mitm_start(body: dict | None = None):
+    """启动 mitmproxy 流量拦截代理（含 TLS 证书）。"""
+    global _mitm_proc, _mitm_asset
+    body = body or {}
+    asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
+    port = int(body.get("port", 8888))
+
+    if _mitm_proc is not None and _mitm_proc.poll() is None:
+        return {"ok": False, "error": f"already running for asset '{_mitm_asset}'"}
+
+    try:
+        from mitmproxy.tools.main import mitmweb
+        addon_path = str(_PROJECT_ROOT / "graphpt" / "collector" / "mitm_addon.py")
+        _mitm_proc = subprocess.Popen(
+            [sys.executable, "-c",
+             f"from mitmproxy.tools.main import mitmweb; mitmweb(['-s','{addon_path}','--set','graphpt_asset={asset_id}','-p','{port}','--no-web-open-browser'])"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        _mitm_asset = asset_id
+        return {
+            "ok": True,
+            "data": {
+                "status": "started",
+                "port": port,
+                "asset_id": asset_id,
+                "ca_cert_url": "http://mitm.it",
+                "note": "浏览器设代理 127.0.0.1:{0}，访问 http://mitm.it 装 CA 证书".format(port),
+            },
+        }
+    except Exception as exc:
+        return _json_error(exc)
+
+
+@web_app.post("/api/mitm/stop")
+async def mitm_stop():
+    """停止 mitmproxy 代理。"""
+    global _mitm_proc, _mitm_asset
+    if _mitm_proc is None:
+        return {"ok": True, "data": {"status": "not_running"}}
+    try:
+        _mitm_proc.terminate()
+        _mitm_proc.wait(timeout=5)
+    except Exception:
+        try:
+            _mitm_proc.kill()
+        except Exception:
+            pass
+    _mitm_proc = None
+    asset = _mitm_asset
+    _mitm_asset = ""
+    return {"ok": True, "data": {"status": "stopped", "asset_id": asset}}
+
+
+@web_app.get("/api/mitm/status")
+async def mitm_status():
+    """查询 mitmproxy 状态。"""
+    global _mitm_proc, _mitm_asset
+    running = _mitm_proc is not None and _mitm_proc.poll() is None
+    return {
+        "ok": True,
+        "data": {
+            "running": running,
+            "asset_id": _mitm_asset if running else "",
+            "port": 8888,
+        },
+    }
+
+
 @web_app.get("/api/report")
 async def generate_report(asset_id: str = "default", format: str = "markdown"):
     """生成渗透测试报告 — 从 Neo4j 拉取漏洞数据，渲染 Markdown/JSON。
