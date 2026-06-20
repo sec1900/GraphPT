@@ -410,7 +410,8 @@ G16. OOB 服务依赖公网 interactsh — 内网环境不可用                
 
 🟢 建议 — 长期
 
-G17. 无横向移动/权限提升 — 红队关键步骤缺失
-G18. 无报告导出 — PDF/HTML/Markdown
-G19. 无定时任务/周期扫描 — 24x7 生产化
-G20. neo4j CALL 子查询 5.x 废弃警告刷屏 — 全局替换 CALL (a, a) {}
+G17. 无横向移动/权限提升 — 红队关键步骤缺失                                 ⏭ 后续
+G18. 无报告导出 — PDF/HTML/Markdown (ReportGenerator 骨架已有)                ⏭ 后续
+G19. 无定时任务/周期扫描 — 24x7 生产化 (需 Celery Beat/cron)                  ⏭ 后续
+G20. neo4j CALL 子查询 5.x 废弃警告刷屏 — 全局替换 CALL (a) {                 ✅ 已修
+     14 处全部修复: graph_tools(7), web/app(2), scan_all(1), targets.yaml(4)
