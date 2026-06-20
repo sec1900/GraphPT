@@ -1579,7 +1579,7 @@ async def list_surfaces_endpoints(
         rows = _neo4j_query(
             f"""
             MATCH (a:Asset {{id: $aid}})
-            CALL (a) {{
+            CALL (a, a) {{
               WITH a
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
                     -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
@@ -1606,7 +1606,7 @@ async def list_surfaces_endpoints(
         total_rows = _neo4j_query(
             f"""
             MATCH (a:Asset {{id: $aid}})
-            CALL (a) {{
+            CALL (a, a) {{
               WITH a
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
                     -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
@@ -2421,6 +2421,91 @@ async def scan_completed(asset_id: str = "default"):
             import json
             return {"ok": True, "data": json.loads(payload)}
         return {"ok": True, "data": None}
+    except Exception as exc:
+        return _json_error(exc)
+
+
+@web_app.get("/api/report")
+async def generate_report(asset_id: str = "default", format: str = "markdown"):
+    """生成渗透测试报告 — 从 Neo4j 拉取漏洞数据，渲染 Markdown/JSON。
+
+    format: markdown (默认) / json
+    """
+    try:
+        from graphpt.core.report_generator import (
+            ReportGenerator, FindingReport, cvss3_score,
+        )
+
+        # 查询该资产下所有漏洞
+        rows = _neo4j_query("""
+            MATCH (a:Asset {id: $aid})
+            CALL (a, a) {
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[*1..5]->(v:Vulnerability)
+              RETURN v
+              UNION
+              MATCH (a)-[:HAS_IP]->(:IP)-[*1..4]->(v:Vulnerability)
+              RETURN v
+            }
+            WITH DISTINCT v
+            OPTIONAL MATCH (v)-[:FOUND_AT]->(ep:HTTPEndpoint)
+            RETURN v.title AS title, v.type AS vuln_type, v.severity AS severity,
+                   v.url AS url, v.description AS description,
+                   v.created_at AS created_at, ep.url AS endpoint
+            ORDER BY v.severity DESC, v.created_at DESC
+        """, aid=asset_id)
+
+        # 查资产名用作报告标题
+        asset_rows = _neo4j_query(
+            "MATCH (a:Asset {id: $aid})-[:HAS_ROOT]->(rd:RootDomain) "
+            "RETURN rd.value AS root ORDER BY rd.value LIMIT 1",
+            aid=asset_id,
+        )
+        target_name = asset_rows[0]["root"] if asset_rows else asset_id
+
+        rg = ReportGenerator()
+        rg.set_meta(
+            project_name=f"GraphPT 渗透测试报告",
+            target=target_name,
+        )
+
+        severity_map = {
+            "critical": "紧急", "high": "高危", "medium": "中危",
+            "low": "低危", "info": "信息", "unknown": "信息",
+        }
+
+        for r in rows:
+            sev_en = (r.get("severity") or "info").lower()
+            sev_cn = severity_map.get(sev_en, sev_en)
+            score, _ = cvss3_score()
+
+            finding = FindingReport(
+                title=r.get("title") or "未命名漏洞",
+                vuln_type=r.get("vuln_type") or "unknown",
+                severity=sev_cn,
+                cvss_score=score,
+                target=target_name,
+                endpoint=r.get("url") or r.get("endpoint") or "",
+                description=r.get("description") or "",
+            )
+            rg.add_finding(finding)
+
+        if format == "json":
+            from fastapi.responses import Response
+            return Response(
+                content=rg.get_findings_json(),
+                media_type="application/json",
+                headers={"Content-Disposition": f"attachment; filename=report_{target_name}.json"},
+            )
+
+        # Markdown
+        md = rg.render_markdown()
+        from fastapi.responses import Response
+        return Response(
+            content=md,
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f"attachment; filename=report_{target_name}.md"},
+        )
+
     except Exception as exc:
         return _json_error(exc)
 
@@ -3388,7 +3473,7 @@ def scan_alerts(asset_id: str = "default", severity: str = "high"):
     try:
         rows = _neo4j_query("""
             MATCH (a:Asset {id: $aid})
-            CALL (a) {
+            CALL (a, a) {
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[*1..5]->(v:Vulnerability)
               RETURN v
               UNION
