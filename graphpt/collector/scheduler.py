@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any
 
 _log = logging.getLogger("graphpt.scheduler")
@@ -167,7 +168,12 @@ _DEPENDENCY_LAYERS: list[dict[str, Any]] = [
 
 
 def _count_targets(tool: str, asset_id: str) -> int:
-    """探测某工具当前有多少待处理目标（直接查 Neo4j，不走 PipelineExecutor）。"""
+    """探测某工具当前有多少待处理目标（直接查 Neo4j）。
+
+    注意: 此计数为近似值（直接从 targets.yaml 的 Cypher 算），
+    实际派发由 advance_once → _query_targets 决定。
+    轻微误差不影响调度正确性（ScanRun 去重拦住重复派发）。
+    """
     try:
         from graphpt.collector.pipeline import _load_target_selectors
 
@@ -240,7 +246,82 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
     同一工具。锁带 TTL 自动过期,防止任务崩溃后永久死锁。
     """
     import redis as _redis
-    _LOCK_TTL = 1800  # 锁 30 分钟过期,防止任务挂死
+    _LOCK_TTL = 86400  # 锁硬超时 24 小时（安全兜底，正常由 _release_lock 释放）
+_HEARTBEAT_TTL = 3600      # 心跳 key TTL 1 小时
+_HEARTBEAT_STALE = 300     # 心跳超过 5 分钟无更新 → 判定任务已挂，自动释放
+
+
+def _redis_client():
+    import redis as _redis
+    return _redis.Redis(host="localhost", port=6379, socket_connect_timeout=2,
+                        decode_responses=True)
+
+
+def _clear_stale_locks(asset_id: str) -> int:
+    """检查所有调度锁的心跳，心跳停止超 5 分钟则自动释放锁+槽位。
+    任务活着时每 30s 更新心跳 → 24h 长任务不会被误杀；
+    任务崩溃后心跳停止 → 5min 内自动释放，下次 advance 可重试。
+    返回清除的锁数量。
+    """
+    try:
+        _r = _redis_client()
+        _r.ping()
+    except Exception:
+        return 0
+
+    cleared = 0
+    now = time.time()
+    pattern = f"scheduler:lock:{asset_id}:*"
+    cursor = 0
+    while True:
+        cursor, keys = _r.scan(cursor, match=pattern, count=50)
+        for key in keys:
+            tool = key.rsplit(":", 1)[-1]
+            hb_key = f"scheduler:heartbeat:{asset_id}:{tool}"
+            hb_val = _r.get(hb_key)
+            if hb_val:
+                try:
+                    hb_ts = float(hb_val)
+                    if now - hb_ts <= _HEARTBEAT_STALE:
+                        continue  # 心跳正常，跳过
+                except (ValueError, TypeError):
+                    pass
+            # 无心跳或心跳过期 → 释放锁
+            _r.delete(key)
+            _r.delete(hb_key)
+            _slot_release(_r, asset_id)
+            _log.warning("auto_clear_stale_lock tool=%s asset=%s (heartbeat lost)",
+                         tool, asset_id)
+            cleared += 1
+        if cursor == 0:
+            break
+    return cleared
+
+
+def _update_heartbeat(asset_id: str, tool: str) -> None:
+    """更新任务心跳时间戳（任务执行期间每 30s 调用一次）。
+    心跳 key 独立于锁 key，TTL 1h 兜底。"""
+    try:
+        _r = _redis_client()
+        _r.ping()
+        _r.setex(f"scheduler:heartbeat:{asset_id}:{tool}", _HEARTBEAT_TTL, str(time.time()))
+    except Exception:
+        pass
+
+
+def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[str, Any]:
+    """推进所有有目标的依赖层，派发所有待处理工具。
+
+    跨层不串行——ScanRun 去重自然门控：上游没产出时下游查询为空，不会派发。
+    同层工具并行派发。
+
+    防重复:派发后设 Redis 锁(按 tool+asset_id),锁有效期内重复点击不会重复派发
+    同一工具。锁带 TTL 自动过期,防止任务崩溃后永久死锁。
+    锁超时自动清除——任务挂死后 5 分钟自动释放并重试。
+    """
+    import redis as _redis
+    _LOCK_TTL = 600    # 锁硬超时 10 分钟（正常任务完成后 _release_lock 主动释放）
+    _STALE_TIMEOUT = 300  # 锁超过 5 分钟无更新 → 判定任务已挂，自动释放重试
     try:
         _r = _redis.Redis(host="localhost", port=6379, socket_connect_timeout=2,
                           decode_responses=True)
@@ -251,6 +332,11 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
 
     all_dispatched: list[dict[str, Any]] = []
     has_any = False
+    locked_tools: list[str] = []
+
+    # 自动清理超时锁（任务挂死后自动重启）
+    if _r:
+        _clear_stale_locks(asset_id)
 
     for spec in _DEPENDENCY_LAYERS:
         tools = spec["tools"]
@@ -274,6 +360,7 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
                 # 原子设锁 + 槽位获取
                 lock_key = f"scheduler:lock:{asset_id}:{item['tool']}"
                 if not _r.set(lock_key, "pending", nx=True, ex=_LOCK_TTL):
+                    locked_tools.append(item["tool"])
                     skipped.append(item["tool"])
                     continue  # 已被其他 advance_once 派发
                 if not _slot_acquire(_r, asset_id):
@@ -285,7 +372,9 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
                 task_id = _dispatch_tool(item["tool"], asset_id)
                 if task_id:
                     if _r:
-                        _r.setex(lock_key, _LOCK_TTL, task_id)  # 更新锁值为 task_id
+                        _r.setex(lock_key, _LOCK_TTL, task_id)
+                        # 初始心跳（任务内部会持续更新）
+                        _update_heartbeat(asset_id, item["tool"])
                 elif _r:
                     _r.delete(lock_key)         # 派发失败，清锁
                     _slot_release(_r, asset_id)
@@ -305,21 +394,26 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
     if not has_any:
         return {"status": "idle", "dispatched": [], "asset_id": asset_id}
     if not all_dispatched:
+        if locked_tools:
+            return {"status": "locked", "locked_tools": locked_tools,
+                    "dispatched": [], "asset_id": asset_id}
         return {"status": "running", "dispatched": [], "asset_id": asset_id}
     return {
         "status": "dispatched",
         "layers": all_dispatched,
         "asset_id": asset_id,
+        "locked_tools": locked_tools if locked_tools else None,
     }
 
 def _release_lock(asset_id: str, tool: str) -> None:
-    """任务完成后释放调度锁 + 槽位，触发下一轮 auto_advance。"""
+    """任务完成后释放调度锁 + 槽位 + 心跳，触发下一轮 auto_advance。"""
     try:
         import redis as _redis
         _r = _redis.Redis(host="localhost", port=6379, socket_connect_timeout=2,
                           decode_responses=True)
         _r.ping()
         _r.delete(f"scheduler:lock:{asset_id}:{tool}")
+        _r.delete(f"scheduler:heartbeat:{asset_id}:{tool}")
         _slot_release(_r, asset_id)
     except Exception:
         pass
@@ -351,10 +445,8 @@ def auto_advance(asset_id: str = "default") -> dict[str, Any]:
 
 
 def _dispatch_tool(tool: str, asset_id: str) -> str | None:
-    """派发单工具扫描 Celery 任务（同层并行的执行单元）。
-
-    任务内部用 _query_targets 自选目标、执行、入图、写 ScanRun 去重。
-    返回 Celery task id；派发失败返回 None。
+    """派发单工具扫描 Celery 任务（兼容旧调度路径）。
+    新调度路径使用 run_scan_layer，不经过 Celery。
     """
     try:
         from graphpt.collector.app import app
@@ -365,3 +457,183 @@ def _dispatch_tool(tool: str, asset_id: str) -> str | None:
         return getattr(result, "id", None)
     except Exception:
         return None
+
+
+# ═══════════════════════════════════════════════════════════════
+# 直接调度引擎（绕过 Celery，Windows/Linux 统一并行）
+# ═══════════════════════════════════════════════════════════════
+
+import concurrent.futures as _cf
+import threading as _threading
+
+_SCAN_STATE: dict[str, dict[str, Any]] = {}  # asset_id → {status, layer, tool_results, ...}
+_SCAN_STATE_LOCK = _threading.Lock()
+
+
+def _run_one_tool(tool: str, asset_id: str) -> dict[str, Any]:
+    """直接执行单个工具（不经过 Celery）。
+    复用 PipelineExecutor 的完整流程：选目标 → 跑工具 → adapter → 入图 → 标记已扫。
+    """
+    from graphpt.collector.tasks import _run_single_tool_pipeline
+
+    _update_heartbeat(asset_id, tool)
+    try:
+        result = _run_single_tool_pipeline(tool, asset_id=asset_id, stage_name=tool)
+    except Exception as exc:
+        result = {"status": "error", "tool": tool, "error": str(exc)}
+    finally:
+        _release_lock(asset_id, tool)
+    return result
+
+
+def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
+                   max_workers: int | None = None) -> dict[str, Any]:
+    """执行单层所有有目标工具（同层并行）。
+
+    对层内每个 tool，先 _count_targets 判断有无待处理目标，
+    有则通过 ThreadPoolExecutor 直接执行 _run_one_tool。
+    所有工具完成后返回汇总结果。
+
+    spec: _DEPENDENCY_LAYERS 中的一层，含 layer/node/tools。
+    """
+    layer_num = spec["layer"]
+    tools = spec["tools"]
+    if max_workers is None:
+        max_workers = min(len(tools), int(os.getenv("GRAPHPT_CONCURRENCY", "10")))
+
+    # 筛出有目标的工具
+    ready: list[str] = []
+    for tool in tools:
+        n = _count_targets(tool, asset_id)
+        if n > 0:
+            ready.append(tool)
+
+    if not ready:
+        return {"layer": layer_num, "status": "idle", "tools_run": 0,
+                "skipped": len(tools), "results": []}
+
+    _log.info("layer_%d_start asset=%s tools=%s targets_ready=%d",
+              layer_num, asset_id, ready, len(ready))
+
+    # 设锁（防并发调度）+ 更新全局状态
+    with _SCAN_STATE_LOCK:
+        _SCAN_STATE[asset_id] = {"status": "scanning", "layer": layer_num,
+                                  "tool": None, "tools_total": len(ready),
+                                  "tools_done": 0}
+
+    results: list[dict[str, Any]] = []
+
+    def _run(tool: str) -> dict[str, Any]:
+        with _SCAN_STATE_LOCK:
+            st = _SCAN_STATE.get(asset_id, {})
+            st["tool"] = tool
+        r = _run_one_tool(tool, asset_id)
+        with _SCAN_STATE_LOCK:
+            st = _SCAN_STATE.get(asset_id, {})
+            st["tools_done"] = st.get("tools_done", 0) + 1
+        return r
+
+    with _cf.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_run, tool): tool for tool in ready}
+        for future in _cf.as_completed(futures):
+            tool = futures[future]
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                results.append({"tool": tool, "status": "error", "error": str(exc)})
+                _log.error("layer_%d_tool_crash tool=%s error=%s", layer_num, tool, exc)
+
+    total_findings = sum(
+        r.get("findings", 0) + r.get("written", 0)
+        for r in results if isinstance(r, dict)
+    )
+    errors = [r for r in results if isinstance(r, dict) and r.get("status") == "error"]
+
+    _log.info("layer_%d_done asset=%s findings=%d errors=%d",
+              layer_num, asset_id, total_findings, len(errors))
+
+    with _SCAN_STATE_LOCK:
+        st = _SCAN_STATE.get(asset_id, {})
+        st["status"] = "layer_done"
+        st["layer"] = layer_num
+
+    return {
+        "layer": layer_num,
+        "status": "partial" if errors and total_findings else ("error" if errors and not total_findings else "ok"),
+        "tools_run": len(ready),
+        "findings": total_findings,
+        "errors": len(errors),
+        "results": results,
+    }
+
+
+def run_full_scan(asset_id: str, *,
+                  start_layer: int = 1,
+                  max_workers: int | None = None) -> dict[str, Any]:
+    """执行完整 7 层攻击链。
+
+    跨层串行（Layer N 的产出是 Layer N+1 的输入，靠 Neo4j 数据流自然门控），
+    层内并行（同层工具通过 ThreadPoolExecutor 同时跑）。
+
+    此函数直接在调用线程中运行（通常是 Web API 的后台线程），
+    不经过 Celery/Redis 队列，Windows/Linux 行为完全一致。
+    """
+    _log.info("full_scan_start asset=%s start_layer=%d", asset_id, start_layer)
+
+    with _SCAN_STATE_LOCK:
+        _SCAN_STATE[asset_id] = {"status": "scanning", "layer": start_layer,
+                                  "tool": None, "tools_total": 0, "tools_done": 0,
+                                  "started_at": time.time()}
+
+    layer_results: list[dict[str, Any]] = []
+    final_status = "ok"
+
+    for spec in _DEPENDENCY_LAYERS:
+        if spec["layer"] < start_layer:
+            continue
+
+        # 每层开始前清理过期锁
+        try:
+            _clear_stale_locks(asset_id)
+        except Exception:
+            pass
+
+        result = run_scan_layer(spec, asset_id, max_workers=max_workers)
+
+        layer_results.append(result)
+
+        if result.get("status") == "error":
+            final_status = "error"
+            _log.warning("full_scan_break asset=%s layer=%d status=error", asset_id, spec["layer"])
+            break
+        if result.get("status") == "idle":
+            # 该层无目标，继续下一层（后续层可能有之前残留的数据）
+            continue
+
+    total_findings = sum(r.get("findings", 0) for r in layer_results)
+    total_errors = sum(r.get("errors", 0) for r in layer_results)
+
+    with _SCAN_STATE_LOCK:
+        _SCAN_STATE[asset_id] = {"status": "done" if final_status == "ok" else final_status,
+                                  "layer": None, "tool": None,
+                                  "finished_at": time.time()}
+
+    _log.info("full_scan_done asset=%s status=%s findings=%d errors=%d layers=%d",
+              asset_id, final_status, total_findings, total_errors, len(layer_results))
+
+    return {
+        "status": final_status,
+        "asset_id": asset_id,
+        "layers": layer_results,
+        "total_findings": total_findings,
+        "total_errors": total_errors,
+    }
+
+
+def scan_state(asset_id: str = "default") -> dict[str, Any]:
+    """返回当前扫描状态（供前端轮询）。"""
+    with _SCAN_STATE_LOCK:
+        st = _SCAN_STATE.get(asset_id, {})
+        if not st:
+            return {"status": "idle", "asset_id": asset_id}
+        return dict(st)

@@ -41,15 +41,42 @@ def run_service(name: str, cmd: list[str], cwd: str, port: int = 0):
         time.sleep(5)
 
 
+def _clean_redis_on_startup():
+    """清理上次非正常退出残留的调度锁和槽位，防止 worker 僵尸。"""
+    try:
+        import redis as _redis
+        _r = _redis.Redis(host="localhost", port=6379, socket_connect_timeout=2)
+        _r.ping()
+        removed = 0
+        cursor = 0
+        while True:
+            cursor, keys = _r.scan(cursor, match="scheduler:*", count=100)
+            if keys:
+                _r.delete(*keys)
+                removed += len(keys)
+            if cursor == 0:
+                break
+        if removed:
+            print(f"[init] Cleaned {removed} stale scheduler keys from Redis")
+    except Exception:
+        pass  # Redis 未启动时静默跳过
+
+
 def main():
     from concurrent.futures import ThreadPoolExecutor
+
+    _clean_redis_on_startup()
+
+    concurrency = int(os.getenv("CELERY_CONCURRENCY", "10" if sys.platform != "win32" else "4"))
+    pool = "prefork" if sys.platform != "win32" else "solo"
+    print(f"[info] pool={pool} concurrency={concurrency}")
 
     services = [
         {
             "name": "celery-worker",
             "cmd": [
                 sys.executable, "-m", "celery", "-A", "graphpt.collector.app", "worker",
-                "--loglevel=warning", "--concurrency=4", "--pool=solo",
+                "--loglevel=warning", f"--concurrency={concurrency}", f"--pool={pool}",
                 "-Q", "collect,celery", "-n", "graphpt-worker-1",
             ],
         },

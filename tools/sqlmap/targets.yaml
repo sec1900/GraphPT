@@ -3,7 +3,7 @@ selectors:
     desc: "SQLi 检测 — 对所有带参数的 URL 自动测试注入"
     query: |
       MATCH (a:Asset {id: $asset_id})
-      CALL (a) {
+      CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         RETURN ep
         UNION

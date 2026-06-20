@@ -20,7 +20,7 @@
 ### 环境要求
 
 - Python 3.10+
-- Windows（start.bat / stop.bat）或 Docker
+- Windows（start.bat / stop.bat）
 
 ### 一键安装（Windows）
 
@@ -51,12 +51,11 @@ cp .env.example .env
 python -m graphpt
 ```
 
-### Docker
+### 停止
 
 ```bash
-cp .env.docker .env
-docker-compose up -d
-# Web 管理端: http://127.0.0.1:8080
+# 停止所有服务
+stop.bat
 ```
 
 ## 配置说明
@@ -128,6 +127,12 @@ GraphPT 支持两类工具：
 | nuclei | 漏洞扫描 | https://github.com/projectdiscovery/nuclei |
 
 每个工具目录应包含二进制文件，`tool.yaml` 配置模板已在仓库中。
+
+> **注意**：
+> - **subfinder** 需要配置被动数据源的 API Key（Chaos, SecurityTrails 等），否则无结果。
+>   详见 https://github.com/projectdiscovery/subfinder#post-installation-instructions
+> - **nuclei-templates** 不完整（仓库内仅 35 个），建议下载完整模板库：
+>   `git clone https://github.com/projectdiscovery/nuclei-templates.git res/nuclei-templates/`
 
 ### 自研脚本工具（随仓库分发，无需下载）
 

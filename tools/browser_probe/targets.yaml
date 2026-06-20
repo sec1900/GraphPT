@@ -3,7 +3,7 @@ selectors:
     desc: "浏览器探测 — 对首页/主要端点做 JS 渲染发现"
     query: |
       MATCH (a:Asset {id: $asset_id})
-      CALL (a) {
+      CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         RETURN ep
         UNION

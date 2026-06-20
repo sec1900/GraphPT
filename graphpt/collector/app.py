@@ -78,6 +78,26 @@ app.conf.task_routes = {
     "graphpt.collector.tasks.deep_crawl": {"queue": "deep_crawl"},
 }
 
+# ---- Worker 心跳（Redis，替代 celery inspect，Windows 兼容）----
+
+import threading as _heartbeat_threading
+
+def _worker_heartbeat():
+    """Worker 进程内后台线程：每 30s 写 Redis 心跳，TTL 60s。
+    health API 不再依赖 celery inspect（Windows 不可用），直接读心跳 key。"""
+    import time as _time
+    while True:
+        try:
+            import redis as _rds
+            _r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1)
+            _r.ping()
+            _r.setex(f"worker:heartbeat:graphpt-worker-1", 60, str(_time.time()))
+        except Exception:
+            pass
+        _time.sleep(30)
+
+_heartbeat_threading.Thread(target=_worker_heartbeat, daemon=True).start()
+
 # 导入任务模块以注册
 import graphpt.collector.tasks  # noqa: E402, F401
 import graphpt.collector.pipeline  # noqa: E402, F401

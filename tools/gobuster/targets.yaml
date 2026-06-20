@@ -1,9 +1,9 @@
 selectors:
   gobuster:
-    desc: "目录爆破(dir) — 取未扫的HTTPEndpoint（含Subdomain直连路径）"
+    desc: "目录爆破(dir) — 仅扫 httpx 确认过的 HTTP 端点（有真实响应头+内容类型），排除内网"
     query: |
       MATCH (a:Asset {id: $asset_id})
-      CALL (a) {
+      CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         RETURN ep
         UNION
@@ -15,6 +15,7 @@ selectors:
       }
       WITH DISTINCT ep
       WHERE ep.status_code > 0
+        AND ep.content_type IS NOT NULL AND ep.content_type <> ''
         AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
       RETURN ep.url AS url, ep.id AS parent_id
     mapping:
@@ -32,7 +33,7 @@ selectors:
     desc: "虚拟主机发现 — 取非内网IP"
     query: |
       MATCH (a:Asset {id: $asset_id})
-      CALL (a) {
+      CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)
         RETURN ip
         UNION

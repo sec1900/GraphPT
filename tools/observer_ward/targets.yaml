@@ -3,7 +3,7 @@ selectors:
     desc: Web指纹识别 — 取未指纹识别的HTTPEndpoint，批量一次跑完
     query: |
       MATCH (a:Asset {id: $asset_id})
-      CALL (a) {
+      CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         RETURN ep
         UNION
@@ -15,6 +15,7 @@ selectors:
       }
       WITH DISTINCT ep
       WHERE ep.status_code > 0
+        AND ep.content_type IS NOT NULL AND ep.content_type <> ''
         AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
       RETURN ep.url AS url
     mapping:

@@ -28,15 +28,14 @@ start.bat
 # http://127.0.0.1:8080
 ```
 
-## Configuration
-
-### Docker
+## Stop
 
 ```bash
-cp .env.docker .env
-docker-compose up -d
-# Web Admin: http://127.0.0.1:8080
+# Stop all services
+stop.bat
 ```
+
+## Configuration
 
 | File | Purpose |
 |------|---------|

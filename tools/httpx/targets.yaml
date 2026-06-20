@@ -3,7 +3,7 @@ selectors:
     desc: "Web指纹探测 — 全量(子域名 + IP:Port, 兼容旧调用)"
     query: |
       MATCH (a:Asset {id: $asset_id})
-      CALL (a) {
+      CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
         WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.value }
         RETURN s.value AS target
@@ -33,7 +33,7 @@ selectors:
     desc: "Web指纹探测 — Layer 4: 仅扫IP:Port"
     query: |
       MATCH (a:Asset {id: $asset_id})
-      CALL (a) {
+      CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(p:Port)
         WITH ip.value + ':' + toString(p.number) AS target
         WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }

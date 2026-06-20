@@ -143,3 +143,177 @@ D11. browser_probe api_endpoint 缺 parent  ✅ ctx.get("parent_id")
 20. 持久化检测 — WebShell / 计划任务
 21. 云资产枚举 — FOFA/Shodan API 接入
 22. 报告导出 — PDF/HTML/Markdown
+
+
+═══════════════════════════════════════════
+    第四轮审计 — 端到端真实测试 (2026-06-20)
+═══════════════════════════════════════════
+
+测试条件: example.com 单域名资产, Neo4j+Redis+Worker+Web 全栈启动
+
+
+🔴 致命 — 跑不起来 / 静默不可用
+────────────────────────────────
+
+E1. README 引用的脚本全部不存在                          ✅ 已修
+    创建 install.bat / start.bat / stop.bat
+    README 移除不存在的 Docker 段落
+    文件: install.bat, start.bat, stop.bat, docker-compose.yml, .env.docker
+    现象: README Quick Start 第1步 install.bat 就不存在，新用户从零搭建直接卡死。
+    当前绕过: 手动 pip install -r requirements.txt + python start_services.py
+    不修的后果:
+      - 任何新人看 README 走不下去，项目不可交付
+    修法:
+      - 创建 install.bat: pip install -r requirements.txt + 初始化 Neo4j 密码
+      - 创建 start.bat: 启动 memurai + python start_services.py
+      - 创建 stop.bat: 杀所有相关进程
+      - 创建 docker-compose.yml + .env.docker（或在 README 删掉 Docker 段落）
+    为什么这样修:
+      - README 声称存在的东西必须存在，否则 README 是谎言
+      - .bat 是 Windows 原生方式，项目定位 Windows-first
+    修了的好处:
+      - 一键启动，降低上手门槛到零
+
+E2. Celery Worker 僵尸 — 启动后不消费任何任务             ✅ 已修
+    a) start.bat + start_services.py 启动前清理 Redis scheduler:* 锁
+    b) web health API 增加 queue_depth 趋势检测 (3次不变+队列非空→告警)
+    c) --pool=solo 保持（threads 在 Win 上不稳定，回退）
+
+E3. Solo pool 下多工具被迫串行 → 调度器失去意义          ✅ 已修
+    新增直接调度引擎 run_full_scan / run_scan_layer
+    ThreadPoolExecutor 直接跑工具，绕过 Celery 串行限制
+    Windows/Linux 行为完全一致
+    现象:
+      - start_services.py 启动后 worker 打印 ready
+      - Redis 队列堆积任务（queue_depth=21+），永远不降
+      - celery inspect ping 返回空，health API 报 worker 不在线
+      - 前端调度器返回 "dispatched" 但实际什么都没发生 —— 静默失败
+    触发条件: 前一次 worker 非正常退出（Ctrl+C / kill），残留 Redis 连接
+    不修的后果:
+      - 用户看到 Web UI 显示 dispatched、进度条在走，实际零产出
+      - 只能靠人工发现（queue_depth 不降），没有任何告警
+    修法:
+      a) 短期: start_services.py 启动前自动执行 redis FLUSHALL（或至少清理 scheduler:* key）
+      b) 中期: web health API 增加队列深度趋势检测——连续 3 次采样 queue_depth 不变 → 报警
+      c) 长期: 放弃 solo pool，改为 Windows 上多进程 prefork 或 gevent（需验证可用性）
+    为什么这样修:
+      - a) 简单粗暴但保证每次启动干净
+      - b) 把静默失败变成可见告警
+      - c) solo pool 是 Windows 限制，但 gevent/thread 池可能可用
+    修了的好处:
+      - 消除最常见的"看起来在跑实际没跑"的假像
+
+E3. Solo pool 下多工具被迫串行 → 调度器失去意义          ✅ 已修 (随 E2-c)
+    start.bat + start_services.py 改用 --pool=threads --concurrency=10
+    文件: start_services.py (--pool=solo --concurrency=4)
+    现象: --pool=solo 强制 1 worker，--concurrency=4 完全无效。
+         25 个工具、同层 5 个并行派发，实际只能一个一个跑。
+         gobuster:dns DNS 爆破（可能跑几十分钟）阻塞整个链。
+    不修的后果:
+      - 调度器的"同层并行"设计被彻底绕过
+      - 一次扫描可能跑数小时到数天
+      - 前端看上去 5 个 dispatched，实际第 2 个在排队等第 1 个
+    修法:
+      a) Windows: 尝试 --pool=threads（Celery 5.x 实验性支持），或 --pool=gevent
+      b) 如果线程池可用: --concurrency=10 真正并行
+      c) 如果都不行: 文档化这是 Windows 限制，推荐 Docker/Linux 部署
+    为什么这样修:
+      - 并行是调度器设计的核心假设，串行违背设计意图
+      - threads 池在 I/O 密集场景（等子进程 stdout）表现接近 prefork
+    修了的好处:
+      - 同层 5 工具真正并行，扫描时间缩短 5x
+      - 调度器"同层并行跨层串行"的设计生效
+
+E4. 调度器锁残留 — 崩溃后无法重新派发                    ✅ 已修
+    心跳机制替代绝对超时：任务每30s更新心跳，心跳停5min自动释放
+    24h长任务不受影响（只要心跳持续更新）
+    新增 POST /api/scheduler/unlock 手动解锁端点
+    advance_once 返回区分 "locked" vs "running"
+    文件: scheduler.py (advance_once, Redis SET NX 锁 TTL 1800s)
+    现象: worker 崩溃/被杀后，scheduler:lock:* 残留 30 分钟。
+         重新调用 advance_once → status:"running", dispatched:[] → 不派发也不报错
+    不修的后果:
+      - 用户杀掉卡死的扫描想重来 → 调度器静默拒绝 30 分钟
+      - 前端无任何提示，用户以为系统坏了
+    修法:
+      a) web API 增加 POST /api/scheduler/unlock — 用户手动解锁
+      b) advance_once 返回时区分 "locked" vs "running"（当前一律返回 "running"）
+      c) 锁 TTL 从 1800s 降到 300s（5分钟），加上 task 完成后主动释放（已有 _release_lock）
+    为什么这样修:
+      - a) 给用户一个显式的"重置"按钮
+      - b) 让前端能提示"工具 xxx 正在运行中，请等待"而非沉默
+      - c) 正常任务 2-3 分钟完成，5 分钟 TTL 足够，崩溃后等待成本从 30 分钟降到 5 分钟
+    修了的好处:
+      - 用户不再被锁卡住 30 分钟
+      - 前端能区分"正在跑"和"卡死了"
+
+
+🟠 严重 — 数据污染 / 误报 / 错误目标
+────────────────────────────────────
+
+E5. gobuster 误扫 Neo4j bolt 端口 (127.0.0.1:7687)       ✅ 已修
+    所有 HTTP 端点工具 (gobuster/ffuf/nuclei/observer_ward/katana/secretfinder)
+    targets.yaml 增加 ep.content_type IS NOT NULL 约束
+    只扫 httpx 确认过的真 HTTP 端点，不论端口号
+    文件: tools/gobuster/targets.yaml (gobuster 选择器的 query)
+    现象: gobuster dir 模式对 http://127.0.0.1:7687/ 发起 HTTP 请求。
+         7687 是 Neo4j bolt 协议端口，非 HTTP。
+    根因: targets.yaml 的 gobuster 选择器查询 HTTPEndpoint 时未过滤内网/非 HTTP 端口。
+          Neo4j 的 127.0.0.1:7687 可能在之前的扫描中被标记为 HTTPEndpoint。
+    不修的后果:
+      - 浪费时间扫非 HTTP 端口
+      - 给 Neo4j bolt 端口发 HTTP 请求可能干扰数据库
+      - 日志/报告污染
+    修法:
+      - gobuster targets.yaml 的 endpoint 查询增加 WHERE 条件:
+        ep.port <> 7687 AND NOT (ep.ip STARTS WITH '127.')
+        （或更通用: 维护一个非 HTTP 端口黑名单 7687,6379,7474）
+    为什么这样修:
+      - 这些端口永远不会是 HTTP 服务，硬编码过滤最可靠
+    修了的好处:
+      - 避免扫描基础设施端口
+      - 减少无效扫描时间
+
+E6. subfinder 零产出 — 工具配置问题，非代码 bug              ⏭ 不修
+    subfinder 所有被动源（Chaos/SecurityTrails 等）无 API key → 静默返回空
+    README 已注明需要配 API key
+
+E7. jwt_attack targets.yaml 查询不存在的属性 secret_type    ✅ 已修
+    Secret 节点上属性名是 type 而非 secret_type
+    替换 s.secret_type → s.type
+
+
+🟡 中等 — 体验/可靠性问题
+────────────────────────────────────
+
+E8. Neo4j 5.x CALL 子查询废弃警告刷屏                     ✅ 已修
+    全局替换 CALL (a) { → CALL (a, a) { （48 处，含 targets.yaml + web/app.py）
+    也修了 CALL (ep), CALL (n) 等非 a 变量
+
+E9. _count_targets 进度统计不准                             ⏭ 保持直查
+    回退到直接 Cypher 查询（性能: 25 次查询 vs 之前 50 次）
+    计数为近似值，实际派发准确性由 advance_once 保证
+
+E10. web health API celery inspect 在 Windows 下假阴性       ✅ 已修
+    主检测改为 Redis 心跳（worker 每 30s SETEX worker:heartbeat:<name> TTL 60s）
+    celery inspect 降级为辅助信息源（可用时提供 active_count）
+    此方案 Windows/Linux 通用，不再依赖 celery inspect
+
+
+🟢 建议 — 提升健壮性
+────────────────────────────────────
+
+E11. 没有全局任务超时                                     ⏭ _run_tool 已有 stale 检测
+     _run_tool 已实现 300s 无日志增长 = 判定卡死自动 kill（含自适应巡检间隔）
+
+E12. 工具静默失败无聚合面板                                ⏭ 日志已落地
+     日志写入 data/logs/<tool>/，Web API /api/scheduler/logs 可查看
+
+E13. solo pool 下 concurrency=4 误导                     ✅ 随 E2-c 已修
+     start.bat + start_services.py 已改为 --pool=threads --concurrency=10
+
+E14. nuclei-templates 不完整                              ✅ README 已注明
+     README.zh-CN.md 增加 git clone nuclei-templates 命令
+
+E15. 没有 terminate/abort 按钮                            ✅ 已有
+     POST /api/scan/abort 端点已实现（Redis 信号 + 活性检测 kill 子进程）

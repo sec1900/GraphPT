@@ -3,17 +3,17 @@ selectors:
     desc: 全量敏感信息检测 — 取未扫的HTTPEndpoint(活) + File URL
     query: |
       MATCH (a:Asset {id: $asset_id})
-      CALL (a) {
+      CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-        WHERE ep.status_code > 0
+        WHERE ep.status_code > 0 AND ep.content_type IS NOT NULL AND ep.content_type <> ''
         RETURN ep
         UNION
         MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-        WHERE ep.status_code > 0
+        WHERE ep.status_code > 0 AND ep.content_type IS NOT NULL AND ep.content_type <> ''
         RETURN ep
         UNION
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
-        WHERE ep.status_code > 0
+        WHERE ep.status_code > 0 AND ep.content_type IS NOT NULL AND ep.content_type <> ''
         RETURN ep
       }
       WITH DISTINCT ep

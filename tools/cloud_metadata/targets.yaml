@@ -3,7 +3,7 @@ selectors:
     desc: "SSRF 漏洞 — 自动探测云平台元数据端点"
     query: |
       MATCH (a:Asset {id: $asset_id})
-      CALL (a) {
+      CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
         RETURN v, ep.url AS endpoint_url, ep.id AS parent_id
         UNION
