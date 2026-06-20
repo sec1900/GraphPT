@@ -87,7 +87,7 @@ class TrafficIngestHandler(BaseHTTPRequestHandler):
                 writer.write_ip(target_ip, asset_id=self._asset_id, source="traffic_ingest")
                 port_id = f"port:ip:{target_ip}:{port}/tcp"
                 writer.write_port(
-                    ip_id=port_id.rsplit(":", 2)[0],
+                    ip_id=f"ip:{target_ip}",
                     port=port, protocol="tcp", source="traffic_ingest",
                 )
                 # HTTPEndpoint 挂在 Port 下
@@ -98,7 +98,7 @@ class TrafficIngestHandler(BaseHTTPRequestHandler):
                     asset_id=self._asset_id, source="traffic_ingest",
                 )
 
-            # 域名级端点
+            # 域名级端点（始终写入）
             writer.write_http_endpoint(
                 url=endpoint_url, method=method,
                 parent_id=sub_id, status_code=0,
@@ -106,21 +106,23 @@ class TrafficIngestHandler(BaseHTTPRequestHandler):
                 asset_id=self._asset_id, source="traffic_ingest",
             )
 
-            # 文件识别
+            # 文件识别（不依赖 IP）
             from urllib.parse import unquote
             decoded_path = unquote(path)
             filename = decoded_path.rsplit("/", 1)[-1]
             if "." in filename and not filename.startswith("."):
                 ext = filename.rsplit(".", 1)[-1].lower()
-                if ext in ("js", "css", "json", "xml", "png", "jpg", "jpeg", "gif", "svg",
-                           "ico", "woff", "woff2", "ttf", "pdf", "doc", "docx", "xls",
-                           "xlsx", "zip", "tar", "gz", "map", "txt", "html", "htm", "php",
-                           "asp", "aspx", "jsp", "py", "rb", "java", "class", "jar",
-                           "war", "ear", "yml", "yaml", "toml", "ini", "cfg", "conf"):
+                FILE_EXTS = {"js","css","json","xml","png","jpg","jpeg","gif","svg",
+                           "ico","woff","woff2","ttf","pdf","doc","docx","xls",
+                           "xlsx","zip","tar","gz","map","txt","html","htm","php",
+                           "asp","aspx","jsp","py","rb","java","class","jar",
+                           "war","ear","yml","yaml","toml","ini","cfg","conf"}
+                if ext in FILE_EXTS:
                     file_url = f"{scheme}://{host}{path}"
                     writer.write_file(
-                        url=file_url, format=ext, parent_id=sub_id,
-                        asset_id=self._asset_id, source="traffic_ingest",
+                        endpoint_id=f"ep:GET:{file_url}",
+                        url=file_url, content_type=ext,
+                        source="traffic_ingest",
                     )
                     with self._stats_lock:
                         self._stats["files"] += 1
@@ -135,8 +137,8 @@ class TrafficIngestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length) if content_length > 0 else b""
-        # 从 path 还原完整 URL（Burp 转发时 path 是完整 URL）
-        url = self.path
+        # Burp 转发时 path 是完整 URL（去掉前导 /）
+        url = self.path.lstrip("/")
         if not url.startswith("http"):
             host = self.headers.get("Host", "localhost")
             url = f"http://{host}{self.path}"
@@ -148,7 +150,7 @@ class TrafficIngestHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length) if content_length > 0 else b""
-        url = self.path
+        url = self.path.lstrip("/")
         if not url.startswith("http"):
             host = self.headers.get("Host", "localhost")
             url = f"http://{host}{self.path}"
