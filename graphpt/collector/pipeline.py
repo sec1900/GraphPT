@@ -1011,6 +1011,9 @@ class PipelineExecutor:
                     if _pxy:
                         for _pk in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                             _proc_env[_pk] = _pxy
+                        # 本地地址不走代理
+                        _proc_env["NO_PROXY"] = "127.0.0.1,localhost,::1,*.local"
+                        _proc_env["no_proxy"] = "127.0.0.1,localhost,::1,*.local"
                 except Exception: pass
                 # stdout → PIPE (Windows 兼容) → 边读边写 log 文件(浏览器可 tail)
                 proc = subprocess.Popen(cmd, text=True, encoding='utf-8', errors='replace',
