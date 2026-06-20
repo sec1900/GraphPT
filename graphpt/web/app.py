@@ -2482,10 +2482,14 @@ async def mitm_start(body: dict | None = None):
 @web_app.get("/api/mitm/cert")
 async def mitm_cert():
     from pathlib import Path as _Path
-    cert_path = _Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.cer"
+    cert_dir = _Path.home() / ".mitmproxy"
+    cert_path = cert_dir / "mitmproxy-ca-cert.cer"
+    if not cert_path.is_file():
+        cert_path = cert_dir / "mitmproxy-ca-cert.pem"
     if not cert_path.is_file():
         raise HTTPException(404, "CA cert not found. Run mitmproxy once to generate it.")
-    return FileResponse(cert_path, media_type="application/x-x509-ca-cert", filename="mitmproxy-ca-cert.cer")
+    return FileResponse(cert_path, media_type="application/x-x509-ca-cert",
+                        filename="mitmproxy-ca-cert." + cert_path.suffix.lstrip("."))
 
 
 @web_app.post("/api/mitm/stop")

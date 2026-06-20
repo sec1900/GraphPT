@@ -2497,6 +2497,24 @@ async function refreshMitmStats() {
   }
 } catch(e){} })();
 
+// Restore MITM state on page load
+(async () => { try {
+  const sr = await fetch(API + '/mitm/status');
+  const sd = await sr.json();
+  if (sd.ok && sd.data.running) {
+    const status = document.getElementById('mitm-status');
+    const btn = document.getElementById('btn-mitm-toggle');
+    const port = sd.data.port || 8888;
+    btn.style.background = 'var(--green)'; btn.style.color = '#fff';
+    status.style.display = 'block';
+    const addrSpan = status.querySelector('span');
+    if (addrSpan) addrSpan.textContent = '\u{1F4F7} Listening on 127.0.0.1:' + port;
+    document.getElementById('mitm-asset-label').textContent = sd.data.asset_id || '';
+    if (!_mitmPoll) _mitmPoll = setInterval(refreshMitmStats, 5000);
+    refreshMitmStats();
+  }
+} catch(e){} })();
+
 // Global search
 async function doSearch() {
   const q = document.getElementById('global-search').value.trim();
