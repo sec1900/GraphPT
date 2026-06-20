@@ -340,12 +340,9 @@ G2. L2 接管检测和 HTTP 指纹同层并行 — HTTP 指纹触发限速后接
      7 层架构变为 8 层架构
      文件: scheduler.py _DEPENDENCY_LAYERS
 
-G3. brutespray 只测空密码 — 红队需要字典暴破
-    现象: 当前 -c : -e nsr 只测空密码/相同用户名/反转，完全无字典
-          有 rockyou.txt(52MB)、xato-net-10-million-passwords.txt(52MB) 等现成字典
-    影响: SSH/MySQL/Redis 弱口令完全检测不到
-    建议: 增加用户名+密码字典参数，从 res/wordlists/ 加载
-    文件: tools/brutespray/tool.yaml
+G3. brutespray 只测空密码 — 红队需要字典暴破                           ✅ 已修
+     -c : -e nsr → -U top-usernames.txt(99) -P top-passwords.txt(150)
+     文件: tools/brutespray/tool.yaml, res/wordlists/top-usernames.txt, top-passwords.txt
 
 G4. naabu 扫全端口时 vhost 干等着 — 同层工具并行能力浪费
     现象: L3 同层有 naabu + gobuster:vhost，但 naabu 扫全端口要 5-30 分钟
