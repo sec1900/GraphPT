@@ -44,6 +44,7 @@
         <input type="checkbox" id="dash-auto-refresh" onchange="toggleAutoDashboard()"> Auto (30s)
       </label>
       <span class="spacer"></span>
+      <input type="number" id="mitm-port" value="8888" min="1024" max="65535" style="width:60px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:11px;padding:2px 4px;margin-left:4px" title="Proxy listen port">
       <button class="btn outline" onclick="toggleMitm()" id="btn-mitm-toggle" style="font-size:11px" title="Start/Stop traffic intercept proxy">&#128247; Intercept</button>
       <span style="font-size:11px;color:var(--muted)" id="dash-asset-name"></span>
     </div>

@@ -2445,7 +2445,8 @@ async function toggleMitm() {
     } else {
       // Start — use current asset from dropdown
       const assetId = document.getElementById('dash-asset-sel')?.value || currentAsset;
-      const r = await fetch(API + '/mitm/start', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId,port:8888})});
+      const port = parseInt(document.getElementById('mitm-port')?.value) || 8888;
+      const r = await fetch(API + '/mitm/start', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId,port:port})});
       const d = await r.json();
       if (d.ok) {
         btn.textContent = '\u{1F4F7} Intercept';
@@ -2454,10 +2455,14 @@ async function toggleMitm() {
         status.style.display = 'block';
         document.getElementById('mitm-asset-label').textContent = assetId;
         document.getElementById('mitm-stats').textContent = '';
+        // Update listening address
+        const statusDiv = document.getElementById('mitm-status');
+        const addrSpan = statusDiv?.querySelector('span');
+        if (addrSpan) addrSpan.textContent = '\u{1F4F7} Listening on 127.0.0.1:' + port;
         // Poll stats every 5s
         if (!_mitmPoll) _mitmPoll = setInterval(refreshMitmStats, 5000);
         refreshMitmStats();
-        toast('Intercept started on :8888 → asset: ' + assetId);
+        toast('Intercept started on :' + port + ' → asset: ' + assetId);
       } else {
         toast(d.error||'Failed', false);
       }
