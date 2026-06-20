@@ -1125,27 +1125,37 @@ function renderVulnerabilityRows(rows) {
   if (!rows.length) {
     return '<tr><td colspan="5" style="color:var(--muted);padding:24px 0;text-align:center">No vulnerabilities. Run nuclei after endpoints are discovered.</td></tr>';
   }
-  return rows.map(v => {
+  return rows.map((v, i) => {
     const title = v.title || v.type || 'Untitled finding';
     const meta = [v.type, v.id].filter(Boolean).map(esc).join(' · ');
-    const detail = v.detail ? `<div style="color:var(--muted);font-size:12px;margin-top:4px;max-width:560px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(v.detail)}</div>` : '';
-    const evidence = v.evidence ? `<div style="color:var(--orange);font-size:11px;margin-top:4px;max-width:560px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(v.evidence)}</div>` : '';
+    const detail = v.detail || '';
+    const evidence = v.evidence || '';
     const url = v.url || '';
     const sourceTags = (v.sources || []).map(s => `<span class="src-tag">${esc(s)}</span>`).join('') || '<span style="color:var(--muted)">-</span>';
-    return `<tr>
+    const rowId = 'vuln-row-' + i;
+    const detailId = 'vuln-detail-' + i;
+    return `<tr id="${rowId}" onclick="document.getElementById('${detailId}').style.display=document.getElementById('${detailId}').style.display==='none'?'':'none'" style="cursor:pointer" title="Click to expand">
       <td>${severityBadge(v.severity)}</td>
       <td>
         <strong>${esc(title)}</strong>
         <div style="color:var(--muted);font-size:11px">${meta}</div>
-        ${detail}
-        ${evidence}
+        ${detail ? '<div style="color:var(--muted);font-size:12px;margin-top:4px">' + esc(detail.substring(0,200)) + (detail.length>200?'...':'') + '</div>' : ''}
       </td>
       <td>
-        ${url ? `<a href="${esc(url)}" target="_blank" style="color:var(--accent);text-decoration:none">${esc(url)}</a>` : '<span style="color:var(--muted)">-</span>'}
+        ${url ? '<a href="' + esc(url) + '" target="_blank" style="color:var(--accent);text-decoration:none" onclick="event.stopPropagation()">' + esc(url) + '</a>' : '<span style="color:var(--muted)">-</span>'}
         <div style="font-size:11px;color:var(--muted)">${v.status_code ? statusBadge(v.status_code) : ''} ${esc(v.endpoint_title || '')}</div>
       </td>
       <td>${sourceTags}</td>
       <td style="font-size:11px;color:var(--muted)">${fmtTime(v.last_seen_at || v.created_at)}</td>
+    </tr>
+    <tr id="${detailId}" style="display:none;background:var(--bg)">
+      <td></td>
+      <td colspan="4" style="padding:12px 16px">
+        ${detail ? '<div style="margin-bottom:8px"><strong>Description:</strong><br>' + esc(detail) + '</div>' : ''}
+        ${evidence ? '<div style="margin-bottom:8px"><strong>Evidence:</strong><br><pre style="background:var(--surface);padding:8px;overflow-x:auto;font-size:12px">' + esc(evidence) + '</pre></div>' : ''}
+        ${url ? '<div style="margin-bottom:8px"><strong>URL:</strong> <a href="' + esc(url) + '" target="_blank">' + esc(url) + '</a></div>' : ''}
+        <div style="font-size:11px;color:var(--muted)">ID: ${esc(v.id||'')} · Created: ${fmtTime(v.created_at)} · Source: ${esc(v.sources?.join(', ')||'unknown')}</div>
+      </td>
     </tr>`;
   }).join('');
 }
