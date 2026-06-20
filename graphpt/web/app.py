@@ -2445,24 +2445,6 @@ def _mitm_redis():
     import redis
     return redis.Redis(host="localhost", port=6379, socket_connect_timeout=1, decode_responses=True)
 
-_mitm_alive_cache: dict[int, tuple[float, bool]] = {}
-
-def _mitm_alive(pid: int) -> bool:
-    now = time.time()
-    cached = _mitm_alive_cache.get(pid)
-    if cached and now - cached[0] < 30:
-        return cached[1]
-    try:
-        kernel32 = ctypes.windll.kernel32
-        handle = kernel32.OpenProcess(0x0400, False, pid)
-        alive = bool(handle)
-        if handle: kernel32.CloseHandle(handle)
-    except Exception:
-        alive = False
-    _mitm_alive_cache[pid] = (now, alive)
-    return alive
-
-
 @web_app.post("/api/mitm/start")
 async def mitm_start(body: dict | None = None):
     body = body or {}
@@ -2521,12 +2503,17 @@ async def mitm_stop():
 async def mitm_status():
     try:
         r = _mitm_redis(); r.ping()
-        pid = r.get("mitm:pid")
-        alive = bool(pid and _mitm_alive(int(pid)))
-        if not alive and pid:
-            r.delete("mitm:pid", "mitm:port", "mitm:asset"); pid = None
+        hb = r.get("mitm:heartbeat")
+        alive = False
+        if hb:
+            try:
+                alive = (time.time() - float(hb)) < 90
+            except ValueError:
+                pass
+        if not alive:
+            r.delete("mitm:pid", "mitm:port", "mitm:asset", "mitm:heartbeat")
         return {"ok": True, "data": {
-            "running": alive, "pid": int(pid) if pid else 0,
+            "running": alive, "pid": 0,
             "asset_id": r.get("mitm:asset") or "",
             "port": int(r.get("mitm:port") or 8888)}}
     except Exception:

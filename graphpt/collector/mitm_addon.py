@@ -29,6 +29,32 @@ class GraphPTAddon:
         self._writer = None
         self._asset_id = "default"
         self._stats = {"requests": 0, "domains": 0, "endpoints": 0, "files": 0}
+        self._heartbeat_thread = None
+        self._heartbeat_stop = False
+
+    def running(self):
+        """mitmproxy 启动后开始心跳。"""
+        import threading as _thr
+        self._heartbeat_stop = False
+        self._heartbeat_thread = _thr.Thread(target=self._heartbeat_loop, daemon=True)
+        self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self):
+        import time as _time
+        while not self._heartbeat_stop:
+            try:
+                import redis as _rds
+                r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1)
+                r.ping()
+                r.setex("mitm:heartbeat", 90, str(_time.time()))
+                r.setex("mitm:asset", 120, self._asset_id)
+            except Exception:
+                pass
+            _time.sleep(30)
+
+    def done(self):
+        self._heartbeat_stop = True
+        _log.info("mitm_addon_done stats=%s", self._stats)
 
     @property
     def writer(self):
@@ -124,9 +150,5 @@ class GraphPTAddon:
 
         except Exception:
             _log.debug("ingest_error", exc_info=True)
-
-    def done(self):
-        _log.info("mitm_addon_done stats=%s", self._stats)
-
 
 addons = [GraphPTAddon()]
