@@ -891,7 +891,8 @@ document.addEventListener('click', () => {
   document.getElementById('ctx-menu').style.display = 'none';
 });
 
-document.getElementById('explorer-table').addEventListener('contextmenu', function(e) {
+var explorerTable = document.getElementById('explorer-table');
+if (explorerTable) explorerTable.addEventListener('contextmenu', function(e) {
   const row = e.target.closest('tr.ex-row');
   if (!row || !row.dataset.nid) return;
   e.preventDefault();
