@@ -39,6 +39,11 @@ web_app.mount(
     StaticFiles(directory=str(_ARTIFACTS_DIR)),
     name="artifacts",
 )
+web_app.mount(
+    "/static",
+    StaticFiles(directory=str(_STATIC_DIR)),
+    name="static",
+)
 
 # ---- Neo4j (延迟连接，避免无 Neo4j 时启动失败) ----
 
