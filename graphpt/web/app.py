@@ -3342,6 +3342,76 @@ def read_tool_log(tool: str, filename: str, tail: int = 200):
 
 
 # ============================================================
+# 日志聚合 — 所有工具最近日志一览
+# ============================================================
+
+@web_app.get("/api/logs/summary")
+def logs_summary(tail: int = 20):
+    """返回所有工具最近日志摘要（每个工具最新日志的 tail 行）。"""
+    from pathlib import Path as _Path
+    _PROJECT_ROOT = _Path(__file__).resolve().parent.parent.parent
+    logs_root = _PROJECT_ROOT / "data" / "logs"
+    if not logs_root.is_dir():
+        return {"ok": True, "data": []}
+
+    tools = []
+    for tool_dir in sorted(logs_root.iterdir()):
+        if not tool_dir.is_dir():
+            continue
+        log_files = sorted(tool_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not log_files:
+            continue
+        latest = log_files[0]
+        try:
+            content = latest.read_text(encoding="utf-8", errors="replace")
+            lines = content.split("\n")
+            tools.append({
+                "tool": tool_dir.name,
+                "filename": latest.name,
+                "size": latest.stat().st_size,
+                "lines": len(lines),
+                "tail": "\n".join(lines[-tail:]) if tail > 0 else "",
+                "mtime": latest.stat().st_mtime,
+            })
+        except Exception:
+            pass
+    return {"ok": True, "data": tools}
+
+
+# ============================================================
+# 漏洞告警 — 高危发现主动通知
+# ============================================================
+
+@web_app.get("/api/scan/alerts")
+def scan_alerts(asset_id: str = "default", severity: str = "high"):
+    """返回最近发现的高危漏洞（>= high），供前端轮询弹窗。"""
+    try:
+        rows = _neo4j_query("""
+            MATCH (a:Asset {id: $aid})
+            CALL (a) {
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[*1..5]->(v:Vulnerability)
+              RETURN v
+              UNION
+              MATCH (a)-[:HAS_IP]->(:IP)-[*1..4]->(v:Vulnerability)
+              RETURN v
+            }
+            WITH DISTINCT v
+            WHERE v.severity IN ['critical', 'high']
+            RETURN v.title AS title, v.severity AS severity, v.url AS url,
+                   v.created_at AS created_at
+            ORDER BY v.created_at DESC LIMIT 20
+        """, aid=asset_id)
+        alerts = [
+            {"title": r["title"], "severity": r["severity"],
+             "url": r.get("url", ""), "created_at": r.get("created_at", "")}
+            for r in rows
+        ]
+        return {"ok": True, "data": alerts}
+    except Exception as exc:
+        return _json_error(exc)
+
+
+# ============================================================
 # 启动入口
 # ============================================================
 

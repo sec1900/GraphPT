@@ -3005,6 +3005,25 @@ async function refreshScanProgress() {
     const d = await r.json();
     if (!d.ok) return false;
     const data = d.data;
+
+    // -- cumulative progress (from scan/state) --
+    try {
+      const sr = await fetch('/api/scan/state?asset_id=' + currentAsset);
+      const sd = await sr.json();
+      const cum = (sd.ok && sd.data.cumulative) ? sd.data.cumulative : null;
+      const rd = (sd.ok && sd.data.round) ? sd.data.round : null;
+      let topHtml = (rd ? 'Round ' + rd : '') +
+        (cum ? ' &middot; ' + cum.scanned + '/' + cum.total_estimate + ' targets (' +
+         (cum.total_estimate > 0 ? Math.round(cum.scanned / cum.total_estimate * 100) : 0) + '%)' : '');
+      document.getElementById('scan-progress-summary').innerHTML = topHtml || '&nbsp;';
+      // progress bar
+      if (cum && cum.total_estimate > 0) {
+        const pct = Math.min(100, Math.round(cum.scanned / cum.total_estimate * 100));
+        document.getElementById('scan-progress-fill').style.width = pct + '%';
+        document.getElementById('scan-progress-fill').textContent = pct > 10 ? pct + '%' : '';
+      }
+    } catch(e) {}
+
     let html = '';
     for (const l of data.layers) {
       const tools = l.tools.map(t => {
@@ -3024,22 +3043,37 @@ async function refreshScanProgress() {
 
     if (data.active_tools.length === 0 && data.scan_running === false) {
       document.getElementById('btn-start-scan').style.background = '';
+      document.getElementById('scan-progress-fill').style.width = '100%';
+      document.getElementById('scan-progress-fill').textContent = '100%';
       return false; // done
     }
     return true;
   } catch(e) { return true; }
 }
 
+let _lastAlertCount = 0;
 function pollScanProgress() {
   document.getElementById('scan-progress-bar').style.display = 'block';
   if (_scanPoll) clearInterval(_scanPoll);
   let wasRunning = true;
   _scanPoll = setInterval(async () => {
     const alive = await refreshScanProgress();
+    // Check for new vulnerability alerts
+    try {
+      const ar = await fetch('/api/scan/alerts?asset_id=' + currentAsset);
+      const ad = await ar.json();
+      if (ad.ok && ad.data.length > _lastAlertCount) {
+        const newest = ad.data[0];
+        toast('&#9888; ' + newest.severity.toUpperCase() + ': ' + newest.title, false);
+        _lastAlertCount = ad.data.length;
+      }
+    } catch(e) {}
     if (!alive && wasRunning) {
       clearInterval(_scanPoll); _scanPoll = null;
       toast('Scan complete! All tools finished.');
       document.getElementById('btn-start-scan').style.background = '';
+      document.getElementById('scan-progress-fill').style.width = '100%';
+      document.getElementById('scan-progress-fill').textContent = '100%';
       // Browser notification
       if (Notification.permission === 'granted') {
         new Notification('GraphPT Scan Complete', {body: 'All tools finished for ' + currentAsset});
