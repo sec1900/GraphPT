@@ -1,5 +1,5 @@
 desc: "服务识别"
-command: "{bin} -sT -sV -Pn -T4 -v -p {ports} {ip} -oX -"
+command: "{bin} -sT -sV -sC -O -Pn -T4 -v -p {ports} {ip} -oX -"
 use_on:
   IP:
     desc: "对 IP 的已知端口做服务识别"
