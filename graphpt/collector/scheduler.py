@@ -102,7 +102,8 @@ _DEPENDENCY_LAYERS: list[dict[str, Any]] = [
     #                    / gobuster DNS 爆破 / AXFR 域传送)
     # 工具消费 RootDomain，产出 Subdomain
     {"layer": 1, "node": "RootDomain",
-     "tools": ["crt", "subfinder", "urlfinder", "gobuster:dns", "dns_zonetransfer"]},
+     "tools": ["crt", "subfinder", "urlfinder", "gobuster:dns"]},
+    # dns_zonetransfer 移至 L1b: AXFR 需 dig 命令 + DNS 服务器允许（多数拒绝），Windows 上不稳定
 
     # ═══════════════════════════════════════════════════════════════
     # Layer 2: DNS 解析 + 存活验证 — 把域名变成 IP

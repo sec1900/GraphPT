@@ -999,7 +999,7 @@ class PipelineExecutor:
             if _urls and os.path.isfile(_urls):
                 _stdfile = _urls
                 _stdin = open(_urls, "r", encoding="utf-8", errors="replace")
-            _STALE_TIMEOUT = 300   # 5 分钟日志文件无增长 → 判定卡死
+            _STALE_TIMEOUT = int(os.getenv("GRAPHPT_STALE_TIMEOUT", "300"))  # 日志无增长→判定卡死(秒)
             _POLL_INTERVAL = int(os.getenv("GRAPHPT_POLL_INTERVAL", "2"))  # 基础巡检间隔(秒), 默认2
 
             try:

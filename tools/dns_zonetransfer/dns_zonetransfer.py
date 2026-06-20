@@ -41,34 +41,42 @@ def _get_ns(domain: str) -> list[str]:
 
 
 def _try_axfr(ns: str, domain: str) -> list[str]:
-    """尝试 AXFR 域传送。"""
-    records = []
-    try:
-        import dns.query
-        import dns.zone
-        import dns.rdatatype
+    """尝试 AXFR 域传送（硬超时 10s，Windows 兼容）。"""
+    import concurrent.futures as _cf
 
-        ns_ip = socket.gethostbyname(ns)
-        zone = dns.zone.from_xfr(dns.query.xfr(ns_ip, domain, timeout=TIMEOUT))
-        for name, node in zone.nodes.items():
-            for rdataset in node.rdatasets:
-                if rdataset.rdtype == dns.rdatatype.A:
-                    for rdata in rdataset:
-                        records.append(f"{name}.{domain} -> {rdata.address}")
-    except ImportError:
-        # fallback: dig AXFR
-        import subprocess
+    def _do_axfr():
+        records = []
         try:
-            result = subprocess.run(["dig", f"@{ns}", domain, "AXFR", "+short"], capture_output=True, text=True, timeout=15)
-            for line in result.stdout.strip().split("\n"):
-                line = line.strip()
-                if line:
-                    records.append(line)
+            import dns.query
+            import dns.zone
+            import dns.rdatatype
+            ns_ip = socket.gethostbyname(ns)
+            zone = dns.zone.from_xfr(dns.query.xfr(ns_ip, domain, timeout=TIMEOUT))
+            for name, node in zone.nodes.items():
+                for rdataset in node.rdatasets:
+                    if rdataset.rdtype == dns.rdatatype.A:
+                        for rdata in rdataset:
+                            records.append(f"{name}.{domain} -> {rdata.address}")
+        except ImportError:
+            import subprocess
+            try:
+                result = subprocess.run(["dig", f"@{ns}", domain, "AXFR", "+short"],
+                                       capture_output=True, text=True, timeout=10)
+                for line in result.stdout.strip().split("\n"):
+                    if line.strip():
+                        records.append(line.strip())
+            except Exception:
+                pass
         except Exception:
             pass
-    except Exception:
-        pass
-    return records
+        return records
+
+    try:
+        with _cf.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_do_axfr)
+            return future.result(timeout=10)
+    except (_cf.TimeoutError, Exception):
+        return []
 
 
 def main():
@@ -83,12 +91,19 @@ def main():
     ns_list = _get_ns(domain)
     results.append({"type": "ns_servers", "domain": domain, "servers": ns_list})
 
+    # AXFR 尝试（subprocess 隔离，硬超时，Windows 兼容）
+    import subprocess as _sp
     all_records = []
     for ns in ns_list:
-        records = _try_axfr(ns, domain)
-        if records:
-            results.append({"type": "axfr_success", "ns": ns, "records": records, "severity": "high"})
-            all_records.extend(records)
+        try:
+            r = _sp.run(["dig", f"@{ns}", domain, "AXFR", "+short", "+time=5", "+tries=1"],
+                       capture_output=True, text=True, timeout=12)
+            lines = [l.strip() for l in r.stdout.split("\n") if l.strip()]
+            if lines and r.returncode == 0:
+                results.append({"type": "axfr_success", "ns": ns, "records": lines, "severity": "high"})
+                all_records.extend(lines)
+        except (_sp.TimeoutExpired, Exception):
+            pass
 
     if args.json:
         for r in results:
