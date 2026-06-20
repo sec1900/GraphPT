@@ -1047,6 +1047,32 @@ class PipelineExecutor:
                     "message": msg,
                     "command": cmd,
                 })
+                # 即使超时/异常，也尝试解析已输出的部分结果
+                _partial_stdout = ""
+                try:
+                    _partial_stdout = _log_file.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+                if _partial_stdout:
+                    adapter_cls = ADAPTER_MAP.get(base)
+                    if adapter_cls is not None:
+                        try:
+                            adapter = adapter_cls()
+                            parse_ctx = dict(self.ctx)
+                            parse_ctx.update(asset_id=self.asset_id,
+                                           parent_id=self.ctx.get("parent_id", ""))
+                            findings = adapter.parse(_partial_stdout, **parse_ctx)
+                            if findings:
+                                try:
+                                    writer = get_graph_writer()
+                                    writer.write_batch(findings, asset_id=self.asset_id)
+                                    self._accumulate_context(findings)
+                                    total_findings += len(findings)
+                                    total_written += len(findings)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                 _cleanup_iteration_file()
                 _stdin.close() if _stdin else None
                 try:
