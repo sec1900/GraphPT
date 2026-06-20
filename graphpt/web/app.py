@@ -2400,10 +2400,27 @@ async def scan_start(body: dict | None = None):
 
 @web_app.get("/api/scan/state")
 async def scan_state_endpoint(asset_id: str = "default"):
-    """返回当前扫描状态（替代 celery inspect，直接读内存状态）。"""
+    """返回当前扫描状态 + 累积进度（替代 celery inspect，直接读内存状态）。"""
     try:
         from graphpt.collector.scheduler import scan_state
         return {"ok": True, "data": scan_state(asset_id)}
+    except Exception as exc:
+        return _json_error(exc)
+
+
+@web_app.get("/api/scan/completed")
+async def scan_completed(asset_id: str = "default"):
+    """查询最近一次扫描的完成通知（Redis, TTL 1h）。完成后前端轮询此端点。"""
+    try:
+        import redis as _rds
+        _r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1,
+                         decode_responses=True)
+        _r.ping()
+        payload = _r.get(f"scan:completed:{asset_id}")
+        if payload:
+            import json
+            return {"ok": True, "data": json.loads(payload)}
+        return {"ok": True, "data": None}
     except Exception as exc:
         return _json_error(exc)
 

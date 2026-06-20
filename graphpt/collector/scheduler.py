@@ -783,6 +783,7 @@ def run_full_scan(asset_id: str, *,
     except ScanAborted as exc:
         aborted_layer = current_spec.get("layer", 0) if current_spec else 0
         _log.info("full_scan_aborted asset=%s round=%d layer=%d", asset_id, round_num, aborted_layer)
+        _notify_completion(asset_id, "aborted", round_num, total_findings, total_errors)
         with _SCAN_STATE_LOCK:
             st = _SCAN_STATE.get(asset_id, {})
             st.update({"status": "aborted", "aborted_at": time.time(),
@@ -796,6 +797,7 @@ def run_full_scan(asset_id: str, *,
             "total_errors": total_errors,
         }
 
+    _notify_completion(asset_id, final_status, round_num, total_findings, total_errors)
     with _SCAN_STATE_LOCK:
         st = _SCAN_STATE.get(asset_id, {})
         st.update({"status": "done" if final_status == "ok" else final_status,
@@ -812,6 +814,24 @@ def run_full_scan(asset_id: str, *,
         "total_findings": total_findings,
         "total_errors": total_errors,
     }
+
+
+def _notify_completion(asset_id: str, status: str, round_num: int,
+                      total_findings: int, total_errors: int) -> None:
+    """扫描完成时写 Redis 通知（TTL 1h），前端可轮询获取。"""
+    try:
+        _r = _redis_client()
+        _r.ping()
+        import json as _json
+        payload = _json.dumps({
+            "asset_id": asset_id, "status": status, "rounds": round_num,
+            "findings": total_findings, "errors": total_errors,
+            "finished_at": time.time(),
+        })
+        _r.setex(f"scan:completed:{asset_id}", 3600, payload)
+        _log.info("scan_notification_sent asset=%s status=%s", asset_id, status)
+    except Exception:
+        pass
 
 
 def scan_state(asset_id: str = "default") -> dict[str, Any]:
