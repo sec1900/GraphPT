@@ -528,11 +528,12 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
         with _SCAN_STATE_LOCK:
             st = _SCAN_STATE.get(asset_id, {})
             st["tool"] = tool
-        r = _run_one_tool(tool, asset_id)
-        with _SCAN_STATE_LOCK:
-            st = _SCAN_STATE.get(asset_id, {})
-            st["tools_done"] = st.get("tools_done", 0) + 1
-        return r
+        try:
+            return _run_one_tool(tool, asset_id)
+        finally:
+            with _SCAN_STATE_LOCK:
+                st = _SCAN_STATE.get(asset_id, {})
+                st["tools_done"] = st.get("tools_done", 0) + 1
 
     with _cf.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_run, tool): tool for tool in ready}
