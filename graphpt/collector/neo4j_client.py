@@ -1240,6 +1240,38 @@ class GraphWriter:
                         source=f.get("source", ""),
                         _session=batch_session,
                     )
+                elif ftype == "os_detection":
+                    # nmap -O: 写 IP 节点属性
+                    ip_val = f.get("ip", "")
+                    if ip_val:
+                        ip_id = f"ip:{ip_val}"
+                        result = batch_session.run(
+                            "MERGE (n:IP {id: $id}) "
+                            "SET n.os_name = $os, n.os_accuracy = $acc, n.last_seen_at = $now",
+                            id=ip_id, os=f.get("os_name", ""),
+                            acc=f.get("accuracy", 0), now=self._now(),
+                        )
+                    else:
+                        result = None
+                elif ftype == "nse_script":
+                    # nmap -sC: 写 NseScript 节点挂 IP 下
+                    ip_val = f.get("ip", "")
+                    script_id = f.get("script_id", "")
+                    if ip_val and script_id:
+                        ip_id = f"ip:{ip_val}"
+                        nse_id = f"nse:{ip_val}:{script_id}"
+                        result = batch_session.run(
+                            "MERGE (ip:IP {id: $ip_id}) "
+                            "MERGE (n:NseScript {id: $nse_id}) "
+                            "SET n.script_id = $sid, n.output = $out, n.ip = $ip, "
+                            "    n.last_seen_at = $now "
+                            "MERGE (ip)-[:HAS_NSE_RESULT]->(n)",
+                            ip_id=ip_id, nse_id=nse_id,
+                            sid=script_id, out=f.get("output", "")[:2000],
+                            ip=ip_val, now=self._now(),
+                        )
+                    else:
+                        result = None
                 else:
                     _log.warning("write_batch_unrecognized_type",
                                  extra={"ftype": ftype, "finding_keys": list(f.keys())[:5]})
