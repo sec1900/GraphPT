@@ -1005,8 +1005,17 @@ class PipelineExecutor:
             try:
                 # stdout → log 文件(流式,浏览器 tail), 不经过 PIPE 避免工具缓冲卡死
                 with open(_log_file, "w", encoding="utf-8", errors="replace") as _lf:
+                    _proc_env = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+                    # 注入代理（httpx/naabu 等工具需要）
+                    try:
+                        from graphpt.common.settings import get_proxy_url
+                        _pxy = get_proxy_url()
+                        if _pxy:
+                            for _pk in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                                _proc_env[_pk] = _pxy
+                    except Exception: pass
                     proc = subprocess.Popen(cmd, text=True, encoding='utf-8', errors='replace',
-                                            env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+                                            env=_proc_env,
                                             stdin=_stdin, stdout=_lf, stderr=subprocess.STDOUT)
                     _start = _time.time()
                     while proc.poll() is None:
