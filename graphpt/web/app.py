@@ -1675,6 +1675,10 @@ async def list_vulnerabilities(
               UNION
               MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
               RETURN ep
+              UNION
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
+                    -[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep
             }
             WITH DISTINCT ep
             MATCH (ep)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
