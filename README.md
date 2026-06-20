@@ -16,13 +16,13 @@ Pipeline Engine          Neo4j Graph DB          AI Agent + Web Admin
 
 ```bash
 # 1. Install dependencies
-install.bat
+python install.py
 
 # 2. Configure environment
 # Edit .env: Neo4j credentials, proxy, API keys
 
-# 3. Start all local services (Neo4j + Redis + Worker + Web)
-start.bat
+# 3. Start all services
+python start_services.py
 
 # 4. Open browser
 # http://127.0.0.1:8080
