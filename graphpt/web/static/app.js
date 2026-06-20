@@ -2426,36 +2426,60 @@ function toggleAutoDashboard() {
 let _autoTimer = null;
 
 // ---- MITM Intercept toggle ----
+let _mitmPoll = null;
+
 async function toggleMitm() {
   const btn = document.getElementById('btn-mitm-toggle');
   const status = document.getElementById('mitm-status');
-  const info = document.getElementById('mitm-info');
   try {
     const sr = await fetch(API + '/mitm/status');
     const sd = await sr.json();
     if (sd.ok && sd.data.running) {
       // Stop
       await fetch(API + '/mitm/stop', {method:'POST'});
+      if (_mitmPoll) { clearInterval(_mitmPoll); _mitmPoll = null; }
       btn.textContent = '\u{1F4F7} Intercept';
       btn.style.background = '';
       status.style.display = 'none';
       toast('Intercept stopped');
     } else {
-      // Start
-      const r = await fetch(API + '/mitm/start', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:currentAsset,port:8888})});
+      // Start — use current asset from dropdown
+      const assetId = document.getElementById('dash-asset-sel')?.value || currentAsset;
+      const r = await fetch(API + '/mitm/start', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId,port:8888})});
       const d = await r.json();
       if (d.ok) {
-        btn.textContent = '\u{1F4F7} Stop Intercept';
-        btn.style.background = 'var(--accent)';
+        btn.textContent = '\u{1F4F7} Intercept';
+        btn.style.background = 'var(--green)';
         btn.style.color = '#fff';
         status.style.display = 'block';
-        info.textContent = 'Proxy: 127.0.0.1:8888 | CA: http://mitm.it | Asset: ' + (d.data.asset_id||currentAsset);
-        toast('Intercept started on :8888');
+        document.getElementById('mitm-asset-label').textContent = assetId;
+        document.getElementById('mitm-stats').textContent = '';
+        // Poll stats every 5s
+        if (!_mitmPoll) _mitmPoll = setInterval(refreshMitmStats, 5000);
+        refreshMitmStats();
+        toast('Intercept started on :8888 → asset: ' + assetId);
       } else {
         toast(d.error||'Failed', false);
       }
     }
   } catch(e) { toast(e.message, false); }
+}
+
+async function refreshMitmStats() {
+  try {
+    const r = await fetch(API + '/mitm/status');
+    const d = await r.json();
+    if (!d.ok || !d.data.running) return;
+    // Count traffic_ingest endpoints for this asset
+    const aid = document.getElementById('mitm-asset-label')?.textContent || currentAsset;
+    // Simple count from dashboard
+    const rd = await fetch(API + '/dashboard/counts?asset_id=' + aid);
+    const cnt = await rd.json();
+    if (cnt.ok) {
+      document.getElementById('mitm-stats').textContent =
+        'Traffic: ' + (cnt.data.subdomains||0) + ' domains | ' + (cnt.data.http_endpoints||0) + ' endpoints';
+    }
+  } catch(e) {}
 }
 
 // Check if scan already running on page load
