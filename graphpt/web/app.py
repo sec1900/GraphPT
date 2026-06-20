@@ -2435,91 +2435,89 @@ async def scan_completed(asset_id: str = "default"):
 
 
 # ============================================================
-# MITM 代理控制 — 一键启停 mitmproxy 流量拦截
+# ============================================================
+# MITM 代理控制 — 一键启停 mitmproxy 流量拦截 (Redis PID, Web重启不丢)
 # ============================================================
 
-_mitm_proc: subprocess.Popen | None = None
-_mitm_asset: str = ""
+import ctypes, ctypes.wintypes
+
+def _mitm_redis():
+    import redis
+    return redis.Redis(host="localhost", port=6379, socket_connect_timeout=1, decode_responses=True)
+
+def _mitm_alive(pid: int) -> bool:
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x0400, False, pid)
+        if handle: kernel32.CloseHandle(handle); return True
+    except Exception: pass
+    return False
 
 
 @web_app.post("/api/mitm/start")
 async def mitm_start(body: dict | None = None):
-    """启动 mitmproxy 流量拦截代理（含 TLS 证书）。"""
-    global _mitm_proc, _mitm_asset
     body = body or {}
     asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
     port = int(body.get("port", 8888))
-
-    if _mitm_proc is not None and _mitm_proc.poll() is None:
-        return {"ok": False, "error": f"already running for asset '{_mitm_asset}'"}
-
     try:
+        r = _mitm_redis(); r.ping()
+        old_pid = r.get("mitm:pid")
+        if old_pid and _mitm_alive(int(old_pid)):
+            return {"ok": False, "error": "already running (PID " + old_pid + ")"}
         from mitmproxy.tools.main import mitmweb
         addon_path = str(_PROJECT_ROOT / "graphpt" / "collector" / "mitm_addon.py")
-        _mitm_proc = subprocess.Popen(
+        proc = subprocess.Popen(
             [sys.executable, "-c",
              f"from mitmproxy.tools.main import mitmweb; mitmweb(['-s','{addon_path}','--set','graphpt_asset={asset_id}','-p','{port}','--no-web-open-browser'])"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        _mitm_asset = asset_id
-        return {
-            "ok": True,
-            "data": {
-                "status": "started",
-                "port": port,
-                "asset_id": asset_id,
-                "ca_cert_url": "http://mitm.it",
-                "note": "浏览器设代理 127.0.0.1:{0}，访问 http://mitm.it 装 CA 证书".format(port),
-            },
-        }
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        r.setex("mitm:pid", 86400, str(proc.pid))
+        r.setex("mitm:port", 86400, str(port))
+        r.setex("mitm:asset", 86400, asset_id)
+        return {"ok": True, "data": {"status": "started", "port": port, "pid": proc.pid, "asset_id": asset_id,
+                "note": "Proxy 127.0.0.1:" + str(port) + " | Download Cert to trust CA"}}
     except Exception as exc:
         return _json_error(exc)
 
 
 @web_app.get("/api/mitm/cert")
 async def mitm_cert():
-    """下载 mitmproxy CA 证书（PEM 格式），浏览器安装后即可拦截 HTTPS。"""
     from pathlib import Path as _Path
-    cert_path = _Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
+    cert_path = _Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.cer"
     if not cert_path.is_file():
         raise HTTPException(404, "CA cert not found. Run mitmproxy once to generate it.")
-    return FileResponse(cert_path, media_type="application/x-pem-file",
-                        filename="mitmproxy-ca-cert.pem")
+    return FileResponse(cert_path, media_type="application/x-x509-ca-cert", filename="mitmproxy-ca-cert.cer")
 
 
 @web_app.post("/api/mitm/stop")
 async def mitm_stop():
-    """停止 mitmproxy 代理。"""
-    global _mitm_proc, _mitm_asset
-    if _mitm_proc is None:
-        return {"ok": True, "data": {"status": "not_running"}}
     try:
-        _mitm_proc.terminate()
-        _mitm_proc.wait(timeout=5)
-    except Exception:
-        try:
-            _mitm_proc.kill()
-        except Exception:
-            pass
-    _mitm_proc = None
-    asset = _mitm_asset
-    _mitm_asset = ""
-    return {"ok": True, "data": {"status": "stopped", "asset_id": asset}}
+        r = _mitm_redis(); r.ping()
+        pid = r.get("mitm:pid")
+        if pid:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+            else:
+                os.kill(int(pid), 15)
+        r.delete("mitm:pid", "mitm:port", "mitm:asset")
+        return {"ok": True, "data": {"status": "stopped"}}
+    except Exception as exc:
+        return _json_error(exc)
 
 
 @web_app.get("/api/mitm/status")
 async def mitm_status():
-    """查询 mitmproxy 状态。"""
-    global _mitm_proc, _mitm_asset
-    running = _mitm_proc is not None and _mitm_proc.poll() is None
-    return {
-        "ok": True,
-        "data": {
-            "running": running,
-            "asset_id": _mitm_asset if running else "",
-            "port": 8888,
-        },
-    }
+    try:
+        r = _mitm_redis(); r.ping()
+        pid = r.get("mitm:pid")
+        alive = bool(pid and _mitm_alive(int(pid)))
+        if not alive and pid:
+            r.delete("mitm:pid", "mitm:port", "mitm:asset"); pid = None
+        return {"ok": True, "data": {
+            "running": alive, "pid": int(pid) if pid else 0,
+            "asset_id": r.get("mitm:asset") or "",
+            "port": int(r.get("mitm:port") or 8888)}}
+    except Exception:
+        return {"ok": True, "data": {"running": False, "pid": 0, "asset_id": "", "port": 8888}}
 
 
 @web_app.get("/api/report")
