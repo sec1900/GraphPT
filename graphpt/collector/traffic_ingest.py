@@ -171,6 +171,27 @@ class TrafficIngestHandler(BaseHTTPRequestHandler):
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             pass
 
+    def do_CONNECT(self):
+        """HTTPS CONNECT 隧道 — 记录域名后返回 200，浏览器透传。"""
+        host_port = self.path.strip("/")
+        host = host_port.split(":")[0] if ":" in host_port else host_port
+        # 记录域名
+        try:
+            parts = host.split(".")
+            root = ".".join(parts[-2:]) if len(parts) >= 2 else host
+            writer = self.get_writer()
+            writer.write_subdomain(host, self._asset_id, root_domain=root,
+                                  source="traffic_ingest")
+        except Exception:
+            pass
+        # 返回 405 — 不拦截 TLS，浏览器会直连但我们已记录域名
+        try:
+            self.send_response(405, "CONNECT not intercepted")
+            self.send_header("X-GraphPT", "domain-recorded")
+            self.end_headers()
+        except Exception:
+            pass
+
     do_PUT = do_POST
     do_DELETE = do_POST
     do_PATCH = do_POST
