@@ -204,7 +204,7 @@
   #cfg-editor { min-height:520px; font-family:Consolas, 'Cascadia Mono', monospace; font-size:12px; line-height:1.5; resize:vertical; }
   @media (max-width: 960px) { .cfg-layout { grid-template-columns:1fr; } }
 </style>
-<script src="/static/vendor/vis-network.min.js"></script>
+<script src="https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
 
@@ -218,14 +218,13 @@
 
 <nav>
   <button data-page="dashboard" class="active">Dashboard</button>
-  <button data-page="targets">Targets</button>
-  <button data-page="surfaces">Attack Surface</button>
-  <button data-page="vulns">Vulnerabilities</button>
-  <button data-page="tasks">Pipelines</button>
-  <button data-page="config">Config</button>
-  <button data-page="agent">Agent</button>
+  <button data-page="assets">Assets</button>
+  <button data-page="vulns">Findings</button>
+  <button data-page="reports">Reports</button>
   <button data-page="logs">Logs</button>
   <button data-page="graph">Graph</button>
+  <span class="spacer"></span>
+  <button data-page="config" class="icon-btn" title="Settings">&#9881;</button>
 </nav>
 
 <main>
@@ -273,7 +272,9 @@
   </div>
 
   <!-- ==================== Targets ==================== -->
-  <div id="page-targets" class="page">
+  <div id="page-assets" class="page">
+    <div class="loading">Loading...</div>
+  </div>
     <div class="toolbar">
       <div class="asset-sel">
         <select id="tgt-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
@@ -315,37 +316,6 @@
   </div>
 
   <!-- ==================== Explorer (Attack Surface) ==================== -->
-  <div id="page-surfaces" class="page">
-    <div class="toolbar">
-      <div class="asset-sel">
-        <select id="exp-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
-        <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
-      </div>
-      <span id="explorer-crumb" style="font-size:12px;color:var(--muted)">All Assets</span>
-      <input type="text" id="explorer-filter" placeholder="Filter..." style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:12px;width:160px" oninput="rebuild()" />
-      <span class="spacer"></span>
-      <button class="btn outline small" onclick="schedulerAdvance()" title="节点驱动:推进一轮（同层并行、跨层串行）">▶ 推进一轮</button>
-      <button class="btn outline small" onclick="scanAllPreview()">Scan All Unscanned</button>
-      <button class="btn outline small" onclick="explorerGoRoot()">Roots</button>
-      <button class="btn outline small" onclick="loadExplorer()">Refresh</button>
-    </div>
-    <div id="scheduler-progress" style="display:none; padding:8px 12px; margin-bottom:4px; background:var(--surface); border:1px solid var(--border); border-radius:8px; font-size:12px"></div>
-    <div id="scheduler-logs" style="display:flex; gap:8px; overflow-x:auto; margin-bottom:8px"></div>
-    <table id="explorer-table">
-      <thead><tr>
-        <th></th>
-        <th>Name</th>
-        <th>Detail</th>
-        <th>Sources</th>
-        <th>Created</th>
-      </tr></thead>
-      <tbody id="explorer-tbody"></tbody>
-    </table>
-    <div class="loading" id="explorer-loading">Loading</div>
-    <div class="ctx-menu" id="ctx-menu"></div>
-  </div>
-
-  <!-- ==================== Vulnerabilities ==================== -->
   <div id="page-vulns" class="page">
     <div class="toolbar">
       <div class="asset-sel">
@@ -385,7 +355,9 @@
   </div>
 
   <!-- ==================== Tasks ==================== -->
-  <div id="page-tasks" class="page">
+  <div id="page-reports" class="page">
+    <div class="loading">Loading...</div>
+  </div>
     <div id="pipelines-panel">
       <div class="toolbar">
         <span id="pl-status"></span>
@@ -478,34 +450,6 @@
   </div>
 
   <!-- ==================== Agent ==================== -->
-  <div id="page-agent" class="page">
-    <div class="toolbar">
-      <span style="font-size:14px;font-weight:600">Graph Agent</span>
-      <span class="spacer"></span>
-      <select id="agent-asset-sel" style="min-width:180px"></select>
-      <button class="btn" onclick="startAgent()">Run</button>
-    </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
-      <div>
-        <div class="section-title">Status</div>
-        <div id="agent-status" class="card" style="min-height:60px;font-size:13px;color:var(--muted)">No session</div>
-      </div>
-      <div>
-        <div class="section-title">Sessions</div>
-        <div id="agent-sessions" style="font-size:12px;max-height:120px;overflow-y:auto"></div>
-      </div>
-    </div>
-    <div class="section" style="margin-top:16px">
-      <div class="section-title">Agent Output</div>
-      <div class="code-block"><pre id="agent-output" style="min-height:200px;max-height:500px;overflow-y:auto;white-space:pre-wrap">Waiting...</pre></div>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:12px">
-      <input id="agent-prompt" type="text" placeholder="输入提示词或指导消息..." style="flex:1;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);font-size:13px">
-      <button class="btn small" onclick="sendAgentPrompt()">发送</button>
-    </div>
-  </div>
-
-  <!-- ==================== Tool Logs ==================== -->
   <div id="page-logs" class="page">
     <div class="toolbar">
       <div class="asset-sel">
@@ -740,13 +684,12 @@ function loadCurrentPage() {
   if (!active) return;
   switch (active.id) {
     case 'page-dashboard': loadDashboard(); break;
-    case 'page-targets': loadTargets(); break;
-    case 'page-surfaces': loadExplorer(); break;
+    case 'page-assets': loadAssets(); break;
     case 'page-vulns': loadVulnerabilities(); break;
-    case 'page-tasks': loadPipelines(); break;
+    case 'page-reports': loadReports(); break;
     case 'page-logs': loadLogs(); break;
     case 'page-graph': loadGraph(); break;
-    case 'page-agent': loadAgent(); break;
+    case 'page-config': loadConfig(); break;
   }
 }
 
@@ -834,12 +777,11 @@ document.querySelectorAll('nav button[data-page]').forEach(btn => {
     document.getElementById('page-' + btn.dataset.page).classList.add('active');
     switch(btn.dataset.page) {
       case 'dashboard': loadDashboard(); break;
-      case 'targets': loadTargets(); break;
-      case 'surfaces': loadExplorer(); break;
+      case 'assets': loadAssets(); break;
       case 'vulns': loadVulnerabilities(); break;
-      case 'tasks': loadPipelines(); break;
+      case 'reports': loadReports(); break;
+      case 'logs': loadLogs(); break;
       case 'config': loadConfig(); break;
-      case 'agent': loadAgent(); break;
       case 'graph': loadGraph(); break;
     }
   });
@@ -2111,6 +2053,7 @@ async function watchPipelineRun(taskId, name, intervalMs = 1500, maxWait = 60000
 
 function updatePipelineStatus() {
   const el = document.getElementById('pl-status');
+  if (!el) return;
   if (!_pipelineRunData) {
     el.innerHTML = '<span style="font-size:12px;color:var(--muted)">No recent pipeline run</span>';
     return;
@@ -3183,6 +3126,49 @@ async function showNodeDetail(url) {
 }
 
 // ============================================================
+  // ---- Assets page (merged Targets + Attack Surface) ----
+  async function loadAssets() {
+    document.getElementById("page-assets").innerHTML = '<div class="loading">Loading assets...</div>';
+    try {
+      const [t, r] = await Promise.all([
+        fetch(API + "/targets?asset_id=" + currentAsset),
+        fetch(API + "/explorer?asset_id=" + currentAsset)
+      ]);
+      const td = (await t.json()).data || [], ed = (await r.json()).data || {roots: []};
+      let h = '<div class="toolbar"><div class="asset-sel"><select onchange="switchAsset(this.value)">' + assetOptions(currentAsset) + '</select><button class="btn outline small" onclick="openNewAssetModal()">+</button></div>';
+      h += '<span class="spacer"></span><button class="btn outline small" onclick="loadAssets()">Refresh</button></div>';
+      h += '<div style="margin:12px 0 8px;font-weight:600">Seed Targets</div><table><thead><tr><th>Name</th><th>Type</th><th>Count</th><th>Created</th></tr></thead><tbody>';
+      if (td.length) td.forEach(x => h += '<tr><td><strong>' + esc(x.value) + '</strong></td><td>' + esc(x.type) + '</td><td>' + (x.sub_count || '') + '</td><td>' + fmtTime(x.created_at) + '</td></tr>');
+      else h += '<tr><td colspan="4" style="color:var(--muted)">No seed targets. Click + to add.</td></tr>';
+      h += '</tbody></table>';
+      h += '<div style="margin:16px 0 8px;font-weight:600">Discovered Assets</div><table><thead><tr><th>Name</th><th>Detail</th><th>Created</th></tr></thead><tbody>';
+      if (ed.roots && ed.roots.length) ed.roots.forEach(x => h += '<tr><td><strong>' + esc(x.value) + '</strong></td><td>' + (x.subdomain_count || 0) + ' subs, ' + (x.ip_count || x.port_count || 0) + ' IPs</td><td>' + fmtTime(x.created_at) + '</td></tr>');
+      else h += '<tr><td colspan="3" style="color:var(--muted)">No discoveries yet. Start a scan.</td></tr>';
+      h += '</tbody></table>';
+      document.getElementById("page-assets").innerHTML = h;
+    } catch (e) { document.getElementById("page-assets").innerHTML = '<div class="loading">Failed: ' + esc(e.message) + '</div>'; }
+  }
+
+  // ---- Reports page ----
+  async function loadReports() {
+    document.getElementById("page-reports").innerHTML = '<div class="loading">Loading...</div>';
+    try {
+      const [v, r] = await Promise.all([
+        fetch(API + "/vulnerabilities?asset_id=" + currentAsset + "&per_page=10"),
+        fetch(API + "/report?asset_id=" + currentAsset)
+      ]);
+      const vd = (await v.json()).data || [], rm = r.ok ? await r.text() : '';
+      let h = '<div class="toolbar"><div class="asset-sel"><select onchange="switchAsset(this.value)">' + assetOptions(currentAsset) + '</select></div>';
+      h += '<span class="spacer"></span><a href="' + API + '/report?asset_id=' + currentAsset + '" class="btn" download>Download .md</a> <a href="' + API + '/report?asset_id=' + currentAsset + '&format=json" class="btn outline" download>Download .json</a></div>';
+      h += '<div style="margin:16px 0 8px;font-weight:600">Findings (' + vd.length + ')</div><table><thead><tr><th>Sev</th><th>Title</th><th>Endpoint</th></tr></thead><tbody>';
+      if (vd.length) vd.forEach(x => h += '<tr><td>' + severityBadge(x.severity) + '</td><td>' + esc(x.title || '?') + '</td><td>' + (x.url ? '<a href="' + esc(x.url) + '" target="_blank">' + esc((x.url || '').substring(0, 60)) + '</a>' : '-') + '</td></tr>');
+      else h += '<tr><td colspan="3" style="color:var(--muted)">No findings. Run a full scan.</td></tr>';
+      h += '</tbody></table>';
+      if (rm) h += '<div style="margin:16px 0 8px;font-weight:600">Report Preview</div><pre style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;max-height:400px;overflow-y:auto;font-size:12px;white-space:pre-wrap">' + esc(rm.substring(0, 5000)) + (rm.length > 5000 ? '\n...' : '') + '</pre>';
+      document.getElementById("page-reports").innerHTML = h;
+    } catch (e) { document.getElementById("page-reports").innerHTML = '<div class="loading">Failed: ' + esc(e.message) + '</div>'; }
+  }
+
 loadHealth();
 loadDashboard();
 updatePipelineStatus();
