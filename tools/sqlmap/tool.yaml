@@ -1,5 +1,5 @@
 desc: "SQLi 自动化利用 — 对所有带参数 URL 自动测试注入"
-command: "python {bin} -u {url} --batch --random-agent --level=3 --risk=2 --flush-session"
+command: "{bin} -u {url} --batch --random-agent --level=3 --risk=2 --flush-session"
 use_on:
   Vulnerability:
     desc: "对 SQLi 漏洞做自动化利用验证"

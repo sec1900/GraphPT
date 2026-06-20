@@ -1,5 +1,5 @@
 desc: "JWT 弱点检测 — alg=none / 弱HMAC / kid注入"
-command: "python {bin} --token {token} --json"
+command: "{bin} --token {token} --json"
 use_on:
   Secret:
     desc: "对发现的 JWT token 做弱点检测"

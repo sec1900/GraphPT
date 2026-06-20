@@ -603,9 +603,8 @@ def run_full_scan(asset_id: str, *,
         layer_results.append(result)
 
         if result.get("status") == "error":
-            final_status = "error"
-            _log.warning("full_scan_break asset=%s layer=%d status=error", asset_id, spec["layer"])
-            break
+            final_status = "partial"
+            _log.warning("full_scan_layer_error asset=%s layer=%d (continuing)", asset_id, spec["layer"])
         if result.get("status") == "idle":
             # 该层无目标，继续下一层（后续层可能有之前残留的数据）
             continue

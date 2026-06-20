@@ -1,5 +1,5 @@
 desc: "DNS 域传送攻击 — AXFR 获取全部子域名"
-command: "python {bin} --domain {domain} --json"
+command: "{bin} --domain {domain} --json"
 use_on:
   RootDomain:
     desc: "对 RootDomain 的 NS 服务器尝试 AXFR 域传送"

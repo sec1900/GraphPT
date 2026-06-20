@@ -1,5 +1,5 @@
 desc: "云元数据 SSRF 利用 — 探测 AWS/GCP/Azure 等凭证"
-command: "python {bin} --url {url} --json"
+command: "{bin} --url {url} --json"
 use_on:
   Vulnerability:
     desc: "对 SSRF 漏洞做云元数据窃取"
