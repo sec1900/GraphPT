@@ -894,8 +894,6 @@ var assetsTable = document.getElementById('page-assets');
 if (assetsTable) assetsTable.addEventListener('contextmenu', function(e) {
   const row = e.target.closest('tr[data-nid]');
   if (!row || !row.dataset.nid) return;
-  const row = e.target.closest('tr.ex-row');
-  if (!row || !row.dataset.nid) return;
   e.preventDefault();
   _ctxMenuNode = findNode(row.dataset.nid);
   if (!_ctxMenuNode || _ctxMenuNode.type === '_load_more' || _ctxMenuNode.type === 'ScanRun') return;
