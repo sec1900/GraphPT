@@ -2290,7 +2290,7 @@ function refreshLog() {
     }
   });
 }
-toggleAutoRefresh();
+// toggleAutoRefresh(); // deferred to Logs page
 
 // ============================================================
 // One-click Full Scan
