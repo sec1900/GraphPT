@@ -324,34 +324,6 @@ def _register_transform(name: str, func: Any) -> None:
     _TRANSFORMS[name] = func
 
 
-def _transform_infer_service(target: Any) -> str:
-    """Port → service scheme 映射（给 brutespray 拼 service://host:port）。"""
-    port_to_service = {
-        21: "ftp", 22: "ssh", 23: "telnet", 25: "smtp", 53: "dns",
-        110: "pop3", 143: "imap", 389: "ldap", 445: "smb", 636: "ldaps",
-        873: "rsync", 993: "imaps", 995: "pop3s", 1433: "mssql", 1521: "oracle",
-        2049: "nfs", 3306: "mysql", 3389: "rdp", 5432: "postgres",
-        5900: "vnc", 5985: "winrm", 5986: "winrm", 6379: "redis",
-        8080: "http", 8443: "https", 9200: "elastic", 11211: "memcached", 27017: "mongodb",
-    }
-    target = str(target or "").strip()
-    if not target:
-        return target
-    parts = target.rsplit(":", 1)
-    if len(parts) == 2:
-        try:
-            port = int(parts[1])
-            svc = port_to_service.get(port, "")
-            if svc:
-                return f"{svc}://{target}"
-        except ValueError:
-            pass
-    return target
-
-
-_register_transform("infer_service_from_port", _transform_infer_service)
-
-
 def _transform_join_tech(tech: Any) -> str:
     """tech[] → 逗号分隔字符串（给 403bypass --waf 用）。"""
     if isinstance(tech, list):
