@@ -1,0 +1,6 @@
+{"type":"host_started","host":"127.0.0.1","port":6379,"service":"redis","timestamp":"2026-06-20T04:50:42.6524618+08:00","threads":10}
+{"type":"attempt","host":"127.0.0.1","port":6379,"service":"redis","success":true,"connected":true,"duration":7973000,"timestamp":"2026-06-20T04:50:43.1104866+08:00"}
+{"type":"host_completed","host":"127.0.0.1","port":6379,"service":"redis","timestamp":"2026-06-20T04:50:47.152225+08:00","total_attempts":1,"success_rate":1,"avg_response_ms":7}
+{"type":"host_started","host":"127.0.0.1","port":6379,"service":"redis","timestamp":"2026-06-20T05:48:20.8430984+08:00","threads":10}
+{"type":"attempt","host":"127.0.0.1","port":6379,"service":"redis","success":true,"connected":true,"duration":10356900,"timestamp":"2026-06-20T05:48:21.332601+08:00"}
+{"type":"host_completed","host":"127.0.0.1","port":6379,"service":"redis","timestamp":"2026-06-20T05:48:25.343299+08:00","total_attempts":1,"success_rate":1,"avg_response_ms":10}

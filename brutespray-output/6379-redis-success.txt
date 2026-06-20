@@ -1,0 +1,2 @@
+[redis] 127.0.0.1:6379 - User '' - Pass '' - SUCCESS
+[redis] 127.0.0.1:6379 - User '' - Pass '' - SUCCESS
