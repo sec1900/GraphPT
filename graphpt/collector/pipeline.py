@@ -999,7 +999,7 @@ class PipelineExecutor:
             if _urls and os.path.isfile(_urls):
                 _stdfile = _urls
                 _stdin = open(_urls, "r", encoding="utf-8", errors="replace")
-            _TOOL_TIMEOUT = int(os.getenv("GRAPHPT_TOOL_TIMEOUT", "600"))  # 工具硬超时(秒)，默认10分钟
+            _TOOL_TIMEOUT = int(os.getenv("GRAPHPT_TOOL_TIMEOUT", "120"))  # 工具硬超时(秒)，默认2分钟
             _POLL_INTERVAL = int(os.getenv("GRAPHPT_POLL_INTERVAL", "2"))
 
             try:
