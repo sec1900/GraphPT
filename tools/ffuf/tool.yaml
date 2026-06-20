@@ -1,9 +1,9 @@
 desc: "Web Fuzz 多模式"
-command: "{bin} -u {url}/FUZZ -w res/wordlists/web_dirs.txt -fc 403,404 -timeout 10 -rate 10 -json"
+command: "{bin} -u {url}/FUZZ -w res/wordlists/web_dirs.txt -fc 403,404 -timeout 10 -t 50 -rate 10 -json"
 use_on:
   Endpoint:
     desc: "目录/路径 Fuzz"
-    command: "{bin} -u {url}/FUZZ -w res/wordlists/web_dirs.txt -fc 403,404 -timeout 10 -rate 10 -json"
+    command: "{bin} -u {url}/FUZZ -w res/wordlists/web_dirs.txt -fc 403,404 -timeout 10 -t 50 -rate 10 -json"
     params:
       url: "{url}"
   IP:

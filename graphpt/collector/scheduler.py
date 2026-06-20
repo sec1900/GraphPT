@@ -106,64 +106,69 @@ _DEPENDENCY_LAYERS: list[dict[str, Any]] = [
     # dns_zonetransfer 移至 L1b: AXFR 需 dig 命令 + DNS 服务器允许（多数拒绝），Windows 上不稳定
 
     # ═══════════════════════════════════════════════════════════════
-    # Layer 2: DNS 解析 + 存活验证 — 把域名变成 IP
+    # Layer 2a: DNS 解析 + 子域名接管检测（轻量，不触发 HTTP 限速）
     # 输入: Subdomain 节点 (Layer 1 产出)
     # 输出: IP 节点 (dnsx A记录解析)
-    #       HTTPEndpoint 节点 (httpx:subdomain 直接对子域名做 HTTP 指纹)
-    #       Vulnerability 节点 (nuclei:takeover 检测悬空 CNAME)
-    # 工具消费 Subdomain，产出 IP + 子域名级别的 HTTPEndpoint
+    #       Vulnerability 节点 (nuclei:takeover 悬空 CNAME/NS 接管)
     {"layer": 2, "node": "Subdomain",
-     "tools": ["dnsx", "httpx:subdomain", "nuclei:takeover"]},
+     "tools": ["dnsx", "nuclei:takeover"]},
 
     # ═══════════════════════════════════════════════════════════════
-    # Layer 3: 端口扫描 — 发现 IP 上的开放端口
-    # 输入: IP 节点 (Layer 2 产出)
+    # Layer 2b: HTTP 指纹（重量，接管检测完成后再打 HTTP）
+    # 输入: Subdomain 节点 (Layer 1 产出)
+    # 输出: HTTPEndpoint 节点 (httpx:subdomain 子域名 HTTP 指纹)
+    {"layer": 3, "node": "Subdomain",
+     "tools": ["httpx:subdomain"]},
+
+    # ═══════════════════════════════════════════════════════════════
+    # Layer 4: 端口扫描 — 发现 IP 上的开放端口
+    # 输入: IP 节点 (Layer 2a 产出)
     # 输出: Port 节点 (naabu 快速端口扫描)
     #       HTTPEndpoint 节点 (gobuster:vhost 虚拟主机爆破)
     # 工具消费 IP，产出 Port + VHOST 端点
-    {"layer": 3, "node": "IP",
+    {"layer": 4, "node": "IP",
      "tools": ["naabu", "gobuster:vhost"]},
 
     # ═══════════════════════════════════════════════════════════════
-    # Layer 4: 服务识别 + 弱口令 — 识别端口上的服务并测试凭据
-    # 输入: Port 节点 (Layer 3 产出)
+    # Layer 5: 服务识别 + 弱口令 — 识别端口上的服务并测试凭据
+    # 输入: Port 节点 (Layer 4 产出)
     # 输出: Service 节点 (nmap 服务版本识别)
     #       HTTPEndpoint 节点 (httpx:port 对 IP:Port 做 HTTP 指纹)
     #       Credential 节点 (brutespray 40+协议弱口令爆破)
     # 工具消费 IP/Port，产出 Service + HTTPEndpoint + Credential
-    {"layer": 4, "node": "IP/Port",
+    {"layer": 5, "node": "IP/Port",
      "tools": ["nmap", "httpx:port", "brutespray"]},
 
     # ═══════════════════════════════════════════════════════════════
-    # Layer 5: 端点发现 — 穷尽所有可访问的 HTTP 端点
-    # 输入: HTTPEndpoint 节点 (Layer 2/4 产出)
+    # Layer 6: 端点发现 — 穷尽所有可访问的 HTTP 端点
+    # 输入: HTTPEndpoint 节点 (Layer 2b/5 产出)
     # 输出: HTTPEndpoint 节点 (observer_ward 技术栈指纹 / katana JS爬虫
     #                         / ffuf 目录爆破 / gobuster dir爆破
     #                         / browser_probe JS渲染发现)
     #       File 节点 (katana JS文件下载)
     #       DirEntry 节点 (ffuf/gobuster 发现的路径)
     # 工具消费 HTTPEndpoint，产出更多 HTTPEndpoint + File + DirEntry
-    {"layer": 5, "node": "Endpoint",
+    {"layer": 6, "node": "Endpoint",
      "tools": ["observer_ward", "katana", "ffuf", "gobuster", "browser_probe"]},
 
     # ═══════════════════════════════════════════════════════════════
-    # Layer 6: 漏洞发现 + 敏感信息 — 扫描漏洞、发现密钥、绕过访问控制
-    # 输入: HTTPEndpoint + File + DirEntry 节点 (Layer 5 产出)
+    # Layer 7: 漏洞发现 + 敏感信息 — 扫描漏洞、发现密钥、绕过访问控制
+    # 输入: HTTPEndpoint + File + DirEntry 节点 (Layer 6 产出)
     # 输出: Vulnerability 节点 (nuclei 模板匹配漏洞)
     #       Secret 节点 (secretfinder 密钥/令牌/密码泄露)
     #       BypassResult 节点 (403bypass 访问控制绕过)
     # 工具消费 HTTPEndpoint/DirEntry/File，产出 Vulnerability + Secret + BypassResult
-    {"layer": 6, "node": "Endpoint(tech)/DirEntry-403/File",
+    {"layer": 7, "node": "Endpoint(tech)/DirEntry-403/File",
      "tools": ["nuclei", "secretfinder", "403bypass"]},
 
     # ═══════════════════════════════════════════════════════════════
-    # Layer 7: 验证 + 利用 — 确认漏洞、利用注入、窃取凭证
-    # 输入: Vulnerability + Secret 节点 (Layer 6 产出)
+    # Layer 8: 验证 + 利用 — 确认漏洞、利用注入、窃取凭证
+    # 输入: Vulnerability + Secret 节点 (Layer 7 产出)
     # 输出: Vulnerability 节点 (sqlmap 确认SQLi → critical)
     #       Credential 节点 (云元数据窃取)
     #       OOBInteraction 节点 (带外交互验证)
     # 工具消费 Vulnerability/Secret，产出确认后的 Vulnerability + Credential
-    {"layer": 7, "node": "Vulnerability/Secret",
+    {"layer": 8, "node": "Vulnerability/Secret",
      "tools": ["oob", "sqlmap", "jwt_attack", "cloud_metadata"]},
 ]
 
@@ -674,7 +679,7 @@ def _any_tool_has_targets(asset_id: str) -> bool:
 def run_full_scan(asset_id: str, *,
                   start_layer: int = 1,
                   max_workers: int | None = None) -> dict[str, Any]:
-    """执行完整 7 层攻击链，自动循环直到所有目标扫完。
+    """执行完整 8 层攻击链，自动循环直到所有目标扫完。
 
     跨层串行，层内并行。每轮每工具最多 MAX_TARGETS 个目标。
     一轮完成后检查是否还有未扫目标 → 有则继续下一轮，无则结束。
