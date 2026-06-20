@@ -22,7 +22,7 @@ python install.py
 # Edit .env: Neo4j credentials, proxy, API keys
 
 # 3. Start all services
-python start_services.py
+python start.py
 
 # 4. Open browser
 # http://127.0.0.1:8080
@@ -32,7 +32,7 @@ python start_services.py
 
 ```bash
 # Stop all services
-stop.bat
+python stop.py
 ```
 
 ## Configuration

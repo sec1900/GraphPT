@@ -114,7 +114,7 @@ def main():
     print("=" * 60)
     print("  安装完成！")
     print()
-    print("  启动服务: python start_services.py")
+    print("  启动服务: python start.py")
     print("  交互CLI:  python -m graphpt")
     print("  访问 Web: http://127.0.0.1:8080")
     print("  扫描报告: http://127.0.0.1:8080/api/report")
