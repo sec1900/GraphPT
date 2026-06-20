@@ -2476,6 +2476,17 @@ async def mitm_start(body: dict | None = None):
         return _json_error(exc)
 
 
+@web_app.get("/api/mitm/cert")
+async def mitm_cert():
+    """下载 mitmproxy CA 证书（PEM 格式），浏览器安装后即可拦截 HTTPS。"""
+    from pathlib import Path as _Path
+    cert_path = _Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
+    if not cert_path.is_file():
+        raise HTTPException(404, "CA cert not found. Run mitmproxy once to generate it.")
+    return FileResponse(cert_path, media_type="application/x-pem-file",
+                        filename="mitmproxy-ca-cert.pem")
+
+
 @web_app.post("/api/mitm/stop")
 async def mitm_stop():
     """停止 mitmproxy 代理。"""
