@@ -1,80 +1,76 @@
 # GraphPT
 
-基于知识图谱的自动化渗透测试平台。工具链自动完成信息收集并写入 Neo4j 图数据库，AI Agent 读取图谱分析攻击路径，并按需触发精准扫描。
+基于知识图谱的自动化渗透测试平台。一键全量扫描，8 层攻击链自动循环推进。被动流量拦截实时入图，MITM 代理无缝集成。
 
 ## 架构
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ 工具链自动化  │────→│  Neo4j      │────→│  AI Agent   │
-│ Pipeline     │     │  图数据库    │     │  + Web 管理  │
-└─────────────┘     └─────────────┘     └─────────────┘
-  侦察/扫描/收集       资产关系图谱        图分析→触发扫描
+8 层攻击链               Neo4j 图数据库           Web 管理 (7 标签)
+  自动循环推进 ──────────────→ 资产关系图谱 ────────────→ Dashboard + 漏洞 + 报告
+  每工具分批 (100 目标)        漏洞存储                 一键 MITM 拦截
+  活性超时控制                关系追踪                  累计进度展示
 ```
-
-**当前已实现：** 工具编排、数据入图、Web 管理、图可视化、漏洞列表、被动 URL 发现、Web 指纹识别、指纹驱动漏洞扫描、403 访问绕过、基础 Graph Agent 图分析与扫描触发。  
-**仍待完善：** 报告导出、漏洞验证闭环、可复用 Runbook/定时调度、工具自动安装。
 
 ## 快速开始
 
-### 环境要求
-
-- Python 3.10+
-- Windows（start.bat / stop.bat）
-
-### 一键安装（Windows）
-
 ```bash
-# 1. 运行安装脚本（安装依赖 + 初始化 Neo4j 密码）
-install.bat
+# 1. 一键安装
+python install.py
 
-# 2. 编辑配置文件，填入 API Key 等信息
-notepad .env
+# 2. 编辑 .env 配置文件
+#    Neo4j 连接、代理、API Key
 
-# 3. 启动所有服务（Neo4j + Redis + Worker + Web）
-start.bat
+# 3. 启动所有服务
+python start.py
 
-# 4. 浏览器访问
-# http://127.0.0.1:8080
+# 4. 打开浏览器
+#    http://127.0.0.1:8080
+
+# 5. 停止
+python stop.py
 ```
 
-### 手动安装
+## 8 层攻击链
 
-```bash
-# 安装 Python 依赖
-pip install -r requirements.txt
-
-# 复制并编辑配置
-cp .env.example .env
-
-# 启动基础设施（Neo4j + Redis），然后运行 CLI
-python -m graphpt
+```
+L1  [攻击面]       crt + subfinder + urlfinder + gobuster:dns      → Subdomain
+L2  [DNS/接管]     dnsx + nuclei:takeover                         → IP + Vulnerability
+L3  [HTTP指纹]     httpx:subdomain                                → HTTPEndpoint
+L4  [端口扫描]     naabu + gobuster:vhost                         → Port
+L5  [服务/弱口令]  nmap + httpx:port + brutespray                 → Service + Credential
+L6  [端点发现]     observer_ward + katana + ffuf + gobuster       → HTTPEndpoint + File
+L7  [漏洞发现]     nuclei + secretfinder + 403bypass              → Vulnerability + Secret
+L8  [验证利用]     oob + sqlmap + jwt_attack + cloud_metadata     → 确认漏洞
 ```
 
-### 停止
+点一次 Start Full Scan，系统自动分批推进直到全部扫完。随时 Abort，干净重启。
 
-```bash
-# 停止所有服务
-stop.bat
-```
+## MITM 流量拦截
+
+Dashboard 点 **Intercept** 按钮即可启动 mitmproxy。浏览器设代理、安装 CA 证书后，所有 HTTP/HTTPS 流量自动入 Neo4j 图——域名、IP、端点、文件全记录。
+
+## 配置
+
+| 文件 | 用途 |
+|------|------|
+| `.env` | 全部运行配置 (14 个模块分类，完整注释) |
+| `tools/<name>/tool.yaml` | 单工具命令模板 |
+| `tools/<name>/targets.yaml` | 单工具目标选择器 (Cypher) |
 
 ## 配置说明
 
-### 环境变量（.env）
+### .env 核心变量
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `NEO4J_URI` | Neo4j 连接地址 | `bolt://localhost:7687` |
-| `NEO4J_USER` / `NEO4J_PASSWORD` | Neo4j 认证 | `neo4j` / `graphpt123` |
-| `CELERY_BROKER_URL` | Redis 消息队列 | `redis://localhost:6379/0` |
-| `GRAPHPT_AI_BASE_URL` | AI 接口地址 | `https://api.deepseek.com` |
-| `GRAPHPT_AI_MODEL` | AI 模型 | `deepseek-v4-pro` |
-| `GRAPHPT_AI_API_KEY` | AI API Key | — |
-| `FOFA_EMAIL` / `FOFA_KEY` | FOFA 搜索引擎 | — |
-| `SHODAN_API_KEY` | Shodan | — |
-| `HUNTER_API_KEY` | Hunter | — |
+| `GRAPHPT_STALE_TIMEOUT` | 活性超时(秒) | `300` |
+| `GRAPHPT_MAX_TARGETS` | 每轮目标上限 | `100` |
+| `GRAPHPT_REDIS_URL` | Redis 地址 | 从 CELERY_BROKER_URL 解析 |
 
-### 工具配置（tool.yaml）
+完整配置见 `.env` 文件内注释（14 个模块分类）。
+
+### 工具配置
 
 每个工具在 `tools/<name>/tool.yaml` 中定义命令模板和使用规则：
 
