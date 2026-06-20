@@ -67,12 +67,12 @@ _SUMMARY_CYPHER = """
 MATCH (a:Asset {id: $asset_id})
 OPTIONAL MATCH (a)-[:HAS_ROOT]->(rd:RootDomain)
 OPTIONAL MATCH (rd)-[:HAS_SUB]->(sub:Subdomain)
-CALL {
+CALL (a) {
   WITH a
   OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(domain_ip:IP)
   RETURN collect(DISTINCT domain_ip) AS domain_ips
 }
-CALL {
+CALL (a) {
   WITH a
   OPTIONAL MATCH (a)-[:HAS_IP]->(direct_ip:IP)
   RETURN collect(DISTINCT direct_ip) AS direct_ips
@@ -97,7 +97,7 @@ WHERE NOT (sub)-[:RESOLVES_TO]->()
 RETURN 'unresolved_subdomains' AS gap, count(sub) AS count
 UNION ALL
 MATCH (a:Asset {id: $asset_id})
-CALL {
+CALL (a) {
   WITH a
   MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)
   RETURN ip
@@ -111,7 +111,7 @@ WHERE NOT (ip)-[:HAS_PORT]->()
 RETURN 'unscanned_ips' AS gap, count(ip) AS count
 UNION ALL
 MATCH (a:Asset {id: $asset_id})
-CALL {
+CALL (a) {
   WITH a
   MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p:Port)
   RETURN p
@@ -127,7 +127,7 @@ RETURN 'unfingerprinted_ports' AS gap, count(p) AS count
 
 _TOP_VULNS_CYPHER = """
 MATCH (a:Asset {id: $asset_id})
-CALL {
+CALL (a) {
   WITH a
   MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
   RETURN ep
@@ -185,7 +185,7 @@ def _exec_graph_attack_paths(arguments: dict[str, Any], **kwargs: Any) -> dict[s
 
     cypher = f"""
     MATCH (a:Asset {{id: $asset_id}})
-    CALL {{
+    CALL (a) {{
       WITH a
       MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
       RETURN ep

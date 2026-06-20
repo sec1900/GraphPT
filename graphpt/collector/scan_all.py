@@ -45,7 +45,7 @@ def get_unscanned_summary(asset_id: str, tools: list[str] | None = None) -> dict
                 continue
             query = cfg["query"]
             try:
-                count_query = f"CALL {{ {query} }} RETURN count(*) AS cnt"
+                count_query = f"CALL () {{ {query} }} RETURN count(*) AS cnt"
                 row = session.run(count_query, asset_id=asset_id, tool=tool).single()
                 cnt = row["cnt"] if row else 0
             except Exception:

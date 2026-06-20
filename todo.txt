@@ -404,8 +404,8 @@ G15. 大规模资产无进度总览 — 看不到"已扫 300/11250"             
      每轮结束后自动更新，前端可展示百分比和预估剩余
      文件: scheduler.py run_full_scan
 
-G16. OOB 服务依赖公网 interactsh — 内网环境不可用
-     建议: 支持自建 interactsh server 或回退到 DNSLog
+G16. OOB 服务依赖公网 interactsh — 内网环境不可用                           ⏭ 后续
+     已有 GRAPHPT_OOB_INTERACTSH_SERVER 变量支持自建 server，暂不暴露。
 
 
 🟢 建议 — 长期

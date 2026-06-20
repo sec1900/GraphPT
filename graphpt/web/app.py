@@ -1579,7 +1579,7 @@ async def list_surfaces_endpoints(
         rows = _neo4j_query(
             f"""
             MATCH (a:Asset {{id: $aid}})
-            CALL {{
+            CALL (a) {{
               WITH a
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
                     -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
@@ -1606,7 +1606,7 @@ async def list_surfaces_endpoints(
         total_rows = _neo4j_query(
             f"""
             MATCH (a:Asset {{id: $aid}})
-            CALL {{
+            CALL (a) {{
               WITH a
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
                     -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
