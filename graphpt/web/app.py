@@ -337,19 +337,18 @@ async def health():
 
 @web_app.get("/api/dashboard/counts")
 async def dashboard_counts(asset_id: str = "default"):
-    """节点计数。"""
+    """节点计数 — 查询由 NODE_CATALOG 集中定义。"""
     try:
-        q = {
-            "root_domains": "MATCH (:Asset {id: $aid})-[:HAS_ROOT]->(n:RootDomain) RETURN count(n) AS c",
-            "subdomains": "MATCH (:Asset {id: $aid})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(n:Subdomain) RETURN count(n) AS c",
-            "ips": "MATCH (a:Asset {id: $aid}) CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip } RETURN count(DISTINCT ip) AS c",
-            "ports": "MATCH (a:Asset {id: $aid}) CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p:Port) RETURN p UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(p:Port) RETURN p } RETURN count(DISTINCT p) AS c",
-            "http_endpoints": "MATCH (a:Asset {id: $aid}) CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep UNION MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep } RETURN count(DISTINCT ep) AS c",
+        from graphpt.catalog.node_types import NODE_CATALOG
+        key_map = {
+            "root_domains": "RootDomain", "subdomains": "Subdomain",
+            "ips": "IP", "ports": "Port", "http_endpoints": "HTTPEndpoint",
         }
         s = {}
-        for k, v in q.items():
-            r = _neo4j_query(v, aid=asset_id)
-            s[k] = r[0]["c"] if r else 0
+        for key, node_type in key_map.items():
+            query = NODE_CATALOG[node_type]["count_query"]
+            r = _neo4j_query(query, aid=asset_id)
+            s[key] = r[0]["c"] if r else 0
         return {"ok": True, "data": s}
     except Exception as exc:
         return _json_error(exc)
@@ -2724,63 +2723,14 @@ async def scan_progress(asset_id: str = "default"):
                 aid=asset_id,
             )}
 
-            # S1: 节点计数按 asset 链过滤（非全局）
+            # S1: 节点计数 — 查询由 NODE_CATALOG 集中定义
+            from graphpt.catalog.node_types import NODE_CATALOG
             nodes = {}
-            nodes["RootDomain"] = s.run(
-                "MATCH (:Asset {id: $aid})-[:HAS_ROOT]->(n:RootDomain) RETURN count(DISTINCT n) AS c",
-                aid=asset_id,
-            ).single()["c"]
-            nodes["Subdomain"] = s.run(
-                "MATCH (:Asset {id: $aid})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(n:Subdomain) RETURN count(DISTINCT n) AS c",
-                aid=asset_id,
-            ).single()["c"]
-            nodes["IP"] = s.run(
-                """MATCH (a:Asset {id: $aid})
-                   CALL (a, a) {
-                     MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(n:IP) RETURN n
-                     UNION
-                     MATCH (a)-[:HAS_IP]->(n:IP) RETURN n
-                   } RETURN count(DISTINCT n) AS c""",
-                aid=asset_id,
-            ).single()["c"]
-            nodes["Port"] = s.run(
-                """MATCH (a:Asset {id: $aid})
-                   CALL (a, a) {
-                     MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(n:Port) RETURN n
-                     UNION
-                     MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(n:Port) RETURN n
-                   } RETURN count(DISTINCT n) AS c""",
-                aid=asset_id,
-            ).single()["c"]
-            nodes["HTTPEndpoint"] = s.run(
-                """MATCH (a:Asset {id: $aid})
-                   CALL (a, a) {
-                     MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(n:HTTPEndpoint) RETURN n
-                     UNION
-                     MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(n:HTTPEndpoint) RETURN n
-                     UNION
-                     MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(n:HTTPEndpoint) RETURN n
-                   } RETURN count(DISTINCT n) AS c""",
-                aid=asset_id,
-            ).single()["c"]
-            nodes["Vulnerability"] = s.run(
-                """MATCH (a:Asset {id: $aid})
-                   CALL (a, a) {
-                     MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[*1..5]->(n:Vulnerability) RETURN n
-                     UNION
-                     MATCH (a)-[:HAS_IP]->(:IP)-[*1..4]->(n:Vulnerability) RETURN n
-                   } RETURN count(DISTINCT n) AS c""",
-                aid=asset_id,
-            ).single()["c"]
-            nodes["Secret"] = s.run(
-                """MATCH (a:Asset {id: $aid})
-                   CALL (a, a) {
-                     MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[*1..5]->(n:Secret) RETURN n
-                     UNION
-                     MATCH (a)-[:HAS_IP]->(:IP)-[*1..4]->(n:Secret) RETURN n
-                   } RETURN count(DISTINCT n) AS c""",
-                aid=asset_id,
-            ).single()["c"]
+            for node_type, cfg in NODE_CATALOG.items():
+                try:
+                    nodes[node_type] = s.run(cfg["count_query"], aid=asset_id).single()["c"]
+                except Exception:
+                    nodes[node_type] = 0
 
         # 按 layer 组织
         from graphpt.collector.scheduler import _DEPENDENCY_LAYERS
