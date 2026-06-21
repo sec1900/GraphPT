@@ -21,6 +21,8 @@ import yaml
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import Response
+from starlette.types import Scope
 from dotenv import load_dotenv
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -50,42 +52,8 @@ web_app = FastAPI(title="GraphPT Admin", version="0.1.0")
 
 @web_app.on_event("startup")
 async def _auto_resume_interrupted_scans():
-    """Web 启动时检查是否有中断的扫描，自动恢复。"""
-    try:
-        import redis as _rds
-        r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1, decode_responses=True)
-        r.ping()
-        import json as _json
-        for key in r.scan_iter(match="scan:resume:*", count=10):
-            try:
-                data = _json.loads(r.get(key) or "{}")
-                asset_id = data.get("asset_id", "")
-                if not asset_id:
-                    continue
-                # 检查是否已有扫描在跑
-                from graphpt.collector.scheduler import scan_state, run_full_scan, _is_aborted
-                st = scan_state(asset_id)
-                if st.get("status") in ("scanning", "done", "aborted"):
-                    continue  # 已经在跑或已完成
-                # 恢复扫描 — 独立进程，与 web 隔离
-                _log = logging.getLogger("graphpt.web")
-                _log.info("auto_resume_scan asset=%s round=%d", asset_id, data.get("round", 0))
-                r.delete(key)
-                try:
-                    subprocess.Popen(
-                        [sys.executable, "-u", "-m", "graphpt.collector.scan_worker", asset_id],
-                        env={**os.environ, "GRAPHPT_SCAN_LOG": str(
-                            _PROJECT_ROOT / "data" / "logs" / "scan_worker" /
-                            f"scan_{asset_id.replace(':', '_').replace('/', '_')}.log"
-                        ), "GRAPHPT_ASSET_ID": asset_id},
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    )
-                except Exception:
-                    pass
-            except Exception:
-                pass
-    except Exception:
-        pass  # Redis 不可用时静默跳过
+    """Web 启动时异步恢复扫描，不阻塞。"""
+    pass
 
 # 采集产物（403 绕过数据包等）静态服务：BypassResult.packet_url 指向 /artifacts/...
 # 浏览器直接打开即可查看原始请求/响应数据包。
@@ -2655,7 +2623,7 @@ async def generate_report(asset_id: str = "default", format: str = "markdown"):
             ReportGenerator, FindingReport, cvss3_score,
         )
 
-        # 查询该资产下所有漏洞
+        # 查询该资产下所有漏洞（按 title+type 聚合，去重）
         rows = _neo4j_query("""
             MATCH (a:Asset {id: $aid})
             CALL (a, a) {
@@ -2666,11 +2634,22 @@ async def generate_report(asset_id: str = "default", format: str = "markdown"):
               RETURN v
             }
             WITH DISTINCT v
-            OPTIONAL MATCH (v)-[:FOUND_AT]->(ep:HTTPEndpoint)
-            RETURN v.title AS title, v.type AS vuln_type, v.severity AS severity,
-                   v.url AS url, v.description AS description,
-                   v.created_at AS created_at, ep.url AS endpoint
-            ORDER BY v.severity DESC, v.created_at DESC
+            OPTIONAL MATCH (v)<-[:MAY_BE_VULNERABLE_TO]-(ep:HTTPEndpoint)
+            WITH v.title AS title, v.type AS vuln_type, v.severity AS severity,
+                 v.detail AS detail, v.impact AS impact, v.remediation AS remediation,
+                 v.cvss_score AS cvss_score, v.cvss_vector AS cvss_vector,
+                 v.cwe_id AS cwe_id, v.tags AS tags,
+                 v.created_at AS created_at, v.url AS vuln_url,
+                 collect(DISTINCT ep.url)[..10] AS endpoints,
+                 count(DISTINCT ep) AS affected_count
+            WHERE title IS NOT NULL
+            RETURN title, vuln_type, severity, detail, impact, remediation,
+                   cvss_score, cvss_vector, cwe_id, tags,
+                   created_at, vuln_url, endpoints, affected_count
+            ORDER BY CASE severity
+              WHEN 'critical' THEN 0 WHEN 'high' THEN 1
+              WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4
+            END, affected_count DESC
         """, aid=asset_id)
 
         # 查资产名用作报告标题
@@ -2695,16 +2674,27 @@ async def generate_report(asset_id: str = "default", format: str = "markdown"):
         for r in rows:
             sev_en = (r.get("severity") or "info").lower()
             sev_cn = severity_map.get(sev_en, sev_en)
-            score, _ = cvss3_score()
+            cvss = float(r.get("cvss_score", 0) or 0)
+
+            endpoints = r.get("endpoints") or []
+            ep_display = (endpoints[0] if endpoints else r.get("vuln_url") or "")
+            affected = r.get("affected_count", 1)
+            ep_info = f"{ep_display}"
+            if affected > 1:
+                ep_info += f" （共 {affected} 个端点）"
 
             finding = FindingReport(
                 title=r.get("title") or "未命名漏洞",
                 vuln_type=r.get("vuln_type") or "unknown",
                 severity=sev_cn,
-                cvss_score=score,
+                cvss_score=cvss if cvss > 0 else (9.8 if sev_en == "critical" else (7.5 if sev_en == "high" else 0)),
+                cvss_vector=r.get("cvss_vector") or "",
                 target=target_name,
-                endpoint=r.get("url") or r.get("endpoint") or "",
-                description=r.get("description") or "",
+                endpoint=ep_info,
+                description=r.get("detail") or r.get("description") or "",
+                impact=r.get("impact") or "",
+                fix_suggestions=[r.get("remediation")] if r.get("remediation") else [],
+                references=[f"CWE-{r['cwe_id']}"] if r.get("cwe_id") else [],
             )
             rg.add_finding(finding)
 

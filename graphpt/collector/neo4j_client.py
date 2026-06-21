@@ -594,11 +594,17 @@ class GraphWriter:
         title: str,
         *,
         severity: str = "info",
+        cvss_score: float = 0.0,
+        cvss_vector: str = "",
+        cwe_id: str = "",
         detail: str = "",
+        impact: str = "",
+        remediation: str = "",
+        tags: str = "",
         evidence: str = "",
         url: str = "",
         source: str = "", _session: Any | None = None) -> dict[str, Any]:
-        """写入 Vulnerability 节点，关联到 HTTPEndpoint。"""
+        """写入 Vulnerability 节点，关联到 HTTPEndpoint 和 Subdomain。"""
         import hashlib
 
         identity = "|".join([endpoint_id, vuln_type, title, severity])
@@ -620,7 +626,10 @@ class GraphWriter:
                 MERGE (v:Vulnerability {id: $vuln_id})
                   ON CREATE SET
                     v.type = $vuln_type, v.title = $title,
-                    v.severity = $severity, v.detail = $detail,
+                    v.severity = $severity, v.cvss_score = $cvss_score,
+                    v.cvss_vector = $cvss_vector, v.cwe_id = $cwe_id,
+                    v.detail = $detail, v.impact = $impact,
+                    v.remediation = $remediation, v.tags = $tags,
                     v.evidence = $evidence, v.url = $vuln_url,
                     v.sources = [$source], v.created_at = $now
                   ON MATCH SET v.last_seen_at = $now
@@ -639,7 +648,10 @@ class GraphWriter:
                 """,
                 vuln_id=vuln_id, vuln_type=vuln_type,
                 title=title, severity=severity,
-                detail=detail, evidence=evidence,
+                cvss_score=cvss_score, cvss_vector=cvss_vector,
+                cwe_id=cwe_id, detail=detail,
+                impact=impact, remediation=remediation,
+                tags=tags, evidence=evidence,
                 vuln_url=url, source=source, ep_id=endpoint_id,
                 host=host, now=now,
             )
@@ -1192,7 +1204,13 @@ class GraphWriter:
                         vuln_type=f.get("vuln_type", ""),
                         title=f.get("title", ""),
                         severity=f.get("severity", "info"),
+                        cvss_score=f.get("cvss_score", 0.0),
+                        cvss_vector=f.get("cvss_vector", ""),
+                        cwe_id=f.get("cwe_id", ""),
                         detail=f.get("detail", ""),
+                        impact=f.get("impact", ""),
+                        remediation=f.get("remediation", ""),
+                        tags=f.get("tags", ""),
                         evidence=f.get("evidence", ""),
                         url=f.get("url", ""),
                         source=f.get("source", ""),
