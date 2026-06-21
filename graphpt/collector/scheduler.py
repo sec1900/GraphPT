@@ -704,6 +704,20 @@ def run_full_scan(asset_id: str, *,
     # 安全上限：防止无限循环（大资产可分多轮，此处设一个极高上限）
     _MAX_ROUNDS = int(os.getenv("GRAPHPT_MAX_SCAN_ROUNDS", "5000"))
 
+    # 保存扫描状态到 Redis（崩溃恢复用）
+    def _save_resume_point():
+        try:
+            r = _redis_client()
+            r.ping()
+            import json as _json
+            r.setex(f"scan:resume:{asset_id}", 86400, _json.dumps({
+                "asset_id": asset_id, "round": round_num, "start_layer": start_layer,
+                "findings": total_findings, "errors": total_errors,
+                "updated_at": time.time(),
+            }))
+        except Exception:
+            pass
+
     try:
         while round_num < _MAX_ROUNDS:
             round_num += 1
@@ -751,6 +765,7 @@ def run_full_scan(asset_id: str, *,
                                 if isinstance(r, dict))
             _log.info("full_scan_round_%d_done asset=%s findings=%d",
                       round_num, asset_id, round_findings)
+            _save_resume_point()  # 崩溃恢复：每轮存 Redis
 
             # G15: 更新累积进度供前端展示（每 5 轮或首末轮计算，避免频繁 Neo4j 查询）
             if round_num == 1 or round_num % 5 == 0:
@@ -829,6 +844,7 @@ def _notify_completion(asset_id: str, status: str, round_num: int,
             "finished_at": time.time(),
         })
         _r.setex(f"scan:completed:{asset_id}", 3600, payload)
+        _r.delete(f"scan:resume:{asset_id}")  # 扫描完成，清除恢复点
         _log.info("scan_notification_sent asset=%s status=%s", asset_id, status)
     except Exception:
         pass

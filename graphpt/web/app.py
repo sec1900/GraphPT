@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import secrets
@@ -29,6 +30,40 @@ _TOOLS_DIR = _PROJECT_ROOT / "tools"
 load_dotenv(_PROJECT_ROOT / ".env")
 
 web_app = FastAPI(title="GraphPT Admin", version="0.1.0")
+
+
+@web_app.on_event("startup")
+async def _auto_resume_interrupted_scans():
+    """Web 启动时检查是否有中断的扫描，自动恢复。"""
+    try:
+        import redis as _rds
+        r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1, decode_responses=True)
+        r.ping()
+        import json as _json
+        for key in r.scan_iter(match="scan:resume:*", count=10):
+            try:
+                data = _json.loads(r.get(key) or "{}")
+                asset_id = data.get("asset_id", "")
+                if not asset_id:
+                    continue
+                # 检查是否已有扫描在跑
+                from graphpt.collector.scheduler import scan_state, run_full_scan, _is_aborted
+                st = scan_state(asset_id)
+                if st.get("status") in ("scanning", "done", "aborted"):
+                    continue  # 已经在跑或已完成
+                # 恢复扫描
+                import threading
+                _log = logging.getLogger("graphpt.web")
+                _log.info("auto_resume_scan asset=%s round=%d", asset_id, data.get("round", 0))
+                r.delete(key)  # 删除恢复点，避免重复
+                threading.Thread(
+                    target=lambda: run_full_scan(asset_id, start_layer=data.get("start_layer", 1)),
+                    daemon=True,
+                ).start()
+            except Exception:
+                pass
+    except Exception:
+        pass  # Redis 不可用时静默跳过
 
 # 采集产物（403 绕过数据包等）静态服务：BypassResult.packet_url 指向 /artifacts/...
 # 浏览器直接打开即可查看原始请求/响应数据包。
