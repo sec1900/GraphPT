@@ -1026,14 +1026,18 @@ class PipelineExecutor:
                                 f"(log={_log_file})"
                             )
 
-                        # 读 PIPE (非阻塞)
+                        # 读 PIPE (非阻塞 — Windows 无 read1，用 select 兜底)
                         try:
-                            _chunk = proc.stdout.read1(65536) if hasattr(proc.stdout, 'read1') else proc.stdout.read(65536)
-                            if _chunk:
-                                _chunks.append(_chunk)
-                                _lf.write(_chunk)
-                                _lf.flush()
-                                _last_output = _time.time()  # 有产出，重置活性时钟
+                            stdout_fd = proc.stdout.fileno()
+                            import select as _sel
+                            ready, _, _ = _sel.select([stdout_fd], [], [], 1.0)
+                            if ready:
+                                _chunk = os.read(stdout_fd, 65536).decode("utf-8", errors="replace")
+                                if _chunk:
+                                    _chunks.append(_chunk)
+                                    _lf.write(_chunk)
+                                    _lf.flush()
+                                    _last_output = _time.time()
                         except Exception:
                             pass
 
