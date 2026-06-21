@@ -1025,9 +1025,7 @@ function _rowActions(e, rowEl) {
   if (!_ctxMenuNode || _ctxMenuNode.type === '_load_more' || _ctxMenuNode.type === 'ScanRun') return;
   var menu = document.getElementById('ctx-menu');
   var allTools = _cfgTools.length ? _cfgTools : PL_TOOLS;
-  var matched = allTools.filter(function(t){ return toolUseRule(t, _ctxMenuNode); });
-  var unmatched = allTools.filter(function(t){ return !toolUseRule(t, _ctxMenuNode); });
-  _ctxMenuTools = [].concat(matched, unmatched);
+  _ctxMenuTools = allTools.filter(function(t){ return toolUseRule(t, _ctxMenuNode); });
   renderToolContextMenu('');
   menu.style.display = 'block';
   var rect = rowEl.getBoundingClientRect();
@@ -1051,19 +1049,25 @@ if (assetsTable) assetsTable.addEventListener('contextmenu', function(e) {
   const menu = document.getElementById('ctx-menu');
   const allTools = _cfgTools.length ? _cfgTools : PL_TOOLS;
   // Show all tools; matched ones first
-  const matched = allTools.filter(t => toolUseRule(t, _ctxMenuNode));
-  const unmatched = allTools.filter(t => !toolUseRule(t, _ctxMenuNode));
-  _ctxMenuTools = [...matched, ...unmatched];
+  _ctxMenuTools = allTools.filter(t => toolUseRule(t, _ctxMenuNode));
   renderToolContextMenu('');
   menu.style.display = 'block';
   menu.style.left = Math.min(e.clientX, window.innerWidth - 200) + 'px';
   menu.style.top = Math.min(e.clientY, window.innerHeight - menu.scrollHeight - 10) + 'px';
 });
 
+// 前端节点类型 → tool.yaml use_on key（必须精确匹配）
 function normalizedNodeType(node) {
   if (!node) return '';
-  if (node.type === 'root_domain') return 'RootDomain';
-  return node.type || '';
+  var t = node.type || '';
+  var MAP = {
+    'root_domain': 'RootDomain', 'domain': 'RootDomain',
+    'subdomain': 'Subdomain', 'Subdomain': 'Subdomain',
+    'standalone_ip': 'IP', 'ip': 'IP', 'IP': 'IP',
+    'port': 'Port', 'Port': 'Port',
+    'endpoint': 'Endpoint', 'Endpoint': 'Endpoint',
+  };
+  return MAP[t] || t;
 }
 
 function toolUseRule(tool, node) {
@@ -1114,13 +1118,16 @@ async function runToolOnNode(tool) {
   document.getElementById('ctx-menu').style.display = 'none';
   const node = _ctxMenuNode;
   const value = nodeDisplayValue(node);
+  const nodeType = normalizedNodeType(node);
   const payload = nodePayload(node);
-  const params = new URLSearchParams({asset_id: currentAsset, tool: tool});
-  for (const [k, v] of Object.entries(payload)) {
-    if (v && k !== 'type' && k !== 'id') params.append(k, String(v));
-  }
   try {
-    const r = await fetch(API + '/tools/' + tool + '/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({asset_id: currentAsset, ...payload})});
+    var body = {
+      asset_id: currentAsset,
+      node_type: nodeType,
+      target: value,
+      node: payload,
+    };
+    const r = await fetch(API + '/tools/' + tool + '/run', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
     const d = await r.json();
     if (d.ok) toast('Started ' + tool + ' on ' + value.substring(0, 30) + (d.preview ? ' (' + d.preview + ' targets)' : ''));
     else toast(d.error || 'Failed to run ' + tool, false);
