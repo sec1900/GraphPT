@@ -15,7 +15,6 @@ selectors:
       }
       WITH DISTINCT ep
       WHERE ep.status_code > 0
-        AND ep.content_type IS NOT NULL AND ep.content_type <> ''
         AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
       RETURN ep.url AS url
     mapping:
