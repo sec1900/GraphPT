@@ -851,7 +851,29 @@ def _notify_completion(asset_id: str, status: str, round_num: int,
 
 
 def scan_state(asset_id: str = "default") -> dict[str, Any]:
-    """返回当前扫描状态（供前端轮询）。"""
+    """返回当前扫描状态（Redis 优先，内存回退）。独立进程扫描通过 Redis 通信。"""
+    # 先查 Redis（独立进程扫描）
+    try:
+        r = _redis_client()
+        r.ping()
+        import json as _json
+        raw = r.get(f"scan:resume:{asset_id}")
+        if raw:
+            data = _json.loads(raw)
+            ts = data.get("updated_at", 0)
+            if time.time() - ts < 180:  # 3 分钟内更新过 → 活跃
+                return {
+                    "status": "scanning", "asset_id": asset_id,
+                    "round": data.get("round", 0),
+                    "layer": None, "tool": None,
+                    "cumulative": {
+                        "scanned": 0, "remaining": 0,
+                        "total_estimate": 0, "rounds_done": data.get("round", 0),
+                    },
+                }
+    except Exception:
+        pass
+    # 回退内存（同进程线程扫描）
     with _SCAN_STATE_LOCK:
         st = _SCAN_STATE.get(asset_id, {})
         if not st:

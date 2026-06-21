@@ -2425,25 +2425,21 @@ async def scan_start(body: dict | None = None):
     asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
 
     try:
-        from graphpt.collector.scheduler import run_full_scan, scan_state
-        import threading
+        from graphpt.collector.scheduler import scan_state
 
         # 检查是否已在运行
         st = scan_state(asset_id)
         if st.get("status") == "scanning":
             return {"ok": False, "error": "scan already running", "data": st}
 
-        def _bg_scan():
-            try:
-                run_full_scan(asset_id)
-            except Exception as exc:
-                import logging
-                _log = logging.getLogger("graphpt.web")
-                _log.error("scan_crashed asset=%s error=%s", asset_id, exc)
-
-        threading.Thread(target=_bg_scan, daemon=True).start()
+        # 独立进程启动扫描 — Web 重启不影响扫描
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "graphpt.collector.scan_worker", asset_id],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
         return {"ok": True, "data": {"status": "started", "asset_id": asset_id,
-                "note": "scan running in background, poll /api/scan/state for progress"}}
+                "pid": proc.pid,
+                "note": "scan running in background (PID %d), poll /api/scan/state" % proc.pid}}
     except Exception as exc:
         return _json_error(exc)
 
