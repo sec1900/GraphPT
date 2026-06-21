@@ -2995,8 +2995,8 @@ async def scan_progress(asset_id: str = "default"):
     节点计数由 /api/dashboard/counts 独立提供并缓存。
     """
     cache_key = f"sp:{asset_id}"
-    cached = _cached(cache_key)
-    if cached:
+    cached = _cached(cache_key, ttl=5)  # 扫描中只缓存 5s，让进度更新更及时
+    if cached and not _scan_pool:  # 扫描未运行时用缓存，运行中实时刷新
         return cached
 
     import redis as _rds
