@@ -2775,10 +2775,7 @@ async def scan_progress(asset_id: str = "default"):
 
     import redis as _rds
     try:
-        from graphpt.collector.neo4j_client import _get_driver
-        d = _get_driver()
-
-        # 活跃标记（Redis，快）
+        # 活跃标记（Redis）
         active_tools: list[str] = []
         try:
             from graphpt.common.redis_client import get_redis
@@ -2789,12 +2786,18 @@ async def scan_progress(asset_id: str = "default"):
         except Exception:
             pass
 
-        # ScanRun 计数（单条 MATCH，快）
-        with d.session() as s:
-            runs = {r["t"]: r["c"] for r in s.run(
-                "MATCH (sr:ScanRun {asset_id: $aid}) RETURN sr.tool AS t, count(sr) AS c",
-                aid=asset_id,
-            )}
+        # ScanRun 计数（Neo4j——可能因同进程扫描争抢连接而超时，失败不阻断）
+        runs: dict[str, int] = {}
+        try:
+            from graphpt.collector.neo4j_client import _get_driver
+            d = _get_driver()
+            with d.session() as s:
+                runs = {r["t"]: r["c"] for r in s.run(
+                    "MATCH (sr:ScanRun {asset_id: $aid}) RETURN sr.tool AS t, count(sr) AS c",
+                    aid=asset_id,
+                )}
+        except Exception:
+            pass  # Neo4j 不可用时不阻断前端进度展示
 
         # 按 dependency layer 组织
         layers = []
