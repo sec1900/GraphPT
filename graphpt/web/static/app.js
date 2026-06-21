@@ -1915,27 +1915,32 @@ function scanAllStop() {
 let _graphNetwork = null;
 let _graphRawData = null;
 
-const _graphColors = {
-  Asset:'#58a6ff', RootDomain:'#3fb950', Subdomain:'#a371f7',
-  IP:'#d2991d', Port:'#f85149', HTTPEndpoint:'#f0883e',
-  Service:'#6e7681', Vulnerability:'#da3633', DirectoryEntry:'#8b949e',
-  ICPRecord:'#79c0ff', File:'#8b949e',
-};
-const _graphShapes = {
-  Asset:'diamond', RootDomain:'dot', Subdomain:'dot',
-  IP:'square', Port:'triangle', HTTPEndpoint:'star',
-  Vulnerability:'triangleDown',
-};
-const _graphLevels = {
-  Asset:0, ICPRecord:1, RootDomain:1, Subdomain:2, IP:3,
-  Port:4, Service:4, HTTPEndpoint:5, DirectoryEntry:6, File:6, Vulnerability:6,
-};
-const _graphTypeNames = {
-  Asset:'Asset', ICPRecord:'ICP', RootDomain:'域名', Subdomain:'子域名',
-  IP:'IP', Port:'端口', Service:'服务', HTTPEndpoint:'端点',
-  DirectoryEntry:'目录', File:'文件', Vulnerability:'漏洞',
-};
+// Graph config — loaded from /api/catalog, hardcoded as fallback
+let _graphColors = {Asset:'#58a6ff',Subdomain:'#a371f7',IP:'#d2991d',Port:'#f85149',HTTPEndpoint:'#f0883e',Vulnerability:'#da3633',Secret:'#d29922',File:'#8b949e',Unknown:'#6e7681'};
+let _graphShapes = {Asset:'diamond',Subdomain:'dot',IP:'square',Port:'triangle',HTTPEndpoint:'star',Vulnerability:'triangleDown',Unknown:'dot'};
+let _graphLevels = {Asset:0,RootDomain:1,Subdomain:2,IP:3,Port:4,Service:4,HTTPEndpoint:5,File:6,Vulnerability:6,Unknown:7};
+let _graphTypeNames = {Asset:'Asset',RootDomain:'域名',Subdomain:'子域名',IP:'IP',Port:'端口',HTTPEndpoint:'端点',Vulnerability:'漏洞',File:'文件',Unknown:'?'};
 let _graphHiddenTypes = new Set(['Service']);
+let _graphConfigLoaded = false;
+
+async function _loadGraphConfig() {
+  if (_graphConfigLoaded) return;
+  try {
+    const r = await fetch(API + '/catalog');
+    const d = await r.json();
+    if (d.ok && d.data.graph) {
+      const g = d.data.graph;
+      _graphColors = {}; _graphShapes = {}; _graphLevels = {}; _graphTypeNames = {};
+      for (const [k, v] of Object.entries(g)) {
+        _graphColors[k] = v.color || '#6e7681';
+        _graphShapes[k] = v.shape || 'dot';
+        _graphLevels[k] = parseInt(v.level) || 7;
+        _graphTypeNames[k] = k;
+      }
+    }
+  } catch(e) {}
+  _graphConfigLoaded = true;
+}
 
 function _initGraphFilters(types) {
   const box = document.getElementById('graph-type-filters');

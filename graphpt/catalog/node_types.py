@@ -165,3 +165,133 @@ RELATIONSHIPS: dict[str, dict[str, Any]] = {
     "HAS_NSE_RESULT": {"from": "IP",          "to": "NseScript",    "desc": "Nmap NSE 脚本结果"},
     "BYPASS_ATTEMPT": {"from": "*",           "to": "BypassResult", "desc": "403 绕过尝试"},
 }
+
+
+# ═══════════════════════════════════════════════════════════
+# 工具能力注册 — 哪个工具产出哪些节点类型
+# 加新工具时在此注册，前端和报告自动感知
+# ═══════════════════════════════════════════════════════════
+
+TOOL_CAPABILITIES: dict[str, dict[str, Any]] = {
+    "crt":               {"desc": "证书透明日志子域名发现",  "produces": ["Subdomain"]},
+    "subfinder":         {"desc": "被动子域名枚举",          "produces": ["Subdomain"]},
+    "urlfinder":         {"desc": "被动URL收集",              "produces": ["Subdomain", "HTTPEndpoint"]},
+    "gobuster:dns":      {"desc": "DNS子域名爆破",            "produces": ["Subdomain"]},
+    "dnsx":              {"desc": "DNS解析",                  "produces": ["IP"]},
+    "nuclei:takeover":   {"desc": "子域名接管检测",          "produces": ["Vulnerability"]},
+    "httpx:subdomain":   {"desc": "子域名HTTP指纹",          "produces": ["HTTPEndpoint"]},
+    "naabu":             {"desc": "端口扫描",                 "produces": ["Port"]},
+    "gobuster:vhost":    {"desc": "虚拟主机发现",            "produces": ["Port", "HTTPEndpoint"]},
+    "nmap":              {"desc": "服务识别",                 "produces": ["Port", "NseScript"]},
+    "httpx:port":        {"desc": "IP:Port HTTP指纹",        "produces": ["HTTPEndpoint"]},
+    "brutespray":        {"desc": "弱口令检测",              "produces": ["Credential"]},
+    "observer_ward":     {"desc": "Web指纹识别",             "produces": ["HTTPEndpoint"]},
+    "katana":            {"desc": "Web爬虫",                  "produces": ["HTTPEndpoint", "File"]},
+    "ffuf":              {"desc": "Web Fuzz",                 "produces": ["HTTPEndpoint", "DirEntry"]},
+    "gobuster":          {"desc": "目录爆破",                 "produces": ["HTTPEndpoint", "DirEntry"]},
+    "browser_probe":     {"desc": "浏览器端点发现",          "produces": ["HTTPEndpoint", "File"]},
+    "nuclei":            {"desc": "漏洞扫描(全量模板)",       "produces": ["Vulnerability"]},
+    "secretfinder":      {"desc": "敏感信息检测",            "produces": ["Secret"]},
+    "403bypass":         {"desc": "403访问绕过",              "produces": ["BypassResult"]},
+    "oob":               {"desc": "带外交互验证",            "produces": ["Vulnerability"]},
+    "sqlmap":            {"desc": "SQL注入利用",              "produces": ["Vulnerability"]},
+    "jwt_attack":        {"desc": "JWT攻击",                  "produces": ["Credential"]},
+    "cloud_metadata":    {"desc": "云元数据探测",            "produces": ["Credential"]},
+    "mitmproxy":         {"desc": "MITM流量拦截(被动)",      "produces": ["Subdomain", "IP", "HTTPEndpoint", "File"]},
+}
+
+
+# ═══════════════════════════════════════════════════════════
+# 报告查询 — vulnerabilities/report 共用
+# ═══════════════════════════════════════════════════════════
+
+REPORT_QUERIES: dict[str, str] = {
+    "vulnerabilities_base": """
+        MATCH (a:Asset {id: $aid})
+        CALL (a, a) {
+          MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
+                -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+                -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+          RETURN ep, v
+          UNION
+          MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+                -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+          RETURN ep, v
+          UNION
+          MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
+                -[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+          RETURN ep, v
+          UNION
+          MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
+                -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+          OPTIONAL MATCH (s)-[:EXPOSES]->(ep:HTTPEndpoint)
+          RETURN ep, v
+        }
+    """,
+    "vulnerabilities_order": """
+        ORDER BY
+          CASE toLower(coalesce(v.severity, 'info'))
+            WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2
+            WHEN 'low' THEN 3 ELSE 4 END ASC,
+          coalesce(v.last_seen_at, v.created_at) DESC
+    """,
+    "report_base": """
+        MATCH (a:Asset {id: $aid})
+        CALL (a, a) {
+          MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[*1..5]->(v:Vulnerability) RETURN v
+          UNION
+          MATCH (a)-[:HAS_IP]->(:IP)-[*1..4]->(v:Vulnerability) RETURN v
+        }
+    """,
+}
+
+
+# ═══════════════════════════════════════════════════════════
+# 图可视化配置 — 节点颜色/形状
+# ═══════════════════════════════════════════════════════════
+
+GRAPH_CONFIG: dict[str, dict[str, str]] = {
+    "RootDomain":     {"color": "#58a6ff", "shape": "hexagon",   "level": "1"},
+    "Subdomain":      {"color": "#79c0ff", "shape": "dot",        "level": "2"},
+    "IP":             {"color": "#d2a8ff", "shape": "diamond",    "level": "3"},
+    "Port":           {"color": "#ff7b72", "shape": "triangle",   "level": "4"},
+    "Service":        {"color": "#ffa657", "shape": "triangleDown","level": "4"},
+    "HTTPEndpoint":   {"color": "#7ee787", "shape": "square",     "level": "5"},
+    "File":           {"color": "#a5d6ff", "shape": "dot",        "level": "5"},
+    "DirEntry":       {"color": "#a5d6ff", "shape": "dot",        "level": "5"},
+    "Vulnerability":  {"color": "#f85149", "shape": "star",       "level": "6"},
+    "Secret":         {"color": "#d29922", "shape": "triangle",   "level": "6"},
+    "Credential":     {"color": "#d29922", "shape": "triangleDown","level": "6"},
+    "NseScript":      {"color": "#c9d1d9", "shape": "dot",        "level": "5"},
+    "BypassResult":   {"color": "#f0883e", "shape": "dot",        "level": "6"},
+    "Asset":          {"color": "#8b949e", "shape": "hexagon",    "level": "0"},
+    "ScanRun":        {"color": "#484f58", "shape": "dot",        "level": "7"},
+    "Unknown":        {"color": "#6e7681", "shape": "dot",        "level": "7"},
+}
+
+
+# ═══════════════════════════════════════════════════════════
+# tool.yaml 模板变量说明
+# ═══════════════════════════════════════════════════════════
+
+TEMPLATE_VARS: dict[str, str] = {
+    "{bin}":          "工具可执行文件路径（自动解析 tools/<name>/）",
+    "{ip}":           "单个 IP 地址",
+    "{url}":          "单个 URL",
+    "{domain}":       "根域名",
+    "{subdomain}":    "子域名",
+    "{port}":         "端口号",
+    "{target_url}":   "完整目标 URL（含协议）",
+    "{parent_ip}":    "父级 IP 地址",
+    "{urls_file}":    "批量模式：临时文件，每行一个 URL",
+    "{targets_file}": "批量模式：临时文件，每行一个目标",
+    "{ips_file}":     "批量模式：临时文件，每行一个 IP",
+    "{domains_file}": "批量模式：临时文件，每行一个域名",
+    "{ports}":        "逗号分隔的端口列表（nmap 用）",
+    "{value}":        "节点值（通用）",
+    "{token}":        "JWT token 值",
+    "{tech}":         "技术栈标签（逗号分隔）",
+    "{output_dir}":   "输出目录路径",
+    "{target_id}":    "目标节点 Neo4j ID",
+    "{parent_id}":    "父级节点 Neo4j ID",
+}

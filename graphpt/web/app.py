@@ -2561,6 +2561,22 @@ async def mitm_status():
         return {"ok": True, "data": {"running": False, "pid": 0, "asset_id": "", "port": 8888}}
 
 
+@web_app.get("/api/catalog")
+async def api_catalog():
+    """返回节点/关系/工具/图配置目录 — 前端和报告统一数据源。"""
+    from graphpt.catalog.node_types import (
+        NODE_CATALOG, RELATIONSHIPS, TOOL_CAPABILITIES,
+        GRAPH_CONFIG, TEMPLATE_VARS,
+    )
+    return {"ok": True, "data": {
+        "nodes": {k: {"label": v["label"], "desc": v["desc"]} for k, v in NODE_CATALOG.items()},
+        "relationships": RELATIONSHIPS,
+        "tools": TOOL_CAPABILITIES,
+        "graph": GRAPH_CONFIG,
+        "template_vars": TEMPLATE_VARS,
+    }}
+
+
 @web_app.get("/api/report")
 async def generate_report(asset_id: str = "default", format: str = "markdown"):
     """生成渗透测试报告 — 从 Neo4j 拉取漏洞数据，渲染 Markdown/JSON。
