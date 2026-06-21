@@ -32,6 +32,9 @@ def main():
         except Exception:
             pass
 
+    os.environ["GRAPHPT_SCAN_LOG"] = str(log_path)
+    os.environ["GRAPHPT_ASSET_ID"] = asset_id
+
     t0 = _time.time()
     log(f"starting asset={asset_id} pid={os.getpid()}")
 
@@ -48,6 +51,16 @@ def main():
         log(f"crashed: {exc}")
         log(traceback.format_exc())
         sys.exit(1)
+    finally:
+        # 清理所有子进程
+        import signal, psutil
+        try:
+            parent = psutil.Process(os.getpid())
+            for child in parent.children(recursive=True):
+                try: child.kill()
+                except: pass
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

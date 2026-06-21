@@ -679,15 +679,20 @@ def _any_tool_has_targets(asset_id: str) -> bool:
 def run_full_scan(asset_id: str, *,
                   start_layer: int = 1,
                   max_workers: int | None = None) -> dict[str, Any]:
-    """执行完整 8 层攻击链，自动循环直到所有目标扫完。
-
-    跨层串行，层内并行。每轮每工具最多 MAX_TARGETS 个目标。
-    一轮完成后检查是否还有未扫目标 → 有则继续下一轮，无则结束。
-    用户点击一次 Start，系统持续推到完，无需人工干预。
-
-    ScanAborted 时立即停止推进、清状态并返回 aborted。
-    """
+    """执行完整 8 层攻击链，自动循环直到所有目标扫完。"""
     _log.info("full_scan_start asset=%s", asset_id)
+
+    # 运行日志（独立进程调试用）
+    _scan_log_path = os.environ.get("GRAPHPT_SCAN_LOG", "")
+    def _scan_log(msg: str) -> None:
+        if _scan_log_path:
+            try:
+                ts = time.strftime("%H:%M:%S")
+                with open(_scan_log_path, "a", encoding="utf-8") as f:
+                    f.write(f"[{ts}] {msg}\n")
+            except Exception:
+                pass
+    _scan_log(f"full_scan_start asset={asset_id}")
 
     with _SCAN_STATE_LOCK:
         _SCAN_STATE[asset_id] = {"status": "scanning", "layer": start_layer,
@@ -739,6 +744,7 @@ def run_full_scan(asset_id: str, *,
                 })
 
             _log.info("full_scan_round_%d asset=%s", round_num, asset_id)
+            _scan_log(f"round_{round_num}_start")
             round_findings = 0
 
             for spec in _DEPENDENCY_LAYERS:
@@ -766,7 +772,8 @@ def run_full_scan(asset_id: str, *,
                                 if isinstance(r, dict))
             _log.info("full_scan_round_%d_done asset=%s findings=%d",
                       round_num, asset_id, round_findings)
-            _save_resume_point()  # 崩溃恢复：每轮存 Redis
+            _save_resume_point()
+            _scan_log(f"round_{round_num}_done findings={round_findings}")
 
             # G15: 更新累积进度供前端展示（每 5 轮或首末轮计算，避免频繁 Neo4j 查询）
             if round_num == 1 or round_num % 5 == 0:
@@ -799,6 +806,7 @@ def run_full_scan(asset_id: str, *,
     except ScanAborted as exc:
         aborted_layer = current_spec.get("layer", 0) if current_spec else 0
         _log.info("full_scan_aborted asset=%s round=%d layer=%d", asset_id, round_num, aborted_layer)
+        _scan_log(f"aborted round={round_num} layer={aborted_layer}")
         _notify_completion(asset_id, "aborted", round_num, total_findings, total_errors)
         with _SCAN_STATE_LOCK:
             st = _SCAN_STATE.get(asset_id, {})
@@ -812,6 +820,13 @@ def run_full_scan(asset_id: str, *,
             "total_findings": total_findings,
             "total_errors": total_errors,
         }
+    except Exception as exc:
+        _scan_log(f"crashed: {exc}")
+        import traceback
+        _scan_log(traceback.format_exc())
+        _notify_completion(asset_id, "crashed", round_num, total_findings, total_errors)
+        return {"status": "crashed", "asset_id": asset_id, "error": str(exc),
+                "total_findings": total_findings, "total_errors": total_errors}
 
     _notify_completion(asset_id, final_status, round_num, total_findings, total_errors)
     with _SCAN_STATE_LOCK:
@@ -822,6 +837,7 @@ def run_full_scan(asset_id: str, *,
 
     _log.info("full_scan_done asset=%s status=%s rounds=%d findings=%d errors=%d",
               asset_id, final_status, round_num, total_findings, total_errors)
+    _scan_log(f"done status={final_status} rounds={round_num} findings={total_findings} errors={total_errors}")
 
     return {
         "status": final_status,
