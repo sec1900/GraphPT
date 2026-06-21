@@ -101,7 +101,7 @@ NODE_CATALOG: dict[str, dict[str, Any]] = {
 # ═══════════════════════════════════════════════════════════
 
 FINDING_WRITERS: dict[str, tuple[str, dict[str, str | None]]] = {
-    "subdomain":     ("write_subdomain",     {"value": "value", "parent_id": "parent_id", "root_domain": "root_domain", "source": "source"}),
+    "subdomain":     ("write_subdomain",     {"value": "value", "root_domain": "root_domain", "source": "source"}),
     "port":          ("write_port",          {"parent_id": "ip_id", "port": "port", "protocol": "protocol", "service": "service_name", "source": "source"}),
     "http_endpoint": ("write_http_endpoint", {"url": "url", "method": "method", "parent_id": "parent_id", "status_code": "status_code", "title": "title", "body_hash": "body_hash", "content_length": "content_length", "response_headers": "response_headers", "ssl_cert_cn": "ssl_cert_cn", "ssl_cert_issuer": "ssl_cert_issuer", "tech": "tech", "crawl_status": "crawl_status", "source": "source", "url_fragment": "url_fragment", "products": "products", "vendors": "vendors", "fingerprint_severity": "fingerprint_severity", "favicon_hash": "favicon_hash"}),
     "vulnerability": ("write_vulnerability", {"endpoint_id": "endpoint_id", "vuln_type": "vuln_type", "title": "title", "severity": "severity", "detail": "detail", "evidence": "evidence", "url": "url", "source": "source"}),
