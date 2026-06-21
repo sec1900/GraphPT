@@ -208,7 +208,6 @@ async function loadHealth() {
     const items = [
       ['Neo4j', d.neo4j && d.neo4j.ok],
       ['Redis', d.redis && d.redis.ok],
-      ['Celery', d.celery && d.celery.ok],
       ['Tools', d.tools && d.tools.ok],
     ];
     el.innerHTML = items.map(([label, ok]) =>
@@ -1357,15 +1356,7 @@ const PL_TOOLS = [
 
 async function loadPipelines() {
   document.getElementById('pl-loading').style.display = 'block';
-  // Also fetch Celery status
-  fetch(API + '/tasks').then(r => r.json()).then(j => {
-    if (j.ok) {
-      const broker = j.broker_ok ? 'connected' : 'offline';
-      const worker = j.worker_online ? 'online' : 'offline';
-      document.getElementById('pl-broker').textContent =
-        `Broker: ${broker} | Worker: ${worker} | Queue: ${j.queue_depth || 0} | Active: ${j.active_count || 0}`;
-    }
-  }).catch(() => {});
+  // 扫描由 ThreadPoolExecutor 直连执行，无 Celery 依赖
   try {
     const res = await fetch(API + '/pipelines');
     const json = await res.json();

@@ -26,7 +26,6 @@ import yaml
 
 from graphpt.common.asset_identity import normalize_host_port, normalize_url
 from graphpt.collector.adapter import ADAPTER_MAP
-from graphpt.collector.app import app
 from graphpt.collector.neo4j_client import get_graph_writer
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -1475,70 +1474,6 @@ class PipelineExecutor:
         if value not in lst:
             lst.append(value)
 
-
-# ---- Celery 任务 ----
-
-@app.task(bind=True, max_retries=1)
-def run_pipeline(
-    self,
-    pipeline_name: str,
-    asset_id: str = "default",
-    params: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    """通用流水线执行任务。
-
-    从 pipelines.yaml 读取定义，逐阶段执行工具。
-    params 可包含 domain, ip 等初始上下文。
-    """
-    mgr = PipelineManager()
-    pipeline_def = mgr.get(pipeline_name)
-    if not pipeline_def:
-        return {"status": "error", "error": f"pipeline_not_found: {pipeline_name}"}
-
-    asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
-    executor = PipelineExecutor(pipeline_def, asset_id=asset_id, params=params)
-
-    validation = executor._tool_validation_result()
-    if validation:
-        _save_run_state(pipeline_name, asset_id, executor.ctx, validation["stages"], -1)
-        self.update_state(
-            state="FAILURE",
-            meta={"pipeline": pipeline_name, "stage": -1, "total": 0, "status": "failed",
-                  "stages": validation["stages"], "resume_from": -1,
-                  "error": validation.get("error", "pipeline tool validation failed")},
-        )
-        return validation
-
-    executor.stages = expand_tool_stages(executor.stages)
-
-    total = len(executor.stages)
-    stage_results = []
-    final_status = "ok"
-    for i, stage in enumerate(executor.stages):
-        self.update_state(
-            state="PROGRESS",
-            meta={"pipeline": pipeline_name, "stage": i, "total": total, "status": "running",
-                  "stages": stage_results},
-        )
-        if "parallel" in stage:
-            result = executor._run_parallel(stage["parallel"], i, stage_name=stage.get("name", ""))
-        else:
-            result = executor._run_stage(stage, i)
-        stage_results.append(result)
-
-        if result.get("status") == "error":
-            _save_run_state(pipeline_name, asset_id, executor.ctx, stage_results, i)
-            self.update_state(
-                state="FAILURE",
-                meta={"pipeline": pipeline_name, "stage": i, "total": total, "status": "failed",
-                      "stages": stage_results, "resume_from": i,
-                      "error": result.get("error", "unknown")},
-            )
-            return {"status": "error", "stages": stage_results, "resume_from": i}
-        if result.get("status") == "partial":
-            final_status = "partial"
-
-    return {"status": final_status, "stages": stage_results}
 
 def expand_tool_stages(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """将 tools stage 展开为并行工具组，命令来自 tools/<name>/tool.yaml。"""

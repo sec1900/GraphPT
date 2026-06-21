@@ -34,8 +34,7 @@ _log = logging.getLogger("graphpt.scheduler")
 # ---- 资源隔离 ----
 
 # 总槽位数 = Celery worker 并发数（跟实际执行能力一致）
-_MAX_CONCURRENCY = int(os.getenv("GRAPHPT_CONCURRENCY",
-                         os.getenv("CELERY_CONCURRENCY", "10")))
+_MAX_CONCURRENCY = int(os.getenv("GRAPHPT_CONCURRENCY", "10"))
 
 
 _active_count_cache: tuple[float, int] = (0, 1)  # (timestamp, count)
@@ -461,23 +460,8 @@ def auto_advance(asset_id: str = "default") -> dict[str, Any]:
         return advance_once(asset_id)
 
 
-def _dispatch_tool(tool: str, asset_id: str) -> str | None:
-    """派发单工具扫描 Celery 任务（兼容旧调度路径）。
-    新调度路径使用 run_scan_layer，不经过 Celery。
-    """
-    try:
-        from graphpt.collector.app import app
-        result = app.send_task(
-            "graphpt.collector.tasks.scan_tool",
-            kwargs={"tool": tool, "asset_id": asset_id},
-        )
-        return getattr(result, "id", None)
-    except Exception:
-        return None
-
-
 # ═══════════════════════════════════════════════════════════════
-# 直接调度引擎（绕过 Celery，Windows/Linux 统一并行）
+# 直接调度引擎（ThreadPoolExecutor，不依赖 Celery）
 # ═══════════════════════════════════════════════════════════════
 
 import concurrent.futures as _cf

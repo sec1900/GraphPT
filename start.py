@@ -1,4 +1,4 @@
-"""GraphPT 服务启动器 — 保持 Web + Celery 存活。"""
+"""GraphPT 服务启动器 — 启动 Web 服务器。"""
 import subprocess, sys, time, os, socket
 from pathlib import Path
 
@@ -67,19 +67,7 @@ def main():
 
     _clean_redis_on_startup()
 
-    concurrency = int(os.getenv("CELERY_CONCURRENCY", "10" if sys.platform != "win32" else "4"))
-    pool = "prefork" if sys.platform != "win32" else "solo"
-    print(f"[info] pool={pool} concurrency={concurrency}")
-
     services = [
-        {
-            "name": "celery-worker",
-            "cmd": [
-                sys.executable, "-m", "celery", "-A", "graphpt.collector.app", "worker",
-                "--loglevel=warning", f"--concurrency={concurrency}", f"--pool={pool}",
-                "-Q", "collect,celery", "-n", "graphpt-worker-1",
-            ],
-        },
         {
             "name": "web-server",
             "cmd": [

@@ -1,6 +1,6 @@
 """统一的 Redis 客户端工厂 — 所有模块从此获取 Redis 连接。
 
-优先级: GRAPHPT_REDIS_URL > CELERY_BROKER_URL > 默认 localhost:6379
+优先级: GRAPHPT_REDIS_URL > 默认 localhost:6379
 """
 from __future__ import annotations
 
@@ -27,14 +27,14 @@ def _parse_broker_url(url: str) -> dict:
 @lru_cache(maxsize=1)
 def _redis_config() -> dict:
     """缓存 Redis 连接参数（进程内不变的配置）。"""
-    url = os.getenv("GRAPHPT_REDIS_URL", "") or os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+    url = os.getenv("GRAPHPT_REDIS_URL", "") or "redis://localhost:6379/0"
     return _parse_broker_url(url)
 
 
 def get_redis(*, decode_responses: bool = False, socket_connect_timeout: int = 2):
     """获取 Redis 客户端。
 
-    优先用 GRAPHPT_REDIS_URL，其次 CELERY_BROKER_URL。
+    优先用 GRAPHPT_REDIS_URL。
     所有模块统一调用此函数，不再各自硬编码 host/port。
     """
     import redis as _redis

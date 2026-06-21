@@ -45,19 +45,14 @@ def main():
     print("  GraphPT — 停止所有服务")
     print("=" * 60)
 
-    # 1. Celery Worker
-    print("[1/4] 停止 Celery Worker...")
-    kill_by_name("celery")
-    print("  [OK]")
-
-    # 2. Web Server
-    print("[2/4] 停止 Web 服务...")
+    # 1. Web Server
+    print("[1/3] 停止 Web 服务...")
     kill_by_port(8080)
     time.sleep(1)
     print("  [OK]")
 
-    # 3. Redis / Memurai
-    print("[3/4] 停止 Redis/Memurai...")
+    # 2. Redis / Memurai
+    print("[2/3] 停止 Redis/Memurai...")
     kill_by_name("memurai")
     kill_by_name("redis-server")
     # 优雅关闭

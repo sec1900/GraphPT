@@ -223,130 +223,14 @@ async def index():
 # Health API
 # ============================================================
 
-def _redis_broker_config() -> dict:
-    """从 CELERY_BROKER_URL 解析 Redis 连接信息。"""
-    broker_url = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0").strip()
-    parsed = urlparse(broker_url)
-    if parsed.scheme not in ("redis", "rediss"):
-        raise ValueError(f"unsupported redis broker scheme: {parsed.scheme or '(empty)'}")
-    db_text = (parsed.path or "/0").lstrip("/") or "0"
-    return {
-        "url": broker_url,
-        "host": parsed.hostname or "localhost",
-        "port": parsed.port or 6379,
-        "db": int(db_text.split("/", 1)[0]),
-        "ssl": parsed.scheme == "rediss",
-    }
-
-
 def _redis_health() -> dict:
-    """检查 Celery Broker Redis 可达性和 collect 队列长度。"""
-    try:
-        import redis as _redis
-
-        cfg = _redis_broker_config()
-        client = _redis.Redis(
-            host=cfg["host"],
-            port=cfg["port"],
-            db=cfg["db"],
-            ssl=cfg["ssl"],
-            socket_connect_timeout=2,
-            socket_timeout=2,
-        )
-        pong = client.ping()
-        return {
-            "ok": bool(pong),
-            "broker_url": cfg["url"],
-            "host": cfg["host"],
-            "port": cfg["port"],
-            "db": cfg["db"],
-            "queue_depth": client.llen("collect"),
-        }
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
-
-
-def _celery_health() -> dict:
-    """检查 Celery worker 是否在线。
-
-    主检测: Redis 心跳（worker 每 30s SETEX worker:heartbeat:<name> TTL 60s）。
-    此方案不依赖 celery inspect，Windows/Linux 通用，准确可靠。
-    celery inspect 作为辅助信息源（可用时提供 active_count）。
-    """
-    workers_online = False
-    worker_names: list[str] = []
-    active_count = 0
-    queue_depth = 0
-    queue_stale = False
-
+    """检查 Redis 可达性。"""
     try:
         from graphpt.common.redis_client import get_redis
-        _r = get_redis(decode_responses=True, socket_connect_timeout=1)
-        if _r.ping():
-            # 主检测：Redis 心跳 key
-            cursor = 0
-            while True:
-                cursor, keys = _r.scan(cursor, match="worker:heartbeat:*", count=20)
-                for key in keys:
-                    name = key.replace("worker:heartbeat:", "")
-                    ts_val = _r.get(key)
-                    if ts_val:
-                        try:
-                            age = time.time() - float(ts_val)
-                            if age < 90:  # 心跳 TTL 60s + 30s 宽容
-                                worker_names.append(name)
-                        except (ValueError, TypeError):
-                            pass
-                if cursor == 0:
-                    break
-            worker_names = sorted(set(worker_names))
-            workers_online = len(worker_names) > 0
-
-            # 队列深度
-            queue_depth = _r.llen("collect")
-
-            # 趋势检测：队列非空 + 无活跃 worker + 3 次采样不变 → 僵尸
-            trend_key = "health:queue_depth_trend"
-            prev = _r.get(trend_key)
-            now_ts = time.time()
-            if prev:
-                prev_depth, prev_ts_str, count = prev.split(",", 2)
-                prev_depth = int(prev_depth)
-                prev_ts = float(prev_ts_str)
-                count = int(count)
-                if queue_depth == prev_depth and queue_depth > 0:
-                    count += 1
-                else:
-                    count = 0
-            else:
-                count = 0
-            _r.setex(trend_key, 120, f"{queue_depth},{now_ts},{count}")
-            if count >= 3 and queue_depth > 0 and not workers_online:
-                queue_stale = True
-    except Exception:
-        pass
-
-    # celery inspect 作为辅助（仅在可用时提供额外信息）
-    try:
-        from graphpt.collector.app import app as celery_app
-        inspector = celery_app.control.inspect(timeout=2)
-        active = inspector.active() or {}
-        active_count = sum(len(v) for v in active.values())
-        # inspect 可用时合并 worker 列表
-        ping_result = inspector.ping() or {}
-        for w in ping_result:
-            if w not in worker_names:
-                worker_names.append(w)
-    except Exception:
-        pass  # Windows 上 inspect 不可用是常态
-
-    return {
-        "ok": workers_online,
-        "workers": sorted(worker_names),
-        "active_count": active_count,
-        "queue_depth": queue_depth,
-        "queue_stale": queue_stale,
-    }
+        _r = get_redis(socket_connect_timeout=2)
+        return {"ok": _r.ping(), "host": "localhost", "port": 6379}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 
 
 def _tool_config_health() -> dict:
@@ -379,18 +263,14 @@ async def health():
     def _redis_check():
         return _redis_health()
 
-    def _celery_check():
-        return _celery_health()
-
     def _tools_check():
         return _tool_config_health()
 
     # M1: 并行执行所有健康检查，单项超时 3s，总体不超过 5s
-    with _hf.ThreadPoolExecutor(max_workers=4) as pool:
+    with _hf.ThreadPoolExecutor(max_workers=3) as pool:
         futures = {
             pool.submit(_neo4j_check): "neo4j",
             pool.submit(_redis_check): "redis",
-            pool.submit(_celery_check): "celery",
             pool.submit(_tools_check): "tools",
         }
         results = {}
@@ -400,7 +280,7 @@ async def health():
                 results[key] = f.result(timeout=4)
             except (_hf.TimeoutError, Exception) as exc:
                 results[key] = {"ok": False, "error": str(exc) if str(exc) else "timeout"}
-        for key in ("neo4j", "redis", "celery", "tools"):
+        for key in ("neo4j", "redis", "tools"):
             if key not in results:
                 results[key] = {"ok": False, "error": "check did not complete"}
 
@@ -1998,119 +1878,6 @@ async def list_vulnerabilities(
 
 
 # ============================================================
-# Task Management API
-# ============================================================
-
-@web_app.get("/api/tasks")
-async def list_tasks():
-    """列出注册的 Celery 任务及其调度信息。"""
-    try:
-        # 尝试从 Celery app 获取注册任务列表
-        from graphpt.collector.app import app as celery_app
-
-        tasks = []
-        beat_schedule = celery_app.conf.beat_schedule or {}
-
-        # 注册的任务名
-        registered = list(celery_app.tasks.keys())
-        collector_tasks = [t for t in registered if t.startswith("graphpt.collector.tasks.")]
-
-        for name in collector_tasks:
-            short = name.replace("graphpt.collector.tasks.", "")
-            schedule_info = beat_schedule.get(short, {})
-            tasks.append(
-                {
-                    "name": short,
-                    "full_name": name,
-                    "schedule": (
-                        str(schedule_info.get("schedule", ""))
-                        if schedule_info
-                        else "manual / event"
-                    ),
-                    "queue": (
-                        schedule_info.get("options", {}).get("queue", "collect")
-                        if schedule_info
-                        else "collect"
-                    ),
-                }
-            )
-
-        # 返回 celery 连接状态 + Redis 队列深度
-        broker_ok = True
-        worker_online = False
-        queue_depth = 0
-        active_count = 0
-        try:
-            inspector = celery_app.control.inspect()
-            ping_result = inspector.ping() or {}
-            worker_online = len(ping_result) > 0
-            active = inspector.active() or {}
-            active_count = sum(len(v) for v in active.values())
-        except Exception:
-            broker_ok = False
-
-        try:
-            from graphpt.common.redis_client import get_redis
-            r = get_redis(socket_connect_timeout=1)
-            queue_depth = r.llen("collect")
-        except Exception:
-            pass
-
-        return {
-            "ok": True,
-            "data": tasks,
-            "broker_ok": broker_ok,
-            "worker_online": worker_online,
-            "queue_depth": queue_depth,
-            "active_count": active_count,
-        }
-    except Exception as exc:
-        return _json_error(exc)
-
-
-@web_app.post("/api/tasks/{task_name}/run")
-async def trigger_task(task_name: str, body: dict | None = None):
-    """手动触发采集任务。body 可包含 asset_id 等参数。"""
-    body = body or {}
-    asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
-
-    from graphpt.collector.app import app as celery_app
-
-    full_name = f"graphpt.collector.tasks.{task_name}"
-
-    # 级联型任务不需要 asset_id 参数
-    cascade_tasks = {"on_new_subdomain"}
-    if task_name in cascade_tasks:
-        result = celery_app.send_task(full_name, args=[body.get("subdomain", ""), asset_id])
-    else:
-        result = celery_app.send_task(full_name, kwargs={"asset_id": asset_id})
-
-    return {
-        "ok": True,
-        "task_id": result.id,
-        "task_name": task_name,
-    }
-
-
-@web_app.get("/api/tasks/result/{task_id}")
-async def get_task_result(task_id: str):
-    """查询 Celery 任务结果。供前端轮询流水线执行状态。"""
-    from celery.result import AsyncResult
-
-    from graphpt.collector.app import app as celery_app
-
-    r = AsyncResult(task_id, app=celery_app)
-    return {
-        "ok": True,
-        "data": {
-            "task_id": task_id,
-            "status": r.status,
-            "result": r.result if r.ready() else None,
-        },
-    }
-
-
-# ============================================================
 # Pipeline Management API
 # ============================================================
 
@@ -2468,13 +2235,17 @@ async def run_pipeline(name: str, body: dict | None = None):
     params = body.get("params", {})
 
     try:
-        from graphpt.collector.app import app as celery_app
+        from graphpt.collector.pipeline import PipelineExecutor, PipelineManager
 
-        result = celery_app.send_task(
-            "graphpt.collector.pipeline.run_pipeline",
-            kwargs={"pipeline_name": name, "asset_id": asset_id, "params": params},
-        )
-        return {"ok": True, "task_id": result.id, "pipeline": name}
+        mgr = PipelineManager()
+        definition = mgr.get(name)
+        if definition is None:
+            raise HTTPException(404, f"pipeline not found: {name}")
+        executor = PipelineExecutor(definition, asset_id=asset_id, params=params)
+        result = executor.execute()
+        return {"ok": True, "data": result, "pipeline": name}
+    except HTTPException:
+        raise
     except Exception as exc:
         return _json_error(exc)
 
