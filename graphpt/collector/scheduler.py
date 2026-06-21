@@ -720,6 +720,7 @@ def run_full_scan(asset_id: str, *,
                 "findings": total_findings, "errors": total_errors,
                 "updated_at": time.time(),
             }))
+            _scan_log(f"resume_saved round={round_num} findings={total_findings}")
         except Exception:
             pass
 

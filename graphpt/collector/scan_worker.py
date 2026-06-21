@@ -53,12 +53,14 @@ def main():
         sys.exit(1)
     finally:
         # 清理所有子进程
-        import signal, psutil
         try:
+            import psutil
             parent = psutil.Process(os.getpid())
             for child in parent.children(recursive=True):
                 try: child.kill()
                 except: pass
+        except ImportError:
+            pass
         except Exception:
             pass
 
