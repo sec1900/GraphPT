@@ -95,25 +95,37 @@ NODE_CATALOG: dict[str, dict[str, Any]] = {
 
 
 # ═══════════════════════════════════════════════════════════
-# Finding type → writer 映射（替代 _write_batch 的 elif 链）
+# Finding type → writer 映射 + 参数名转换
+# 格式: ftype → (writer_method, {finding_key: writer_param})
+# None值表示参数不存在于 finding dict（取默认值或 ctx）
 # ═══════════════════════════════════════════════════════════
 
-FINDING_WRITERS: dict[str, str] = {
-    "subdomain":        "write_subdomain",
-    "port":             "write_port",
-    "http_endpoint":    "write_http_endpoint",
-    "vulnerability":    "write_vulnerability",
-    "domain":           "write_domain",
-    "icp_record":       "write_icp_record",
-    "secret":           "write_secret",
-    "credential":       "write_credential",
-    "oob_callback":     "write_oob_callback",
-    "file":             "write_file",
-    "dir_entry":        "write_dir_entry",
-    "bypass_result":    "write_bypass_result",
-    "api_endpoint":     "write_api_endpoint",
-    "os_detection":     "write_os_detection_inline",
-    "nse_script":       "write_nse_script_inline",
+FINDING_WRITERS: dict[str, tuple[str, dict[str, str | None]]] = {
+    "subdomain":     ("write_subdomain",     {"value": "value", "parent_id": "parent_id", "root_domain": "root_domain", "source": "source"}),
+    "port":          ("write_port",          {"parent_id": "ip_id", "port": "port", "protocol": "protocol", "service": "service_name", "source": "source"}),
+    "http_endpoint": ("write_http_endpoint", {"url": "url", "method": "method", "parent_id": "parent_id", "status_code": "status_code", "title": "title", "body_hash": "body_hash", "content_length": "content_length", "response_headers": "response_headers", "ssl_cert_cn": "ssl_cert_cn", "ssl_cert_issuer": "ssl_cert_issuer", "tech": "tech", "crawl_status": "crawl_status", "source": "source", "url_fragment": "url_fragment", "products": "products", "vendors": "vendors", "fingerprint_severity": "fingerprint_severity", "favicon_hash": "favicon_hash"}),
+    "vulnerability": ("write_vulnerability", {"endpoint_id": "endpoint_id", "vuln_type": "vuln_type", "title": "title", "severity": "severity", "detail": "detail", "evidence": "evidence", "url": "url", "source": "source"}),
+    "domain":        ("write_domain",        {"value": "value", "source": "source"}),
+    "secret":        ("write_secret",        {"secret_type": "secret_type", "value_preview": "value_preview", "source_url": "source_url", "file_id": "file_id", "line": "line", "evidence_path": "evidence_path"}),
+    "credential":    ("write_credential",    {"username": "username", "password": "password", "cred_type": "cred_type", "evidence": "evidence", "severity": "severity", "source": "source"}),
+    "file":          ("write_file",          {"url": "url", "parent_id": "endpoint_id", "content_type": "content_type", "size": "size", "source": "source"}),
+    "dir_entry":     ("write_dir_entry",     {"url": "url", "path": "path", "parent_id": "parent_id", "status_code": "status_code", "method": "method", "source": "source"}),
+    "os_detection":  ("_write_os_detection_inline", {"ip": "ip", "os_name": "os_name", "accuracy": "accuracy", "source": "source"}),
+    "nse_script":    ("_write_nse_script_inline",   {"ip": "ip", "script_id": "script_id", "output": "output", "source": "source"}),
+}
+
+# ftype → Neo4j 节点标签（供写入器选择目标节点）
+FINDING_NODE_LABELS: dict[str, str] = {
+    "subdomain":        "Subdomain",
+    "port":             "Port",
+    "http_endpoint":    "HTTPEndpoint",
+    "vulnerability":    "Vulnerability",
+    "secret":           "Secret",
+    "file":             "File",
+    "dir_entry":        "DirEntry",
+    "credential":       "Credential",
+    "os_detection":     "IP",
+    "nse_script":       "NseScript",
 }
 
 # ftype → Neo4j 节点标签（供写入器选择目标节点）

@@ -1081,6 +1081,35 @@ class GraphWriter:
 
     # ---- 批量写入 ----
 
+    def _write_os_detection_inline(self, ip: str = "", os_name: str = "", accuracy: Any = 0, source: str = "", **_):
+        """nmap -O OS 检测结果写入 IP 节点属性。"""
+        if not ip:
+            return {}
+        ip_id = f"ip:{ip}"
+        with self._acquire_session(None) as s:
+            s.run(
+                "MERGE (n:IP {id: $id}) SET n.os_name = $os, n.os_accuracy = $acc, n.last_seen_at = $now",
+                id=ip_id, os=os_name, acc=int(accuracy or 0), now=self._now(),
+            )
+        return {"id": ip_id}
+
+    def _write_nse_script_inline(self, ip: str = "", script_id: str = "", output: str = "", source: str = "", **_):
+        """nmap -sC NSE 脚本结果写入 NseScript 节点。"""
+        if not ip or not script_id:
+            return {}
+        ip_id = f"ip:{ip}"
+        nse_id = f"nse:{ip}:{script_id}"
+        with self._acquire_session(None) as s:
+            s.run(
+                "MERGE (ip:IP {id: $ip_id}) "
+                "MERGE (n:NseScript {id: $nse_id}) "
+                "SET n.script_id = $sid, n.output = $out, n.ip = $ip, n.last_seen_at = $now "
+                "MERGE (ip)-[:HAS_NSE_RESULT]->(n)",
+                ip_id=ip_id, nse_id=nse_id, sid=script_id, out=(output or "")[:2000],
+                ip=ip, now=self._now(),
+            )
+        return {"id": nse_id}
+
     def write_batch(self, findings: list[dict[str, Any]], *, asset_id: str = "", _session: Any | None = None) -> list[dict[str, Any]]:
         """批量写入 Finding 对象。所有 finding 共享一个 session，避免 N 次往返开销。"""
         results: list[dict[str, Any]] = []
@@ -1088,15 +1117,26 @@ class GraphWriter:
             for f in findings:
                 ftype = f.get("type", "")
                 result: dict[str, Any] = {}
+                # Catalog-based dispatch — 匹配到就用，否则回退旧 elif 链
+                from graphpt.catalog.node_types import FINDING_WRITERS
+                entry = FINDING_WRITERS.get(ftype)
+                if entry:
+                    writer_name, param_map = entry
+                    kwargs = {"_session": batch_session}
+                    for fk, wp in param_map.items():
+                        if wp:
+                            kwargs[wp] = f.get(fk, "" if isinstance(f.get(fk, ""), str) else None)
+                    if ftype in ("subdomain", "domain", "port", "http_endpoint", "file", "secret", "dir_entry", "api_endpoint"):
+                        kwargs.setdefault("asset_id", asset_id or f.get("asset_id", ""))
+                    if ftype == "port":
+                        kwargs.setdefault("ip_id", f.get("parent_id", ""))
+                    writer = getattr(self, writer_name, None)
+                    if writer and callable(writer):
+                        result = writer(**kwargs) or {}
+                        if result:
+                            results.append(result)
+                        continue
                 if ftype == "subdomain":
-                    result = self.write_subdomain(
-                        value=f["value"],
-                        asset_id=asset_id or f.get("asset_id", ""),
-                        root_domain=f.get("root_domain"),
-                        source=f.get("source", ""),
-                        cname=f.get("cname", ""),
-                        _session=batch_session,
-                    )
                 elif ftype == "ip":
                     result = self.write_ip(
                         ip=f["value"],
