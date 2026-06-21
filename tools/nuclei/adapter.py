@@ -71,6 +71,7 @@ class NucleiAdapter(BaseAdapter):
                 "evidence": evidence,
                 "source": "nuclei",
                 "asset_id": asset_id,
+                "url": endpoint_url or url,
             })
         return findings
 

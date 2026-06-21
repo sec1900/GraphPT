@@ -1676,23 +1676,30 @@ async def list_vulnerabilities(
             CALL (a, a) {
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
                     -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
+                    -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+              RETURN ep, v
               UNION
               MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
+                    -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+              RETURN ep, v
               UNION
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
-                    -[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN ep
+                    -[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+              RETURN ep, v
+              UNION
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
+                    -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+              OPTIONAL MATCH (s)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep, v
             }
-            WITH DISTINCT ep
-            MATCH (ep)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+            WITH DISTINCT v, ep
             WHERE ($severity_filter = '' OR toLower(coalesce(v.severity, '')) = $severity_filter)
               AND (
                 $q_filter = ''
                 OR toLower(coalesce(v.title, '')) CONTAINS $q_filter
                 OR toLower(coalesce(v.type, '')) CONTAINS $q_filter
                 OR toLower(coalesce(v.detail, '')) CONTAINS $q_filter
+                OR toLower(coalesce(v.url, '')) CONTAINS $q_filter
                 OR toLower(coalesce(ep.url, '')) CONTAINS $q_filter
               )
         """

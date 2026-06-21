@@ -595,6 +595,7 @@ class GraphWriter:
         severity: str = "info",
         detail: str = "",
         evidence: str = "",
+        url: str = "",
         source: str = "", _session: Any | None = None) -> dict[str, Any]:
         """写入 Vulnerability 节点，关联到 HTTPEndpoint。"""
         import hashlib
@@ -603,6 +604,15 @@ class GraphWriter:
         vuln_id = f"vuln:{hashlib.md5(identity.encode()).hexdigest()[:16]}"
         now = _now_iso()
 
+        # 从 endpoint_id 提取 hostname 用于关联 Subdomain
+        host = ""
+        if endpoint_id.startswith("ep:"):
+            parts = endpoint_id.split(":", 2)
+            if len(parts) >= 3 and parts[2]:
+                from urllib.parse import urlparse
+                parsed = urlparse(parts[2])
+                host = (parsed.hostname or "").strip().lower()
+
         with self._acquire_session(_session) as session:
             session.run(
                 """
@@ -610,24 +620,27 @@ class GraphWriter:
                   ON CREATE SET
                     v.type = $vuln_type, v.title = $title,
                     v.severity = $severity, v.detail = $detail,
-                    v.evidence = $evidence, v.sources = [$source],
-                    v.created_at = $now
+                    v.evidence = $evidence, v.url = $vuln_url,
+                    v.sources = [$source], v.created_at = $now
                   ON MATCH SET v.last_seen_at = $now
                 WITH v, coalesce(v.sources, []) AS _cur
                 SET v.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
                 WITH v
-                MATCH (e:HTTPEndpoint {id: $ep_id})
-                MERGE (e)-[:MAY_BE_VULNERABLE_TO]->(v)
+                OPTIONAL MATCH (e:HTTPEndpoint {id: $ep_id})
+                FOREACH (_ IN CASE WHEN e IS NOT NULL THEN [1] ELSE [] END |
+                  MERGE (e)-[:MAY_BE_VULNERABLE_TO]->(v)
+                )
+                WITH v
+                WHERE $host <> ''
+                MERGE (s:Subdomain {id: 'sub:' + $host})
+                ON CREATE SET s.value = $host, s.created_at = $now
+                MERGE (s)-[:MAY_BE_VULNERABLE_TO]->(v)
                 """,
-                vuln_id=vuln_id,
-                vuln_type=vuln_type,
-                title=title,
-                severity=severity,
-                detail=detail,
-                evidence=evidence,
-                source=source,
-                ep_id=endpoint_id,
-                now=now,
+                vuln_id=vuln_id, vuln_type=vuln_type,
+                title=title, severity=severity,
+                detail=detail, evidence=evidence,
+                vuln_url=url, source=source, ep_id=endpoint_id,
+                host=host, now=now,
             )
             return {"id": vuln_id}
 
@@ -1132,6 +1145,7 @@ class GraphWriter:
                         severity=f.get("severity", "info"),
                         detail=f.get("detail", ""),
                         evidence=f.get("evidence", ""),
+                        url=f.get("url", ""),
                         source=f.get("source", ""),
                         _session=batch_session,
                     )
