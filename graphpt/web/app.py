@@ -2615,32 +2615,35 @@ _scan_pool: Any = None  # ThreadPoolExecutor for background scan
 
 @web_app.post("/api/scan/start")
 async def scan_start(body: dict | None = None):
-    """一键启动全量扫描：直接调度（不经过 Celery），后台线程跑完 7 层。
-
-    层内工具并行（ThreadPoolExecutor），跨层串行（等上层产出入图）。
-    Windows/Linux 行为完全一致。
+    """一键启动全量扫描：后台线程直接执行，不经过 subprocess/Celery。
+    进度存在 scheduler._SCAN_STATE（同进程内存），前端轮询 /api/scan/state 即可见。
     """
     body = body or {}
     asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
 
     try:
-        from graphpt.collector.scheduler import scan_state
+        from graphpt.collector.scheduler import scan_state, run_full_scan, _SCAN_STATE, _SCAN_STATE_LOCK
 
         # 检查是否已在运行
         st = scan_state(asset_id)
         if st.get("status") == "scanning":
             return {"ok": False, "error": "scan already running", "data": st}
 
-        # 独立进程启动扫描 — scan_worker 自己写日志到 data/logs/scan_worker/
-        proc = subprocess.Popen(
-            [sys.executable, "-u", "-m", "graphpt.collector.scan_worker", asset_id],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        safe_name = asset_id.replace(":", "_").replace("/", "_")
-        log_path = _PROJECT_ROOT / "data" / "logs" / "scan_worker" / f"scan_{safe_name}.log"
+        # 后台线程启动（不进子进程，状态内存直读）
+        import concurrent.futures as _cf
+        global _scan_pool
+        if _scan_pool is None:
+            _scan_pool = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="scan")
+
+        def _bg_scan():
+            try:
+                run_full_scan(asset_id)
+            except Exception:
+                pass  # run_full_scan 内部已打日志
+
+        _scan_pool.submit(_bg_scan)
         return {"ok": True, "data": {"status": "started", "asset_id": asset_id,
-                "pid": proc.pid, "log": str(log_path),
-                "note": "scan running (PID %d)" % proc.pid}}
+                "note": "scan running in background thread"}}
     except Exception as exc:
         return _json_error(exc)
 

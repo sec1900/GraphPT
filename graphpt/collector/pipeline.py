@@ -647,6 +647,13 @@ class PipelineExecutor:
         if not query:
             return [{}]  # 无配置 → 跑一次，不迭代
 
+        # 自动注入 asset_id 到 WHERE NOT EXISTS，防止跨资产 ScanRun 误过滤
+        query = re.sub(
+            r"WHERE NOT EXISTS \{\s*MATCH \(sr:ScanRun\) WHERE ",
+            "WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.asset_id = $asset_id AND ",
+            query,
+        )
+
         try:
             from graphpt.collector.neo4j_client import get_graph_writer
             w = get_graph_writer()

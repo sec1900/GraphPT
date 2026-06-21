@@ -564,11 +564,11 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
     if max_workers is None:
         max_workers = min(len(tools), int(os.getenv("GRAPHPT_CONCURRENCY", "10")))
 
-    # 筛出有目标的工具
+    # 筛出有目标的工具（首轮全部执行，避免 _count_targets 的 20 次 Neo4j 连接风暴）
     ready: list[str] = []
+    current_round = _SCAN_STATE.get(asset_id, {}).get("round", 0)
     for tool in tools:
-        n = _count_targets(tool, asset_id)
-        if n > 0:
+        if current_round <= 1 or _count_targets(tool, asset_id) > 0:
             ready.append(tool)
 
     if not ready:
@@ -888,8 +888,13 @@ def _notify_completion(asset_id: str, status: str, round_num: int,
 
 
 def scan_state(asset_id: str = "default") -> dict[str, Any]:
-    """返回当前扫描状态（Redis 优先，内存回退）。独立进程扫描通过 Redis 通信。"""
-    # 先查 Redis（独立进程扫描）
+    """返回当前扫描状态（内存优先——同进程线程扫描即时可见）。Redis 为独立进程回退。"""
+    # 先查内存（同进程扫描，零延迟）
+    with _SCAN_STATE_LOCK:
+        st = _SCAN_STATE.get(asset_id, {})
+        if st:
+            return dict(st)
+    # 回退 Redis（独立进程/崩溃恢复）
     try:
         r = _redis_client()
         r.ping()
@@ -898,7 +903,7 @@ def scan_state(asset_id: str = "default") -> dict[str, Any]:
         if raw:
             data = _json.loads(raw)
             ts = data.get("updated_at", 0)
-            if time.time() - ts < 600:  # 10 分钟内更新过 → 活跃（首轮核弹可能很久）
+            if time.time() - ts < 600:
                 return {
                     "status": "scanning", "asset_id": asset_id,
                     "round": data.get("round", 0),
@@ -910,9 +915,4 @@ def scan_state(asset_id: str = "default") -> dict[str, Any]:
                 }
     except Exception:
         pass
-    # 回退内存（同进程线程扫描）
-    with _SCAN_STATE_LOCK:
-        st = _SCAN_STATE.get(asset_id, {})
-        if not st:
-            return {"status": "idle", "asset_id": asset_id}
-        return dict(st)
+    return {"status": "idle", "asset_id": asset_id}

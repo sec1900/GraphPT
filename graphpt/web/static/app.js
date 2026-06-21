@@ -2466,22 +2466,24 @@ let _scanPoll = null;
 async function startFullScan() {
   const btn = document.getElementById('btn-start-scan');
   const abort = document.getElementById('btn-abort-scan');
-  btn.disabled = true; btn.textContent = 'Scanning...';
+  btn.disabled = true; btn.textContent = 'Starting...';
   abort.style.display = 'inline-block';
   try {
     const r = await fetch('/api/scan/start', {method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({asset_id:currentAsset, dispatch:true})});
+      body:JSON.stringify({asset_id:currentAsset})});
     const d = await r.json();
     if (d.ok) {
-      toast('Scan dispatched to Celery workers');
+      toast('Full scan started');
       document.getElementById('scan-progress-bar').style.display = 'block';
       pollScanProgress();
+      // 扫描运行中：隐藏 Start，显示 Abort + 进度条（不要重置）
+      btn.style.display = 'none';
     } else {
       toast(d.error || 'Failed', false);
+      btn.disabled = false; btn.textContent = 'Start Full Scan';
+      abort.style.display = 'none';
     }
-  } catch(e) { toast(e.message, false); }
-  btn.disabled = false; btn.textContent = 'Start Full Scan';
-  abort.style.display = 'none';
+  } catch(e) { toast(e.message, false); btn.disabled = false; btn.textContent = 'Start Full Scan'; abort.style.display = 'none'; }
 }
 
 async function abortScan() {
