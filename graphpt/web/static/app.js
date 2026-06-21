@@ -2577,9 +2577,10 @@ let _lastAlertCount = 0;
 function pollScanProgress() {
   document.getElementById('scan-progress-bar').style.display = 'block';
   if (_scanPoll) clearInterval(_scanPoll);
-  let wasRunning = true;
+  var wasRunning = false;
+  var idleCount = 0;  // 连续 idle 次数，避免启动初期误判为完成
   _scanPoll = setInterval(async () => {
-    const alive = await refreshScanProgress();
+    var alive = await refreshScanProgress();
     // Check for new vulnerability alerts
     try {
       const ar = await fetch('/api/scan/alerts?asset_id=' + currentAsset);
@@ -2590,7 +2591,10 @@ function pollScanProgress() {
         _lastAlertCount = ad.data.length;
       }
     } catch(e) {}
-    if (!alive && wasRunning) {
+    if (alive) { wasRunning = true; idleCount = 0; }
+    else { idleCount++; }
+    // 连续 3 次 idle（30s）且之前确实运行过 → 才算完成
+    if (!alive && wasRunning && idleCount >= 3) {
       clearInterval(_scanPoll); _scanPoll = null;
       toast('Scan complete! All tools finished.');
       document.getElementById('btn-start-scan').style.display = '';

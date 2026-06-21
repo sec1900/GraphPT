@@ -98,6 +98,18 @@ def main():
 
     from graphpt.collector.scheduler import run_full_scan, _any_tool_has_targets
 
+    # 启动后立即写 Redis 状态，让前端 scan_state 看到 scanning
+    try:
+        import json as _json
+        from graphpt.common.redis_client import get_redis
+        _r = get_redis(decode_responses=True, socket_connect_timeout=1)
+        _r.ping()
+        _r.setex(f"scan:resume:{asset_id}", 86400, _json.dumps({
+            "asset_id": asset_id, "round": 0, "start_layer": 0,
+            "findings": 0, "errors": 0, "updated_at": _time.time(),
+        }))
+    except Exception: pass
+
     try:
         targets_before = _any_tool_has_targets(asset_id)
         log(f"targets_before={targets_before}")
