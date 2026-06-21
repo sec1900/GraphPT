@@ -718,6 +718,7 @@ def run_full_scan(asset_id: str, *,
         except Exception:
             pass
 
+    _save_resume_point()  # 启动时立即写 Redis，前端立即可见
     try:
         while round_num < _MAX_ROUNDS:
             round_num += 1
