@@ -63,3 +63,8 @@ dump.rdb
 *.png
 .playwright-mcp/
 data/tmp/
+# 工具输出目录（不应入库）
+brutespray-output/
+# 开发者笔记（不应入库）
+todo.txt
+*.todo

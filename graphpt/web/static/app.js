@@ -241,19 +241,56 @@ async function loadDashboard() {
 
   // Use lightweight count API, plus recent endpoint
   try {
-    var cntRes, epRes, recentRes;
-    try {
-      var results = await Promise.all([
-        fetch(aq(API + '/dashboard/counts')),
-        fetch(aq(API + '/dashboard/endpoints?limit=15')),
-        fetch(aq(API + '/dashboard/recent?limit=10')),
-      ]);
-      cntRes = results[0]; epRes = results[1]; recentRes = results[2];
-    } catch(e) { cntRes = epRes = recentRes = null; }
-    var cnt = cntRes ? ((await cntRes.json()).data || {}) : {};
-    var ep = epRes ? ((await epRes.json()).data || []) : [];
-    var recent = recentRes ? ((await recentRes.json()).data || {}) : {};
+    // ★ 并行但独立更新：快的先渲染，慢的逐步补上
+    fetch(aq(API + '/dashboard/endpoints?limit=15')).then(function(r){return r.json();}).then(function(j){
+      var ep = (j.data || []);
+      var epRows = ep.map(function(e){
+        return '<tr><td><span class="badge ' + (e.status==='success'?'ok':e.status==='error'?'err':'warn') + '">' + (e.status||'unknown') + '</span></td><td>' + esc(e.url||'') + '</td><td>' + (e.status_code||'-') + '</td></tr>';
+      }).join('');
+      document.getElementById('dash-endpoints').innerHTML = epRows || '<tr><td colspan="3" style="color:var(--muted)">No endpoints</td></tr>';
+    }).catch(function(){});
 
+    fetch(aq(API + '/dashboard/recent?limit=10')).then(function(r){return r.json();}).then(function(j){
+      var recent = (j.data || {});
+      var subRows = (recent.recent_subdomains || []).map(function(s){
+        return '<tr><td>' + esc(s.subdomain||s.value) + '</td><td style="color:var(--muted);font-size:11px">新发现</td><td>' + fmtTime(s.ts||s.created_at) + '</td></tr>';
+      }).join('');
+      document.getElementById('dash-recent-subs').innerHTML = subRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
+      var chRows = '';
+      var changes = (recent.recent_changes || []);
+      var changeLimit = 5;
+      changes.forEach(function(c, ci){
+        var fieldNames = {'status_code':'状态码','title':'标题','body_hash':'内容','ssl_cert_cn':'证书'};
+        var changed = (c.fields||[]).map(function(f){return fieldNames[f] || f;}).join(', ') || '属性更新';
+        var hidden = ci >= changeLimit ? ' style="display:none" class="dash-fold-row"' : '';
+        chRows += '<tr' + hidden + '><td><span class="badge warn">更新</span> ' + changed + '</td><td>' + esc(c.url||'') + '</td><td>' + fmtTime(c.changed_at) + '</td></tr>';
+      });
+      if (changes.length > changeLimit) {
+        chRows += '<tr><td colspan="3" style="text-align:center;padding:4px"><button class="btn outline small" onclick="var r=this.closest(\'table\').querySelectorAll(\'.dash-fold-row\');var show=r.length>0&&r[0].style.display===\'none\';r.forEach(function(x){x.style.display=show?\'\':\'none\'});this.textContent=show?\'▲ Collapse\':\'Show ' + (changes.length-changeLimit) + ' more\';" style="font-size:10px">Show ' + (changes.length-changeLimit) + ' more</button></td></tr>';
+      }
+      document.getElementById('dash-changes').innerHTML = chRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
+    }).catch(function(){});
+
+    // counts 独立加载（可能慢，但卡片先展示计数器）
+    _loadCountCardsAsync();
+
+    // ★ 后台异步补 scan/rescan 卡片和错误面板
+    _loadScanCardsAsync();
+    setTimeout(function(){ _loadSeverityChart(); }, 500);
+    _loadErrorsAsync();
+  } catch(e) {
+    toast(e.message, false);
+  }
+  document.getElementById('dash-loading').style.display = 'none';
+}
+
+// === 后台异步加载：count cards + scan 卡片 + 错误面板（不阻塞首屏）===
+
+async function _loadCountCardsAsync() {
+  try {
+    var r = await fetch(aq(API + '/dashboard/counts'));
+    var j = await r.json();
+    var cnt = (j.data || {});
     var cards = [
       {label:'Root Domains', value: cnt.root_domains||0, cls:'accent'},
       {label:'Subdomains', value: cnt.subdomains||0, cls:'accent'},
@@ -261,52 +298,11 @@ async function loadDashboard() {
       {label:'Open Ports', value: cnt.ports||0, cls:'orange'},
       {label:'HTTP Endpoints', value: cnt.http_endpoints||0, cls:'purple'},
     ];
-
-    // ★ 先渲染卡片和表格（不等待慢 API），scan 数据异步补上
     document.getElementById('dash-cards').innerHTML = cards.map(function(c){
       return '<div class="card"><div class="label">' + c.label + '</div><div class="value ' + c.cls + '">' + c.value + '</div></div>';
     }).join('');
-
-    // Endpoint status
-    var epRows = ep.map(function(e){
-      return '<tr><td><span class="badge ' + (e.status==='success'?'ok':e.status==='error'?'err':'warn') + '">' + (e.status||'unknown') + '</span></td><td>' + esc(e.url||'') + '</td><td>' + (e.status_code||'-') + '</td></tr>';
-    }).join('');
-    document.getElementById('dash-endpoints').innerHTML = epRows || '<tr><td colspan="3" style="color:var(--muted)">No endpoints</td></tr>';
-
-    // Recent subdomains
-    var subRows = (recent.recent_subdomains || []).map(function(s){
-      return '<tr><td>' + esc(s.subdomain||s.value) + '</td><td style="color:var(--muted);font-size:11px">新发现</td><td>' + fmtTime(s.ts||s.created_at) + '</td></tr>';
-    }).join('');
-    document.getElementById('dash-recent-subs').innerHTML = subRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
-
-    // ★ 后台异步补 scan/rescan 卡片和错误面板，不阻塞首屏渲染
-    _loadScanCardsAsync();
-    setTimeout(function(){ _loadSeverityChart(); }, 500);
-
-    // Error panel (async, slow API)
-    _loadErrorsAsync();
-
-    // Recent changes — 默认只显示最近 5 条，其余折叠
-    var chRows = '';
-    var changes = (recent.recent_changes || []);
-    var changeLimit = 5;
-    changes.forEach(function(c, ci){
-      var fieldNames = {'status_code':'状态码','title':'标题','body_hash':'内容','ssl_cert_cn':'证书'};
-      var changed = (c.fields||[]).map(function(f){return fieldNames[f] || f;}).join(', ') || '属性更新';
-      var hidden = ci >= changeLimit ? ' style="display:none" class="dash-fold-row"' : '';
-      chRows += '<tr' + hidden + '><td><span class="badge warn">更新</span> ' + changed + '</td><td>' + esc(c.url||'') + '</td><td>' + fmtTime(c.changed_at) + '</td></tr>';
-    });
-    if (changes.length > changeLimit) {
-      chRows += '<tr><td colspan="3" style="text-align:center;padding:4px"><button class="btn outline small" onclick="var r=this.closest(\'table\').querySelectorAll(\'.dash-fold-row\');var show=r.length>0&&r[0].style.display===\'none\';r.forEach(function(x){x.style.display=show?\'\':\'none\'});this.textContent=show?\'▲ Collapse\':\'Show ' + (changes.length-changeLimit) + ' more\';" style="font-size:10px">Show ' + (changes.length-changeLimit) + ' more</button></td></tr>';
-    }
-    document.getElementById('dash-changes').innerHTML = chRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
-  } catch(e) {
-    toast(e.message, false);
-  }
-  document.getElementById('dash-loading').style.display = 'none';
+  } catch(e) {}
 }
-
-// === 后台异步加载：scan 卡片 + 错误面板（不阻塞首屏）===
 
 async function _loadScanCardsAsync() {
   var cardsEl = document.getElementById('dash-cards');
@@ -2849,19 +2845,16 @@ async function showNodeDetail(url) {
     } catch (e) { document.getElementById("page-reports").innerHTML = '<div class="loading">Failed: ' + esc(e.message) + '</div>'; }
   }
 
-// 初始化：骨架先行，异步加载，带兜底重试
-var _initRan = false;
+// 初始化：骨架先行 → loadDashboard 直接加载数据 → loadAssets 后台补下拉框
+// 关键：loadDashboard 不依赖 loadAssets（资产下拉框默认值 default 足够）
 setTimeout(function() {
   loadHealth();
   var dc = document.getElementById('dash-cards');
   if (dc) dc.innerHTML = '<div class="card"><div class="label">Root Domains</div><div class="value accent">—</div></div><div class="card"><div class="label">Subdomains</div><div class="value accent">—</div></div><div class="card"><div class="label">IP Addresses</div><div class="value green">—</div></div><div class="card"><div class="label">Open Ports</div><div class="value orange">—</div></div><div class="card"><div class="label">HTTP Endpoints</div><div class="value purple">—</div></div>';
-  loadAssets().then(function() {
-    _initRan = true;
-  });
-  // 兜底：3s 后如果 loadAssets 还没完成，直接调 loadDashboard
-  setTimeout(function() {
-    if (!_initRan) { loadDashboard(); _initRan = true; }
-  }, 3000);
+  // 主路径：直接加载 Dashboard 数据（不经过 loadAssets）
+  loadDashboard();
+  // 后台加载资产列表（填充下拉框，成功后也会刷新当前页）
+  setTimeout(function() { loadAssets(); }, 2000);
 }, 500);
 if (!localStorage.getItem('graphpt_tutorial_done')) { tutOpen(); }
 
