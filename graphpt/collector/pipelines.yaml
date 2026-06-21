@@ -73,6 +73,19 @@ pipelines:
       tools:
       - 403bypass
 
+  demo_chain:
+    description: subfinder→httpx→nuclei（验证自定义流水线）
+    stages:
+    - name: subdomain_discovery
+      tools:
+      - subfinder
+    - name: web_fingerprint
+      tools:
+      - httpx
+    - name: vuln_scan
+      tools:
+      - nuclei
+
   test_nmap_chain:
     description: 单阶段 nmap（验证用）
     stages:
