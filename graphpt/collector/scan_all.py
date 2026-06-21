@@ -141,6 +141,13 @@ def scan_all_unscanned(asset_id: str, tools: list[str] | None = None) -> dict[st
 
     job_id = str(uuid.uuid4())[:8]
     with _jobs_lock:
+        # P1: 清理超过 1h 的已完成/已停止 job，防止内存泄漏
+        _now = time.time()
+        _stale = [jid for jid, j in _jobs.items()
+                  if j.get("status") in ("done", "stopped", "error")
+                  and (_now - j.get("finished_at", j.get("started_at", _now))) > 3600]
+        for jid in _stale:
+            del _jobs[jid]
         _jobs[job_id] = {
             "job_id": job_id,
             "asset_id": asset_id,

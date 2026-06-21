@@ -614,12 +614,14 @@ class MCPHttpClient:
     def _handle_sse_event(self, event_type: str, data: str) -> None:
         """处理单个 SSE 事件。"""
         if event_type == "endpoint":
+            # 安全：拒绝包含 CRLF 的数据（防 HTTP header injection）
+            if "\r" in data or "\n" in data:
+                return
             # 兼容两种格式：
             # 1) 相对路径: /message?sessionId=xxx
             # 2) 完整 URL: http://host:port/message?sessionId=xxx
             if data.startswith("http://") or data.startswith("https://"):
                 self._post_url_override = data
-                # 仍然设置一个非空 endpoint 以通过 is_running 检查
                 from urllib.parse import urlparse
                 parsed = urlparse(data)
                 self._endpoint = parsed.path + ("?" + parsed.query if parsed.query else "")

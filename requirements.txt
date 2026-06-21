@@ -19,7 +19,7 @@ aiohttp>=3.9,<4.0
 playwright>=1.40,<2.0
 
 # ---- AI SDK ----
-claude-agent-sdk>=0.1.0
+claude-agent-sdk>=0.1.0,<1.0
 # OpenAI 兼容客户端（DeepSeek 等）
 openai>=1.0,<2.0
 
@@ -34,7 +34,7 @@ lxml>=4.9,<6.0
 beautifulsoup4>=4.12,<5.0
 
 # ---- 日志 / 监控 ----
-structlog>=23.0,<25.0
+# structlog 未使用，已移除
 
 # ---- Web Admin ----
 fastapi>=0.109,<1.0

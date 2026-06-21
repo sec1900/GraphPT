@@ -30,6 +30,13 @@ python start.py
 python stop.py
 ```
 
+## Screenshots
+
+![Dashboard](docs/screenshots/dashboard.png)
+![Assets](docs/screenshots/assets.png)
+![Findings](docs/screenshots/findings.png)
+![Graph](docs/screenshots/graph.png)
+
 ## 8-Layer Attack Chain
 
 ```

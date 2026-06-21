@@ -170,6 +170,11 @@
   .ex-row:hover td { background: rgba(255,255,255,.02); }
   .ex-name { display: flex; align-items: center; gap: 6px; }
   .ex-name .ico { font-size: 14px; flex-shrink: 0; width: 18px; text-align: center; }
+  /* Dashboard 折叠行 */
+  #dash-done-summary:hover { color: var(--text) !important; }
+  .dash-fold-row { transition: opacity .15s; }
+  /* 严重度分布图 hover */
+  #sev-chart > div:hover { background: rgba(255,255,255,.03); border-radius: 4px; }
   .ex-name .val { font-weight: 500; font-size: 13px; }
   .ex-name a { color: var(--accent); text-decoration: none; }
   .ex-name a:hover { text-decoration: underline; }

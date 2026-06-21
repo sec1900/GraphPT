@@ -38,8 +38,14 @@ _MAX_CONCURRENCY = int(os.getenv("GRAPHPT_CONCURRENCY",
                          os.getenv("CELERY_CONCURRENCY", "10")))
 
 
+_active_count_cache: tuple[float, int] = (0, 1)  # (timestamp, count)
+
 def _count_active_assets(r: Any) -> int:
-    """统计当前有活跃任务的资产数（至少 1，避免除零）。"""
+    """统计当前有活跃任务的资产数（至少 1，避免除零）。5s 缓存。"""
+    global _active_count_cache
+    now = time.time()
+    if now - _active_count_cache[0] < 5:
+        return _active_count_cache[1]
     try:
         count = 0
         cursor = 0
@@ -51,9 +57,11 @@ def _count_active_assets(r: Any) -> int:
                     count += 1
             if cursor == 0:
                 break
-        return max(count, 1)
+        result = max(count, 1)
+        _active_count_cache = (now, result)
+        return result
     except Exception:
-        return 1
+        return _active_count_cache[1]
 
 
 def _slot_acquire(r: Any, asset_id: str) -> bool:
@@ -262,12 +270,22 @@ def _redis_client():
     return get_redis(decode_responses=True, socket_connect_timeout=2)
 
 
+_last_lock_clear: dict[str, float] = {}  # asset_id → 上次清理时间
+
 def _clear_stale_locks(asset_id: str) -> int:
     """检查所有调度锁的心跳，心跳停止超 5 分钟则自动释放锁+槽位。
     任务活着时每 30s 更新心跳 → 24h 长任务不会被误杀；
     任务崩溃后心跳停止 → 5min 内自动释放，下次 advance 可重试。
     返回清除的锁数量。
+
+    优化：30s 冷却，避免每次 advance 都 SCAN Redis。
     """
+    now = time.time()
+    last = _last_lock_clear.get(asset_id, 0)
+    if now - last < 30:
+        return 0  # 冷却中，跳过
+    _last_lock_clear[asset_id] = now
+
     try:
         _r = _redis_client()
         _r.ping()
@@ -275,7 +293,6 @@ def _clear_stale_locks(asset_id: str) -> int:
         return 0
 
     cleared = 0
-    now = time.time()
     pattern = f"scheduler:lock:{asset_id}:*"
     cursor = 0
     while True:
@@ -706,7 +723,8 @@ def run_full_scan(asset_id: str, *,
     aborted_layer = 0
     current_spec: dict[str, Any] = {}
     round_num = 0
-    # 安全上限：防止无限循环（大资产可分多轮，此处设一个极高上限）
+    dry_rounds = 0  # 连续无产出轮数
+    _DRY_EXIT = int(os.getenv("GRAPHPT_DRY_ROUNDS_EXIT", "2"))  # 连续 N 轮无产出则退出
     _MAX_ROUNDS = int(os.getenv("GRAPHPT_MAX_SCAN_ROUNDS", "5000"))
 
     # 保存扫描状态到 Redis（崩溃恢复用）

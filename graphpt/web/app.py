@@ -18,12 +18,19 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import yaml
+import redis as _redis_mod  # noqa: F401  eager import, avoid per-request lazy load
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 from starlette.types import Scope
 from dotenv import load_dotenv
+
+# 急切导入重型模块——首次请求不再触发模块加载链
+from graphpt.common.redis_client import get_redis as _eager_get_redis  # noqa: F401
+from graphpt.collector.neo4j_client import _get_driver as _eager_neo4j_driver  # noqa: F401
+from graphpt.catalog.node_types import NODE_CATALOG as _eager_node_catalog  # noqa: F401
+from graphpt.collector.scheduler import _DEPENDENCY_LAYERS as _eager_layers  # noqa: F401
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -50,10 +57,13 @@ _SEARCH_PATHS: list[tuple[str, str, str]] = [
 web_app = FastAPI(title="GraphPT Admin", version="0.1.0")
 
 
-# ── 静态文件 no-cache（防浏览器缓存旧 JS/CSS）──
+# ── 安全头 + 静态文件 no-cache ──
 @web_app.middleware("http")
-async def _static_no_cache(request: Request, call_next):
+async def _security_headers(request: Request, call_next):
     resp = await call_next(request)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
     if request.url.path.startswith("/static/"):
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return resp
@@ -198,6 +208,11 @@ def _json_error(exc: Exception, *, status_code: int = 500) -> JSONResponse:
 
 
 # ---- 静态文件 ----
+
+@web_app.get("/favicon.ico")
+async def favicon():
+    return FileResponse(_STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
+
 
 @web_app.get("/")
 async def index():
@@ -350,9 +365,12 @@ def _tool_config_health() -> dict:
 @web_app.get("/api/health")
 async def health():
     """返回 Web 管理端依赖状态：Neo4j、Redis、Celery、工具配置。
-
-    M1: 每项检测有独立超时保护，单项慢不拖垮整体响应。
+    30s 缓存——健康检查结果短时间不变。
     """
+    cache_key = "health"
+    cached = _cached(cache_key, ttl=30)
+    if cached:
+        return cached
     import concurrent.futures as _hf
 
     def _neo4j_check():
@@ -391,11 +409,13 @@ async def health():
         and results["redis"].get("ok")
         and results["tools"].get("ok")
     )
-    return {
+    result = {
         "ok": True,
         "status": "ok" if overall else "degraded",
         "data": results,
     }
+    _cache_set(cache_key, result)
+    return result
 
 
 # ============================================================
@@ -406,7 +426,11 @@ async def health():
 
 @web_app.get("/api/dashboard/counts")
 async def dashboard_counts(asset_id: str = "default"):
-    """节点计数 — 查询由 NODE_CATALOG 集中定义。"""
+    """节点计数 — 查询由 NODE_CATALOG 集中定义。30s 缓存。"""
+    cache_key = f"dc:{asset_id}"
+    cached = _cached(cache_key)
+    if cached:
+        return cached
     try:
         from graphpt.catalog.node_types import NODE_CATALOG
         key_map = {
@@ -418,7 +442,60 @@ async def dashboard_counts(asset_id: str = "default"):
             query = NODE_CATALOG[node_type]["count_query"]
             r = _neo4j_query(query, aid=asset_id)
             s[key] = r[0]["c"] if r else 0
-        return {"ok": True, "data": s}
+        result = {"ok": True, "data": s}
+        _cache_set(cache_key, result)
+        return result
+    except Exception as exc:
+        return _json_error(exc)
+
+
+@web_app.get("/api/dashboard/severity")
+async def dashboard_severity(asset_id: str = "default"):
+    """漏洞严重度分布——用于 Dashboard 柱状图。30s 缓存。"""
+    cache_key = f"ds:{asset_id}"
+    cached = _cached(cache_key, ttl=30)
+    if cached:
+        return cached
+    try:
+        rows = _neo4j_query(
+            """
+            MATCH (a:Asset {id: $aid})
+            CALL {
+              WITH a
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
+                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+                    -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+              RETURN v
+              UNION
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+                    -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+              RETURN v
+              UNION
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
+                    -[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+              RETURN v
+              UNION
+              MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
+                    -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+              RETURN v
+            }
+            WITH DISTINCT v
+            RETURN coalesce(toLower(v.severity), 'info') AS severity, count(v) AS c
+            """,
+            aid=asset_id,
+        )
+        counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+        total = 0
+        for r in rows:
+            sev = (r.get("severity") or "info").lower()
+            cnt = int(r.get("c") or 0)
+            if sev in counts:
+                counts[sev] = cnt
+            total += cnt
+        counts["total"] = total
+        result = {"ok": True, "data": counts}
+        _cache_set(cache_key, result)
+        return result
     except Exception as exc:
         return _json_error(exc)
 
@@ -635,47 +712,35 @@ async def dashboard(asset_id: str = "default"):
 
 @web_app.get("/api/assets")
 async def list_assets():
-    """列出所有 Asset（项目），含节点统计。"""
+    """列出所有 Asset（项目），含节点统计。30s 缓存。"""
+    cache_key = "assets_list"
+    cached = _cached(cache_key, ttl=30)
+    if cached:
+        return cached
+
     try:
+        # 拆回独立 CALL 子查询，避免 OPTIONAL MATCH 交叉乘积
         rows = _neo4j_query(
             """
             MATCH (a:Asset)
-            CALL (a, a) {
-              OPTIONAL MATCH (a)-[:HAS_ROOT]->(r:RootDomain)
-              RETURN count(r) AS root_cnt
-            }
-            CALL (a, a) {
-              OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
-              RETURN count(s) AS sub_cnt
-            }
-            CALL (a, a) {
+            CALL (a) { OPTIONAL MATCH (a)-[:HAS_ROOT]->(r:RootDomain) RETURN count(r) AS root_cnt }
+            CALL (a) { OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain) RETURN count(s) AS sub_cnt }
+            CALL (a) {
               OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)
               RETURN count(ip) AS domain_ip_cnt
             }
-            CALL (a, a) {
-              OPTIONAL MATCH (a)-[:HAS_IP]->(ip:IP)
-              RETURN count(ip) AS direct_ip_cnt
-            }
-            CALL (a, a) {
+            CALL (a) { OPTIONAL MATCH (a)-[:HAS_IP]->(ip:IP) RETURN count(ip) AS direct_ip_cnt }
+            CALL (a) {
               OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p:Port)
               RETURN count(p) AS domain_port_cnt
             }
-            CALL (a, a) {
-              OPTIONAL MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(p:Port)
-              RETURN count(p) AS direct_port_cnt
-            }
-            CALL (a, a) {
+            CALL (a) { OPTIONAL MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(p:Port) RETURN count(p) AS direct_port_cnt }
+            CALL (a) {
               OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
               RETURN count(ep) AS domain_ep_cnt
             }
-            CALL (a, a) {
-              OPTIONAL MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN count(ep) AS direct_ep_cnt
-            }
-            CALL (a, a) {
-              OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN count(ep) AS subdomain_ep_cnt
-            }
+            CALL (a) { OPTIONAL MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN count(ep) AS direct_ep_cnt }
+            CALL (a) { OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN count(ep) AS subdomain_ep_cnt }
             RETURN a.id AS id, coalesce(a.name, a.id) AS name, a.created_at AS created_at,
                    root_cnt, sub_cnt,
                    domain_ip_cnt + direct_ip_cnt AS ip_cnt,
@@ -690,7 +755,9 @@ async def list_assets():
              "ip_count": r["ip_cnt"], "port_count": r["port_cnt"], "endpoint_count": r["ep_cnt"]}
             for r in rows
         ]
-        return {"ok": True, "data": assets}
+        result = {"ok": True, "data": assets}
+        _cache_set(cache_key, result)
+        return result
     except Exception as exc:
         return _json_error(exc)
 
@@ -788,6 +855,7 @@ async def create_asset(body: dict):
             )
             seeded += 1
 
+        _cache_store.pop("assets_list", None)  # 清除资产列表缓存
         return {"ok": True, "data": {
             "id": record["id"] if record else asset_id,
             "name": record["name"] if record else name,
@@ -816,73 +884,97 @@ async def update_asset(asset_id: str, body: dict):
 
 @web_app.delete("/api/assets/{asset_id}")
 async def delete_asset(asset_id: str):
-    """删除 Asset 及完整子图（沿 HAS_ROOT / HAS_IP 路径清理所有关联节点 + ScanRun）。"""
+    """删除 Asset 及完整子图（沿 HAS_ROOT / HAS_IP / HAS_ICP 路径清理所有关联节点）。
+
+    两步执行：
+    1. 清理所有关联的 ScanRun（它们可能有 RAN 指向子树节点，阻止删除）
+    2. 删除完整子树
+    """
     try:
+        # Step 0: 先删除该 asset 的 ScanRun（RAN 关系指向子树节点，必须先清理）
+        _neo4j_query(
+            """
+            MATCH (sr:ScanRun {asset_id: $aid})
+            DETACH DELETE sr
+            """,
+            aid=asset_id,
+        )
+        # Step 1: 收集并删除子树节点
         result = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            // 收集所有关联节点 (沿 HAS_ROOT 和 HAS_IP 两路遍历)
-            CALL (a, a) {
+            CALL {
+              WITH a
               OPTIONAL MATCH (a)-[:HAS_ROOT]->(r:RootDomain)
               OPTIONAL MATCH (r)-[:HAS_SUB]->(s:Subdomain)
               OPTIONAL MATCH (s)-[:RESOLVES_TO]->(ip:IP)
-              OPTIONAL MATCH (s)-[:EXPOSES]->(ep:HTTPEndpoint)
+              OPTIONAL MATCH (s)-[:EXPOSES]->(ep1:HTTPEndpoint)
               OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
               OPTIONAL MATCH (p)-[:EXPOSES]->(ep2:HTTPEndpoint)
               OPTIONAL MATCH (p)-[:HAS_SERVICE]->(svc:Service)
+              OPTIONAL MATCH (ep1)-[:EXPOSES_PATH]->(d:DirEntry)
+              OPTIONAL MATCH (ep2)-[:EXPOSES_PATH]->(d2:DirEntry)
+              OPTIONAL MATCH (ep1)-[:REFERENCES]->(f:File)
+              OPTIONAL MATCH (ep2)-[:REFERENCES]->(f2:File)
+              OPTIONAL MATCH (ep1)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+              OPTIONAL MATCH (ep2)-[:MAY_BE_VULNERABLE_TO]->(v2:Vulnerability)
+              OPTIONAL MATCH (ep1)-[:MAY_CONTAIN]->(sec:Secret)
+              OPTIONAL MATCH (ep2)-[:MAY_CONTAIN]->(sec2:Secret)
+              OPTIONAL MATCH (ep1)-[:BYPASS_ATTEMPT]->(byp:BypassResult)
+              OPTIONAL MATCH (ep2)-[:BYPASS_ATTEMPT]->(byp2:BypassResult)
+              OPTIONAL MATCH (ep1)-[:EXPOSES_API]->(api:ApiEndpoint)
+              OPTIONAL MATCH (ep2)-[:EXPOSES_API]->(api2:ApiEndpoint)
+              OPTIONAL MATCH (f)-[:MAY_CONTAIN]->(sec3:Secret)
+              OPTIONAL MATCH (f2)-[:MAY_CONTAIN]->(sec4:Secret)
+              OPTIONAL MATCH (f)-[:DEFINES_API]->(api3:ApiEndpoint)
+              OPTIONAL MATCH (f2)-[:DEFINES_API]->(api4:ApiEndpoint)
               RETURN collect(DISTINCT r) + collect(DISTINCT s) + collect(DISTINCT ip) +
-                     collect(DISTINCT ep) + collect(DISTINCT p) + collect(DISTINCT ep2) +
-                     collect(DISTINCT svc) AS nodes1
+                     collect(DISTINCT p) + collect(DISTINCT svc) +
+                     collect(DISTINCT ep1) + collect(DISTINCT ep2) +
+                     collect(DISTINCT d) + collect(DISTINCT d2) +
+                     collect(DISTINCT f) + collect(DISTINCT f2) +
+                     collect(DISTINCT v) + collect(DISTINCT v2) +
+                     collect(DISTINCT sec) + collect(DISTINCT sec2) + collect(DISTINCT sec3) + collect(DISTINCT sec4) +
+                     collect(DISTINCT byp) + collect(DISTINCT byp2) +
+                     collect(DISTINCT api) + collect(DISTINCT api2) + collect(DISTINCT api3) + collect(DISTINCT api4)
+                     AS domain_nodes
             }
-            CALL (a, a) {
+            CALL {
+              WITH a
               OPTIONAL MATCH (a)-[:HAS_IP]->(ip:IP)
               OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
               OPTIONAL MATCH (p)-[:EXPOSES]->(ep:HTTPEndpoint)
-              RETURN collect(DISTINCT ip) + collect(DISTINCT p) + collect(DISTINCT ep) AS nodes2
-            }
-            CALL (a, a) {
-              OPTIONAL MATCH (a)-[:HAS_ROOT]->(r:RootDomain)
-              OPTIONAL MATCH (r)-[:HAS_SUB]->(s:Subdomain)
-              OPTIONAL MATCH (s)-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(p:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
               OPTIONAL MATCH (ep)-[:EXPOSES_PATH]->(d:DirEntry)
               OPTIONAL MATCH (ep)-[:REFERENCES]->(f:File)
               OPTIONAL MATCH (ep)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
               OPTIONAL MATCH (ep)-[:MAY_CONTAIN]->(sec:Secret)
-              OPTIONAL MATCH (d)-[:BYPASS_ATTEMPT]->(byp:BypassResult)
-              OPTIONAL MATCH (ep)-[:BYPASS_ATTEMPT]->(byp2:BypassResult)
+              OPTIONAL MATCH (ep)-[:BYPASS_ATTEMPT]->(byp:BypassResult)
               OPTIONAL MATCH (ep)-[:EXPOSES_API]->(api:ApiEndpoint)
-              OPTIONAL MATCH (f)-[:DEFINES_API]->(api2:ApiEndpoint)
               OPTIONAL MATCH (f)-[:MAY_CONTAIN]->(sec2:Secret)
-              RETURN collect(DISTINCT d) + collect(DISTINCT f) + collect(DISTINCT v) +
-                     collect(DISTINCT sec) + collect(DISTINCT sec2) +
-                     collect(DISTINCT byp) + collect(DISTINCT byp2) +
-                     collect(DISTINCT api) + collect(DISTINCT api2) AS nodes3
+              OPTIONAL MATCH (f)-[:DEFINES_API]->(api2:ApiEndpoint)
+              RETURN collect(DISTINCT ip) + collect(DISTINCT p) + collect(DISTINCT ep) +
+                     collect(DISTINCT d) + collect(DISTINCT f) +
+                     collect(DISTINCT v) + collect(DISTINCT sec) + collect(DISTINCT sec2) +
+                     collect(DISTINCT byp) + collect(DISTINCT api) + collect(DISTINCT api2)
+                     AS ip_nodes
             }
-            CALL (a, a) {
+            CALL {
+              WITH a
               OPTIONAL MATCH (a)-[:HAS_ICP]->(icp:ICPRecord)
-              RETURN collect(DISTINCT icp) AS nodes4
+              RETURN collect(DISTINCT icp) AS icp_nodes
             }
-            WITH nodes1, nodes2, nodes3, nodes4, a
-            UNWIND (nodes1 + nodes2 + nodes3 + nodes4) AS n
+            WITH domain_nodes + ip_nodes + icp_nodes AS all_nodes, a
+            UNWIND all_nodes AS n
             WITH DISTINCT n, a
             WHERE n IS NOT NULL
             DETACH DELETE n
-            WITH a
+            WITH DISTINCT a
             DETACH DELETE a
             RETURN 1 AS deleted
             """,
             aid=asset_id,
         )
-        # 清理该 asset 的孤儿 ScanRun
-        _neo4j_query(
-            """
-            MATCH (sr:ScanRun)
-            WHERE NOT EXISTS {
-              MATCH (sr)-[:RAN]->(:ScanRun)  // 匹配任何可能的关联
-            }
-            DELETE sr
-            """,
-        )
+        _cache_store.pop("assets_list", None)  # 清除资产列表缓存
         return {"ok": True, "data": {"deleted": 1 if result else 0}}
     except Exception as exc:
         return _json_error(exc)
@@ -920,22 +1012,32 @@ async def list_targets(
                     _props_list = [p.strip() for p in _props.split(" OR ")]
                     _where = " OR ".join(f"{p} CONTAINS $search" for p in _props_list)
                     _first_prop = _props_list[0].split(".")[-1]  # e.g. "value" or "url"
+                    # 节点统一别名为 n，故 n.id 始终有效
                     _batch = _neo4j_query(
                         f"MATCH (a:Asset {{id: $aid}}) {_path} "
                         f"WHERE {_where} "
                         f"RETURN DISTINCT coalesce({_props_list[0]}, n.value) AS value, "
+                        f"n.id AS id, n.created_at AS created_at, "
                         f"'{_label}' AS node_type "
                         f"ORDER BY value SKIP 0 LIMIT $limit",
                         aid=asset_id, search=search, limit=per_page + 1,
                     )
                     for r in _batch[:per_page - len(rows)]:
-                        rows.append({"value": r["value"], "type": r["node_type"], "sub_count": 0})
+                        rows.append({
+                            "value": r["value"],
+                            "id": r.get("id", ""),
+                            "created_at": r.get("created_at", ""),
+                            "type": r["node_type"],
+                            "sub_count": 0,
+                        })
                 except Exception:
                     continue  # 某类查询失败不阻塞其他
             has_more = len(rows) > per_page
             for r in rows[:per_page]:
                 targets.append({
                     "value": r["value"],
+                    "id": r.get("id", ""),
+                    "created_at": r.get("created_at", ""),
                     "type": r["type"].lower(),
                     "sub_count": r["sub_count"],
                 })
@@ -1779,7 +1881,13 @@ async def list_vulnerabilities(
     severity: str = "",
     q: str = "",
 ):
-    """分页浏览漏洞结果。当前来源主要是 nuclei 写入的 Vulnerability 节点。"""
+    """分页浏览漏洞结果。当前来源主要是 nuclei 写入的 Vulnerability 节点。30s 缓存。"""
+    # 搜索时跳过缓存（搜索词多变）
+    if not q.strip():
+        cache_key = f"vulns:{asset_id}:{severity}:{page}:{per_page}"
+        cached = _cached(cache_key, ttl=30)
+        if cached:
+            return cached
     try:
         page = max(page, 1)
         per_page = max(1, min(per_page, 200))
@@ -1858,7 +1966,7 @@ async def list_vulnerabilities(
         )
         total = total_rows[0]["c"] if total_rows else 0
 
-        return {
+        result = {
             "ok": True,
             "data": [
                 {
@@ -1882,6 +1990,9 @@ async def list_vulnerabilities(
             "page": page,
             "per_page": per_page,
         }
+        if not q.strip():
+            _cache_set(cache_key, result)
+        return result
     except Exception as exc:
         return _json_error(exc)
 
@@ -2071,9 +2182,13 @@ def _collector_tools_config() -> dict:
 
 def _tool_yaml_path(tool: str) -> Path:
     tool_name = str(tool or "").strip()
-    if not tool_name or tool_name in {".", ".."} or "/" in tool_name or "\\" in tool_name:
+    if not tool_name or "/" in tool_name or "\\" in tool_name:
         raise HTTPException(400, f"invalid tool name: {tool}")
-    return _TOOLS_DIR / tool_name / "tool.yaml"
+    # resolve + 确保不越界 _TOOLS_DIR
+    resolved = (_TOOLS_DIR / tool_name).resolve()
+    if not str(resolved).startswith(str(_TOOLS_DIR.resolve())):
+        raise HTTPException(400, f"invalid tool name: {tool}")
+    return resolved / "tool.yaml"
 
 
 def _collector_tool_config(tool: str) -> dict:
@@ -2410,7 +2525,9 @@ async def global_search(q: str = "", asset_id: str = "default", limit: int = 15)
     try:
         if not q.strip():
             return {"ok": True, "data": {"subdomains":[], "ips":[], "endpoints":[]}}
-        p = f".*{q.strip()}.*"
+        # 转义用户输入中的 regex 特殊字符 + 限长 120 字符（防 ReDoS）
+        _safe_q = re.escape(q.strip()[:120])
+        p = f".*{_safe_q}.*"
         subs = _neo4j_query("MATCH (:Asset {id:$aid})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain) WHERE s.value=~$p RETURN s.value AS v LIMIT $lim", aid=asset_id, p=p, lim=limit)
         ips = _neo4j_query("MATCH (a:Asset {id:$aid}) CALL (a, a) { MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip } WITH DISTINCT ip WHERE ip.value=~$p RETURN ip.value AS v LIMIT $lim", aid=asset_id, p=p, lim=limit)
         eps = _neo4j_query("MATCH (a:Asset {id:$aid}) CALL (a, a) { MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep } WITH DISTINCT ep WHERE ep.url=~$p RETURN ep.url AS url, ep.status_code AS sc, ep.title AS t LIMIT $lim", aid=asset_id, p=p, lim=limit)
@@ -2564,7 +2681,7 @@ import ctypes, ctypes.wintypes
 
 def _mitm_redis():
     import redis
-    return redis.Redis(host="localhost", port=6379, socket_connect_timeout=1, decode_responses=True)
+    return redis.Redis(host="localhost", port=6379, socket_connect_timeout=2, socket_timeout=2, decode_responses=True)
 
 @web_app.post("/api/mitm/start")
 async def mitm_start(body: dict | None = None):
@@ -2847,19 +2964,48 @@ async def scan_history(asset_id: str = "default", limit: int = 20):
         return _json_error(exc)
 
 
+# 缓存工具：避免频繁重复的 Neo4j count 查询
+import time as _cache_time
+_cache_store: dict[str, tuple[float, dict]] = {}
+_CACHE_TTL = 30  # 秒
+
+
+def _cached(key: str, ttl: int | None = None) -> dict | None:
+    """读取缓存，TTL 未过期返回 dict，否则返回 None。"""
+    now = _cache_time.time()
+    entry = _cache_store.get(key)
+    if entry and (now - entry[0]) < (ttl if ttl is not None else _CACHE_TTL):
+        return entry[1]
+    return None
+
+
+def _cache_set(key: str, value: dict) -> None:
+    """写入缓存并清理过期条目。"""
+    now = _cache_time.time()
+    _cache_store[key] = (now, value)
+    stale = [k for k, v in _cache_store.items() if (now - v[0]) > _CACHE_TTL * 3]
+    for k in stale:
+        _cache_store.pop(k, None)
+
+
 @web_app.get("/api/scan/progress")
 async def scan_progress(asset_id: str = "default"):
-    """全量扫描进度：每个工具的 ScanRun 计数 + 活跃标记。
+    """全量扫描进度：仅 ScanRun 计数 + 活跃标记（不含 NODE_CATALOG count）。
 
-    修复 S1：ScanRun 和节点计数均按 asset_id 过滤，不再混入其他资产的全局数据。
+    节点计数由 /api/dashboard/counts 独立提供并缓存。
     """
+    cache_key = f"sp:{asset_id}"
+    cached = _cached(cache_key)
+    if cached:
+        return cached
+
     import redis as _rds
     try:
         from graphpt.collector.neo4j_client import _get_driver
         d = _get_driver()
 
-        # 活跃标记
-        active_tools = []
+        # 活跃标记（Redis，快）
+        active_tools: list[str] = []
         try:
             from graphpt.common.redis_client import get_redis
             _r = get_redis(decode_responses=True, socket_connect_timeout=1)
@@ -2869,24 +3015,14 @@ async def scan_progress(asset_id: str = "default"):
         except Exception:
             pass
 
+        # ScanRun 计数（单条 MATCH，快）
         with d.session() as s:
-            # S1: ScanRun 按 asset_id 过滤
             runs = {r["t"]: r["c"] for r in s.run(
                 "MATCH (sr:ScanRun {asset_id: $aid}) RETURN sr.tool AS t, count(sr) AS c",
                 aid=asset_id,
             )}
 
-            # S1: 节点计数 — 查询由 NODE_CATALOG 集中定义
-            from graphpt.catalog.node_types import NODE_CATALOG
-            nodes = {}
-            for node_type, cfg in NODE_CATALOG.items():
-                try:
-                    nodes[node_type] = s.run(cfg["count_query"], aid=asset_id).single()["c"]
-                except Exception:
-                    nodes[node_type] = 0
-
-        # 按 layer 组织
-        from graphpt.collector.scheduler import _DEPENDENCY_LAYERS
+        # 按 dependency layer 组织
         layers = []
         for spec in _DEPENDENCY_LAYERS:
             tools = []
@@ -2898,11 +3034,13 @@ async def scan_progress(asset_id: str = "default"):
                 })
             layers.append({"layer": spec["layer"], "node": spec["node"], "tools": tools})
 
-        return {"ok": True, "data": {
-            "layers": layers, "nodes": nodes,
+        result = {"ok": True, "data": {
+            "layers": layers,
             "active_tools": active_tools,
             "scan_running": _scan_pool is not None,
         }}
+        _cache_set(cache_key, result)
+        return result
     except Exception as exc:
         return _json_error(exc)
 

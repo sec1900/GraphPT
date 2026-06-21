@@ -17,6 +17,10 @@ async function loadAssets() {
         if (!assetList.find(a => a.id === currentAsset)) currentAsset = assetList[0]?.id || 'default';
         renderAssetSelectors();
         if (currentAsset !== prev) loadCurrentPage();
+        // 首次加载时（prev === currentAsset）延迟触发，确保首屏 DOM 稳定
+        if (currentAsset === prev) {
+          setTimeout(function(){ loadCurrentPage(); }, 100);
+        }
         return;
       }
     } catch(e) { /* ignore */ }
@@ -29,7 +33,9 @@ function renderAssetSelectors() {
     const stats = [a.root_count && `R:${a.root_count}`, a.sub_count && `S:${a.sub_count}`, a.ip_count && `I:${a.ip_count}`, a.endpoint_count && `E:${a.endpoint_count}`].filter(Boolean).join(' ');
     return `<option value="${esc(a.id)}" ${a.id===currentAsset?'selected':''}>${esc(a.name||a.id)} ${stats ? '(' + stats + ')' : ''}</option>`;
   }).join('') || '<option value="default">default</option>';
-  document.querySelectorAll('#tgt-asset-sel, #exp-asset-sel, #dash-asset-sel, #vuln-asset-sel, #graph-asset-sel').forEach(el => { el.innerHTML = opts; el.value = currentAsset; });
+  // 全局资产选择器（Header 中唯一入口）
+  var sel = document.getElementById('global-asset-sel');
+  if (sel) { sel.innerHTML = opts; sel.value = currentAsset; }
 }
 
 async function clearErrors() {
@@ -71,6 +77,7 @@ function loadCurrentPage() {
     case 'page-dashboard': loadDashboard(); break;
     case 'page-assets': renderAssetsPage(); break;
     case 'page-vulns': loadVulnerabilities(); break;
+    case 'page-pipelines': loadPipelines(); break;
     case 'page-reports': loadReports(); break;
     case 'page-logs': loadLogs(); break;
     case 'page-graph': loadGraph(); break;
@@ -156,6 +163,9 @@ document.getElementById('asset-modal-overlay').addEventListener('click', functio
 
 document.querySelectorAll('nav button[data-page]').forEach(btn => {
   btn.addEventListener('click', () => {
+    // 隐藏搜索下拉，防止跨页面残留阻挡导航
+    var sr = document.getElementById('search-results');
+    if (sr) sr.style.display = 'none';
     document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
@@ -164,6 +174,7 @@ document.querySelectorAll('nav button[data-page]').forEach(btn => {
       case 'dashboard': loadDashboard(); break;
       case 'assets': renderAssetsPage(); break;
       case 'vulns': loadVulnerabilities(); break;
+      case 'pipelines': loadPipelines(); break;
       case 'reports': loadReports(); break;
       case 'logs': loadLogs(); break;
       case 'config': loadConfig(); break;
@@ -209,25 +220,41 @@ async function loadHealth() {
 }
 
 // ============================================================
+// fetch with timeout helper (prevents slow endpoints from blocking UI)
+function _fetchTimeout(url, options, timeoutMs) {
+  if (!timeoutMs) return fetch(url, options);
+  var ctrl = new AbortController();
+  var timer = setTimeout(function(){ ctrl.abort(); }, timeoutMs);
+  return fetch(url, Object.assign({}, options||{}, {signal: ctrl.signal})).finally(function(){ clearTimeout(timer); });
+}
+
+// ============================================================
 // Dashboard
 // ============================================================
 async function loadDashboard() {
   document.getElementById('dash-loading').style.display = 'block';
-  const assetName = (assetList.find(a => a.id === currentAsset) || {}).name || currentAsset;
+  var dashCards = document.getElementById('dash-cards');
+  // 先展示骨架（避免白屏等待），数据到后再替换
+  if (dashCards) dashCards.innerHTML = '<div class="card"><div class="label">Root Domains</div><div class="value accent">—</div></div><div class="card"><div class="label">Subdomains</div><div class="value accent">—</div></div><div class="card"><div class="label">IP Addresses</div><div class="value green">—</div></div><div class="card"><div class="label">Open Ports</div><div class="value orange">—</div></div><div class="card"><div class="label">HTTP Endpoints</div><div class="value purple">—</div></div>';
+  var assetName = (assetList.find(function(a){return a.id===currentAsset;}) || {}).name || currentAsset;
   document.getElementById('dash-asset-name').textContent = assetName;
 
   // Use lightweight count API, plus recent endpoint
   try {
-    const [cntRes, epRes, recentRes] = await Promise.all([
-      fetch(aq(API + '/dashboard/counts')),
-      fetch(aq(API + '/dashboard/endpoints?limit=15')),
-      fetch(aq(API + '/dashboard/recent?limit=10')),
-    ]);
-    const cnt = (await cntRes.json()).data || {};
-    const ep = (await epRes.json()).data || [];
-    const recent = (await recentRes.json()).data || {};
+    var cntRes, epRes, recentRes;
+    try {
+      var results = await Promise.all([
+        fetch(aq(API + '/dashboard/counts')),
+        fetch(aq(API + '/dashboard/endpoints?limit=15')),
+        fetch(aq(API + '/dashboard/recent?limit=10')),
+      ]);
+      cntRes = results[0]; epRes = results[1]; recentRes = results[2];
+    } catch(e) { cntRes = epRes = recentRes = null; }
+    var cnt = cntRes ? ((await cntRes.json()).data || {}) : {};
+    var ep = epRes ? ((await epRes.json()).data || []) : [];
+    var recent = recentRes ? ((await recentRes.json()).data || {}) : {};
 
-    const cards = [
+    var cards = [
       {label:'Root Domains', value: cnt.root_domains||0, cls:'accent'},
       {label:'Subdomains', value: cnt.subdomains||0, cls:'accent'},
       {label:'IP Addresses', value: cnt.ips||0, cls:'green'},
@@ -235,76 +262,164 @@ async function loadDashboard() {
       {label:'HTTP Endpoints', value: cnt.http_endpoints||0, cls:'purple'},
     ];
 
-    // Add scan progress bars
-    try {
-      const spRes = await fetch(aq(API + '/scan/progress?asset_id=' + currentAsset));
-      const sp = await spRes.json();
-      if (sp.ok && sp.data && sp.data.layers) {
-        const toolPcts = {};
-        sp.data.layers.forEach(l => l.tools.forEach(t => {
-          if (!t.active) toolPcts[t.tool] = t.scans > 0 ? 'done' : 'pending';
-          else toolPcts[t.tool] = 'running';
-        }));
-        const overall = sp.data.layers.reduce((sum, l) => {
-          const done = l.tools.filter(t => t.scans > 0).length;
-          return sum + done / Math.max(1, l.tools.length);
-        }, 0) / Math.max(1, sp.data.layers.length) * 100;
-        cards.push({label:'Scan Progress', value: Math.round(overall)+'%', cls:'accent'});
-      }
-    } catch(e) {}
-
-    // Scan history
-    try {
-      const hRes = await fetch(aq(API + '/scan/history?asset_id=' + currentAsset));
-      const h = await hRes.json();
-      if (h.ok && h.data.last_scan) {
-        const lastTime = fmtTime(h.data.last_scan);
-        cards.push({label:'Last Scan', value: lastTime, cls:'accent'});
-        cards.push({label:'Total Scans', value: h.data.total_scans, cls:'green'});
-      }
-    } catch(e) {}
-
-    document.getElementById('dash-cards').innerHTML = cards.map(c =>
-      `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div></div>`
-    ).join('');
+    // ★ 先渲染卡片和表格（不等待慢 API），scan 数据异步补上
+    document.getElementById('dash-cards').innerHTML = cards.map(function(c){
+      return '<div class="card"><div class="label">' + c.label + '</div><div class="value ' + c.cls + '">' + c.value + '</div></div>';
+    }).join('');
 
     // Endpoint status
-    let epRows = ep.map(e =>
-      `<tr><td><span class="badge ${e.status==='success'?'ok':e.status==='error'?'err':'warn'}">${e.status||'unknown'}</span></td><td>${esc(e.url||'')}</td><td>${e.status_code||'-'}</td></tr>`
-    ).join('');
+    var epRows = ep.map(function(e){
+      return '<tr><td><span class="badge ' + (e.status==='success'?'ok':e.status==='error'?'err':'warn') + '">' + (e.status||'unknown') + '</span></td><td>' + esc(e.url||'') + '</td><td>' + (e.status_code||'-') + '</td></tr>';
+    }).join('');
     document.getElementById('dash-endpoints').innerHTML = epRows || '<tr><td colspan="3" style="color:var(--muted)">No endpoints</td></tr>';
 
-    // Recent subdomains — API返回{subdomain, ts}，适配为前端格式
-    let subRows = (recent.recent_subdomains || []).map(s =>
-      `<tr><td>${esc(s.subdomain||s.value)}</td><td style="color:var(--muted);font-size:11px">新发现</td><td>${fmtTime(s.ts||s.created_at)}</td></tr>`
-    ).join('');
+    // Recent subdomains
+    var subRows = (recent.recent_subdomains || []).map(function(s){
+      return '<tr><td>' + esc(s.subdomain||s.value) + '</td><td style="color:var(--muted);font-size:11px">新发现</td><td>' + fmtTime(s.ts||s.created_at) + '</td></tr>';
+    }).join('');
     document.getElementById('dash-recent-subs').innerHTML = subRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
 
-    // Recent changes
-    let chRows = '';
-    (recent.recent_changes || []).forEach(c => {
-      const fieldNames = {'status_code':'状态码','title':'标题','body_hash':'内容','ssl_cert_cn':'证书'};
-      const changed = (c.fields||[]).map(f => fieldNames[f] || f).join(', ') || '属性更新';
-      chRows += `<tr><td><span class="badge warn">更新</span> ${changed}</td><td>${esc(c.url||'')}</td><td>${fmtTime(c.changed_at)}</td></tr>`;
-    });
-    document.getElementById('dash-changes').innerHTML = chRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
+    // ★ 后台异步补 scan/rescan 卡片和错误面板，不阻塞首屏渲染
+    _loadScanCardsAsync();
+    setTimeout(function(){ _loadSeverityChart(); }, 500);
 
-    // Error panel
-    try {
-      const errRes = await fetch(aq(API + '/errors?limit=20'));
-      const errJson = await errRes.json();
-      if (errJson.ok) {
-        let errRows = '';
-        (errJson.data || []).forEach(e => {
-          errRows += `<tr><td><span class="badge err">${esc(e.kind)}</span></td><td><b>${esc(e.tool)}</b></td><td style="font-size:11px;color:var(--muted)">${esc(e.message||'').substring(0,120)}</td><td>${fmtTime(e.time)}</td></tr>`;
-        });
-        document.getElementById('dash-errors').innerHTML = errRows || '<tr><td colspan="4" style="color:var(--green)">No errors</td></tr>';
-      }
-    } catch(e) { /* ignore */ }
+    // Error panel (async, slow API)
+    _loadErrorsAsync();
+
+    // Recent changes — 默认只显示最近 5 条，其余折叠
+    var chRows = '';
+    var changes = (recent.recent_changes || []);
+    var changeLimit = 5;
+    changes.forEach(function(c, ci){
+      var fieldNames = {'status_code':'状态码','title':'标题','body_hash':'内容','ssl_cert_cn':'证书'};
+      var changed = (c.fields||[]).map(function(f){return fieldNames[f] || f;}).join(', ') || '属性更新';
+      var hidden = ci >= changeLimit ? ' style="display:none" class="dash-fold-row"' : '';
+      chRows += '<tr' + hidden + '><td><span class="badge warn">更新</span> ' + changed + '</td><td>' + esc(c.url||'') + '</td><td>' + fmtTime(c.changed_at) + '</td></tr>';
+    });
+    if (changes.length > changeLimit) {
+      chRows += '<tr><td colspan="3" style="text-align:center;padding:4px"><button class="btn outline small" onclick="var r=this.closest(\'table\').querySelectorAll(\'.dash-fold-row\');var show=r.length>0&&r[0].style.display===\'none\';r.forEach(function(x){x.style.display=show?\'\':\'none\'});this.textContent=show?\'▲ Collapse\':\'Show ' + (changes.length-changeLimit) + ' more\';" style="font-size:10px">Show ' + (changes.length-changeLimit) + ' more</button></td></tr>';
+    }
+    document.getElementById('dash-changes').innerHTML = chRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
   } catch(e) {
     toast(e.message, false);
   }
   document.getElementById('dash-loading').style.display = 'none';
+}
+
+// === 后台异步加载：scan 卡片 + 错误面板（不阻塞首屏）===
+
+async function _loadScanCardsAsync() {
+  var cardsEl = document.getElementById('dash-cards');
+  // 收集现有卡片 HTML 用于后续拼接
+  var existing = cardsEl ? cardsEl.innerHTML : '';
+  try {
+    var spRes = await _fetchTimeout(aq(API + '/scan/progress?asset_id=' + currentAsset), null, 8000);
+    var sp = spRes ? await spRes.json() : {};
+    if (sp.ok && sp.data && sp.data.layers) {
+      var toolPcts = {};
+      sp.data.layers.forEach(function(l){ l.tools.forEach(function(t){
+        if (!t.active) toolPcts[t.tool] = t.scans > 0 ? 'done' : 'pending';
+        else toolPcts[t.tool] = 'running';
+      });});
+      var done = 0, total = 0;
+      sp.data.layers.forEach(function(l){ l.tools.forEach(function(t){
+        if (t.scans > 0) done++;
+        total++;
+      });});
+      var overall = total > 0 ? Math.round(done / total * 100) : 0;
+      // 拼接 Scan Progress 卡片
+      existing += '<div class="card"><div class="label">Scan Progress</div><div class="value accent">' + overall + '%</div></div>';
+    }
+  } catch(e) {}
+  try {
+    var hRes = await _fetchTimeout(aq(API + '/scan/history?asset_id=' + currentAsset), null, 8000);
+    var h = hRes ? await hRes.json() : {};
+    if (h.ok && h.data.last_scan) {
+      existing += '<div class="card"><div class="label">Last Scan</div><div class="value accent">' + fmtTime(h.data.last_scan) + '</div></div>';
+      existing += '<div class="card"><div class="label">Total Scans</div><div class="value green">' + h.data.total_scans + '</div></div>';
+    }
+  } catch(e) {}
+  if (cardsEl) cardsEl.innerHTML = existing;
+}
+
+async function _loadErrorsAsync() {
+  try {
+    var errRes = await fetch(aq(API + '/errors?limit=100'));
+    var errJson = await errRes.json();
+    if (!errJson.ok) return;
+    var errRows = '';
+    var errLimit = 5;
+    var errors = (errJson.data || []);
+    errors.forEach(function(e, ei){
+      var hidden = ei >= errLimit ? ' style="display:none" class="dash-fold-row"' : '';
+      errRows += '<tr' + hidden + '><td><span class="badge err">' + esc(e.kind) + '</span></td><td><b>' + esc(e.tool) + '</b></td><td style="font-size:11px;color:var(--muted)">' + esc((e.message||'').substring(0,120)) + '</td><td>' + fmtTime(e.time) + '</td></tr>';
+    });
+    if (errors.length > errLimit) {
+      errRows += '<tr><td colspan="4" style="text-align:center;padding:4px"><button class="btn outline small" onclick="var r=this.closest(\'table\').querySelectorAll(\'.dash-fold-row\');var show=r.length>0&&r[0].style.display===\'none\';r.forEach(function(x){x.style.display=show?\'\':\'none\'});this.textContent=show?\'▲ Collapse\':\'Show ' + (errors.length-errLimit) + ' more\';" style="font-size:10px">Show ' + (errors.length-errLimit) + ' more</button></td></tr>';
+    }
+    document.getElementById('dash-errors').innerHTML = errRows || '<tr><td colspan="4" style="color:var(--green)">No errors</td></tr>';
+  } catch(e) { /* ignore */ }
+}
+
+// 点击严重度跳转到 Findings 页面并预选筛选
+function _jumpToFindings(severity) {
+  // 切换到 Findings tab
+  document.querySelectorAll('nav button').forEach(function(b){ b.classList.remove('active'); });
+  var btn = document.querySelector('nav button[data-page="vulns"]');
+  if (btn) btn.classList.add('active');
+  document.querySelectorAll('.page').forEach(function(p){ p.classList.remove('active'); });
+  var page = document.getElementById('page-vulns');
+  if (page) page.classList.add('active');
+  // 设置筛选并加载
+  var sel = document.getElementById('vuln-severity');
+  if (sel) sel.value = severity;
+  loadVulnerabilities(1);
+}
+
+// 加载严重度分布图（异步，不阻塞 Dashboard）
+async function _loadSeverityChart() {
+  try {
+    var r = await fetch(aq(API + '/dashboard/severity'));
+    var j = await r.json();
+    if (!j.ok || !j.data) return;
+    var d = j.data;
+    if (d.total === 0) return; // 无漏洞时不显示
+
+    var section = document.getElementById('dash-severity-section');
+    if (!section) return;
+    section.style.display = '';
+    document.getElementById('sev-total').textContent = '· ' + d.total + ' total';
+
+    var levels = [
+      {key: 'critical', label: 'Critical', color: '#da3633', icon: '🔴'},
+      {key: 'high',     label: 'High',     color: '#f85149', icon: '🟠'},
+      {key: 'medium',   label: 'Medium',   color: '#d2991d', icon: '🟡'},
+      {key: 'low',      label: 'Low',      color: '#3fb950', icon: '🟢'},
+      {key: 'info',     label: 'Info',     color: '#6e7681', icon: '🔵'},
+    ];
+    var maxVal = d.critical || 0;
+    levels.forEach(function(l){ maxVal = Math.max(maxVal, d[l.key] || 0); });
+
+    var html = '';
+    levels.forEach(function(l){
+      var val = d[l.key] || 0;
+      var pct = maxVal > 0 ? Math.round(val / maxVal * 100) : 0;
+      var overallPct = d.total > 0 ? Math.round(val / d.total * 100) : 0;
+      var dim = val === 0 ? 'opacity:0.4' : '';
+      var cursor = val > 0 ? 'cursor:pointer' : '';
+      var onClick = val > 0 ? ' onclick="_jumpToFindings(\'' + l.key + '\')"' : '';
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;' + dim + cursor + '"' + onClick + ' title="' + (val>0?'Click to filter Findings by ' + l.key:'') + '">' +
+        '<span style="width:20px;text-align:center;font-size:12px">' + l.icon + '</span>' +
+        '<span style="width:70px;font-size:11px;color:var(--text)">' + l.label + '</span>' +
+        '<span style="width:36px;text-align:right;font-size:11px;color:var(--muted)">' + val + '</span>' +
+        '<span style="flex:1;background:var(--bg);border-radius:3px;height:8px;overflow:hidden">' +
+          '<span style="display:block;height:100%;width:' + pct + '%;background:' + l.color + ';border-radius:3px;transition:width .3s"></span>' +
+        '</span>' +
+        '<span style="width:36px;text-align:right;font-size:10px;color:var(--muted)">' + overallPct + '%</span>' +
+      '</div>';
+    });
+    document.getElementById('sev-chart').innerHTML = html;
+  } catch(e) { /* 静默失败，不阻塞 Dashboard */ }
 }
 
 // ============================================================
@@ -450,9 +565,23 @@ async function loadVulnerabilities(page = vulnPage) {
   loading.style.display = 'none';
 }
 
+// Vuln expand toggle — 切换展开箭头 + 详情行
+function _vulnToggle(rowId, detailId) {
+  var detail = document.getElementById(detailId);
+  var arrow = document.getElementById(rowId + '-arrow');
+  if (!detail || !arrow) return;
+  if (detail.style.display === 'none') {
+    detail.style.display = '';
+    arrow.textContent = '▼';  // ▼
+  } else {
+    detail.style.display = 'none';
+    arrow.textContent = '▶';  // ▶
+  }
+}
+
 function renderVulnerabilityRows(rows) {
   if (!rows.length) {
-    return '<tr><td colspan="5" style="color:var(--muted);padding:24px 0;text-align:center">No vulnerabilities. Run nuclei after endpoints are discovered.</td></tr>';
+    return '<tr><td colspan="7" style="color:var(--muted);padding:24px 0;text-align:center">No vulnerabilities. Run nuclei after endpoints are discovered.</td></tr>';
   }
   return rows.map((v, i) => {
     const title = v.title || v.type || 'Untitled finding';
@@ -463,7 +592,9 @@ function renderVulnerabilityRows(rows) {
     const sourceTags = (v.sources || []).map(s => `<span class="src-tag">${esc(s)}</span>`).join('') || '<span style="color:var(--muted)">-</span>';
     const rowId = 'vuln-row-' + i;
     const detailId = 'vuln-detail-' + i;
-    return `<tr id="${rowId}" onclick="document.getElementById('${detailId}').style.display=document.getElementById('${detailId}').style.display==='none'?'':'none'" style="cursor:pointer" title="Click to expand">
+    const arrowId = rowId + '-arrow';
+    return `<tr id="${rowId}" onclick="_vulnToggle('${rowId}','${detailId}')" style="cursor:pointer">
+      <td style="width:24px;text-align:center;color:var(--muted);font-size:10px" id="${arrowId}">▶</td>
       <td>${severityBadge(v.severity)}</td>
       <td>
         <strong>${esc(title)}</strong>
@@ -479,7 +610,7 @@ function renderVulnerabilityRows(rows) {
     </tr>
     <tr id="${detailId}" style="display:none;background:var(--bg)">
       <td></td>
-      <td colspan="4" style="padding:12px 16px">
+      <td colspan="5" style="padding:12px 16px">
         ${detail ? '<div style="margin-bottom:8px"><strong>Description:</strong><br>' + esc(detail) + '</div>' : ''}
         ${evidence ? '<div style="margin-bottom:8px"><strong>Evidence:</strong><br><pre style="background:var(--surface);padding:8px;overflow-x:auto;font-size:12px">' + esc(evidence) + '</pre></div>' : ''}
         ${url ? '<div style="margin-bottom:8px"><strong>URL:</strong> <a href="' + esc(url) + '" target="_blank">' + esc(url) + '</a></div>' : ''}
@@ -884,10 +1015,29 @@ function renderRow(r) {
 }
 
 // ============================================================
-// Context menu — right-click node to run tools
+// Context menu shared state
 // ============================================================
-let _ctxMenuNode = null;
-let _ctxMenuTools = [];
+var _ctxMenuNode = null;
+var _ctxMenuTools = [];
+
+// ============================================================
+// 行内操作按钮：打开右键工具菜单（替代右键，提升可发现性）
+function _rowActions(e, rowEl) {
+  e.stopPropagation();
+  if (!rowEl || !rowEl.dataset.nid) return;
+  _ctxMenuNode = findNode(rowEl.dataset.nid);
+  if (!_ctxMenuNode || _ctxMenuNode.type === '_load_more' || _ctxMenuNode.type === 'ScanRun') return;
+  var menu = document.getElementById('ctx-menu');
+  var allTools = _cfgTools.length ? _cfgTools : PL_TOOLS;
+  var matched = allTools.filter(function(t){ return toolUseRule(t, _ctxMenuNode); });
+  var unmatched = allTools.filter(function(t){ return !toolUseRule(t, _ctxMenuNode); });
+  _ctxMenuTools = [].concat(matched, unmatched);
+  renderToolContextMenu('');
+  menu.style.display = 'block';
+  var rect = rowEl.getBoundingClientRect();
+  menu.style.left = Math.min(rect.right + 4, window.innerWidth - 210) + 'px';
+  menu.style.top = Math.min(rect.top, window.innerHeight - 400) + 'px';
+}
 
 document.addEventListener('click', () => {
   document.getElementById('ctx-menu').style.display = 'none';
@@ -1728,15 +1878,21 @@ const TUT_STEPS = [
 let _tutIdx = 0;
 
 function tutRender() {
+  var steps = document.getElementById('tut-steps');
+  if (!steps) return;  // 教程 DOM 不存在时不渲染
   const s = TUT_STEPS[_tutIdx];
-  document.getElementById('tut-steps').innerHTML = `
+  steps.innerHTML = `
     <h4 style="margin-bottom:10px">${s.title}</h4>
     ${s.html}
   `;
-  document.getElementById('tut-counter').textContent = `${_tutIdx+1} / ${TUT_STEPS.length}`;
-  document.getElementById('tut-prev-btn').style.display = _tutIdx > 0 ? '' : 'none';
-  document.getElementById('tut-next-btn').style.display = _tutIdx < TUT_STEPS.length - 1 ? '' : 'none';
-  document.getElementById('tut-done-btn').style.display = _tutIdx === TUT_STEPS.length - 1 ? '' : 'none';
+  var counter = document.getElementById('tut-counter');
+  if (counter) counter.textContent = `${_tutIdx+1} / ${TUT_STEPS.length}`;
+  var prev = document.getElementById('tut-prev-btn');
+  if (prev) prev.style.display = _tutIdx > 0 ? '' : 'none';
+  var next = document.getElementById('tut-next-btn');
+  if (next) next.style.display = _tutIdx < TUT_STEPS.length - 1 ? '' : 'none';
+  var done = document.getElementById('tut-done-btn');
+  if (done) done.style.display = _tutIdx === TUT_STEPS.length - 1 ? '' : 'none';
 }
 
 function tutNext() {
@@ -1846,7 +2002,7 @@ async function showSchedulerProgress() {
 }
 
 function scanAllPreview() {
-  const assetId = document.getElementById('dash-asset-sel').value || 'default';
+  const assetId = document.getElementById('global-asset-sel').value || 'default';
   const box = document.getElementById('scan-all-preview');
   box.innerHTML = '<span class="loading">Loading...</span>';
   document.getElementById('scan-all-progress').style.display = 'none';
@@ -1866,7 +2022,7 @@ function scanAllPreview() {
 }
 
 function scanAllStart() {
-  const assetId = document.getElementById('dash-asset-sel').value || 'default';
+  const assetId = document.getElementById('global-asset-sel').value || 'default';
   document.getElementById('scan-all-go').style.display = 'none';
   document.getElementById('scan-all-stop').style.display = '';
   document.getElementById('scan-all-progress').style.display = 'block';
@@ -2264,25 +2420,9 @@ async function loadLogContent() {
   }
 }
 
-function refreshLog() {
-  if (_logsFile) loadLogContent(); else loadLogList();
-}
-
-function toggleAutoRefresh() {
-  const cb = document.getElementById('logs-auto-refresh');
-  if (!cb) return;
-  const on = cb.checked;
-  if (on && document.getElementById('page-logs')?.classList.contains('active')) {
-    _logsPoll = setInterval(() => {
-      if (_logsFile) loadLogContent();
-      else refreshLog();
-    }, 10000);
-  } else {
-    if (_logsPoll) clearInterval(_logsPoll);
-    _logsPoll = null;
-  }
-}
-
+// refreshLog: merged from two prior definitions.
+// If a log file is already selected → reload its content.
+// Otherwise → check for active tools, preferring the first running tool's tail.
 function refreshLog() {
   if (_logsFile) { loadLogContent(); return; }
   // Check for active tools
@@ -2296,8 +2436,22 @@ function refreshLog() {
         pre.textContent = active.latest_log.tail;
         pre.scrollTop = pre.scrollHeight;
       }
+    } else {
+      loadLogList();
     }
   });
+}
+
+function toggleAutoRefresh() {
+  const cb = document.getElementById('logs-auto-refresh');
+  if (!cb) return;
+  const on = cb.checked;
+  if (on && document.getElementById('page-logs')?.classList.contains('active')) {
+    _logsPoll = setInterval(refreshLog, 10000);
+  } else {
+    if (_logsPoll) clearInterval(_logsPoll);
+    _logsPoll = null;
+  }
 }
 // toggleAutoRefresh(); // deferred to Logs page
 
@@ -2362,22 +2516,42 @@ async function refreshScanProgress() {
       }
     } catch(e) {}
 
-    let html = '';
-    for (const l of data.layers) {
-      const tools = l.tools.map(t => {
-        const mark = t.active ? ' <span style=\"color:var(--green)\">●</span>' : (t.scans > 0 ? ' ✓' : '');
-        return t.tool + ':' + t.scans + mark;
+    // 将层分为"已完成"和"进行中/未开始"两组
+    var doneLayers = [], activeLayers = [];
+    for (var li = 0; li < data.layers.length; li++) {
+      var l = data.layers[li];
+      var allDone = l.tools.every(function(t){ return t.scans > 0 && !t.active; });
+      var allPending = l.tools.every(function(t){ return t.scans === 0 && !t.active; });
+      if (allDone) doneLayers.push(l);
+      else activeLayers.push({layer: l, pending: allPending});
+    }
+    // 已完成层：紧凑摘要
+    var html = '';
+    if (doneLayers.length > 0) {
+      var doneNames = doneLayers.map(function(l){ return 'L' + l.layer + ' ' + l.node; }).join(', ');
+      // 统计各工具扫描数
+      var doneToolCounts = [];
+      doneLayers.forEach(function(l){ l.tools.forEach(function(t){ if (t.scans > 0) doneToolCounts.push(t.tool + ':' + t.scans); }); });
+      html += '<div style="margin:2px 0;cursor:pointer;color:var(--muted)" id="dash-done-summary" onclick="var el=document.getElementById(\'dash-done-detail\');var show=el.style.display===\'none\';el.style.display=show?\'\':\'none\';this.querySelector(\'span\').textContent=show?\'▲\':\'▶\';"><span style="font-size:10px">▶</span> ✓ ' + doneLayers.length + ' layers done: ' + esc(doneNames.substring(0, 80)) + (doneNames.length>80?'…':'') + '</div>';
+      html += '<div id="dash-done-detail" style="display:none;margin-left:16px;font-size:11px;color:var(--muted)">';
+      doneLayers.forEach(function(l){
+        var tools = l.tools.map(function(t){ return t.tool + ':' + t.scans + ' ✓'; }).join(' | ');
+        html += '<div style="margin:1px 0">L' + l.layer + ' [' + l.node + '] ' + tools + '</div>';
+      });
+      html += '</div>';
+    }
+    // 进行中/待运行层：展开显示
+    for (var ai = 0; ai < activeLayers.length; ai++) {
+      var al = activeLayers[ai];
+      var l = al.layer;
+      var cls = al.pending ? 'color:var(--muted)' : '';
+      var tools = l.tools.map(function(t){
+        var mark = t.active ? ' <span style="color:var(--green)">●</span>' : (t.scans > 0 ? ' ✓' : ' ○');
+        return '<span style="' + cls + '">' + t.tool + ':' + (t.scans||0) + mark + '</span>';
       }).join(' | ');
-      html += '<div style=\"margin:2px 0\">L' + l.layer + ' [' + l.node + '] ' + tools + '</div>';
+      html += '<div style="margin:2px 0">L' + l.layer + ' [' + l.node + '] ' + tools + '</div>';
     }
     document.getElementById('scan-progress-layers').innerHTML = html;
-
-    if (data.nodes) {
-      document.getElementById('dash-asset-name').textContent =
-        'Nodes: R' + data.nodes.RootDomain + ' S' + data.nodes.Subdomain +
-        ' I' + data.nodes.IP + ' P' + data.nodes.Port +
-        ' E' + data.nodes.HTTPEndpoint + ' V' + data.nodes.Vulnerability + ' X' + data.nodes.Secret;
-    }
 
     if (data.active_tools.length === 0 && data.scan_running === false) {
       document.getElementById('btn-start-scan').style.display = '';
@@ -2464,7 +2638,7 @@ async function toggleMitm() {
       toast('Intercept stopped');
     } else {
       // Start — use current asset from dropdown
-      const assetId = document.getElementById('dash-asset-sel')?.value || currentAsset;
+      const assetId = document.getElementById('global-asset-sel')?.value || currentAsset;
       const port = parseInt(document.getElementById('mitm-port')?.value) || 8888;
       const r = await fetch(API + '/mitm/start', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId,port:port})});
       const d = await r.json();
@@ -2507,33 +2681,35 @@ async function refreshMitmStats() {
   } catch(e) {}
 }
 
-// Check if scan already running on page load
-(async () => { try {
-  const r = await fetch('/api/scan/progress?asset_id=' + currentAsset);
-  const d = await r.json();
+// Check if scan already running on page load (3s timeout, 延迟不阻塞首屏)
+setTimeout(function(){ (async () => { try {
+  var r = await _fetchTimeout('/api/scan/progress?asset_id=' + currentAsset, null, 3000);
+  if (!r) return;
+  var d = await r.json();
   if (d.ok && (d.data.active_tools.length > 0 || d.data.scan_running)) {
     document.getElementById('scan-progress-bar').style.display = 'block';
     pollScanProgress();
   }
-} catch(e){} })();
+} catch(e){} })(); }, 2000);
 
-// Restore MITM state on page load
-(async () => { try {
-  const sr = await fetch(API + '/mitm/status');
-  const sd = await sr.json();
+// Restore MITM state on page load (3s timeout, 延迟不阻塞首屏)
+setTimeout(function(){ (async () => { try {
+  var sr = await _fetchTimeout(API + '/mitm/status', null, 3000);
+  if (!sr) return;
+  var sd = await sr.json();
   if (sd.ok && sd.data.running) {
-    const status = document.getElementById('mitm-status');
-    const btn = document.getElementById('btn-mitm-toggle');
-    const port = sd.data.port || 8888;
+    var status = document.getElementById('mitm-status');
+    var btn = document.getElementById('btn-mitm-toggle');
+    var port = sd.data.port || 8888;
     btn.style.background = 'var(--green)'; btn.style.color = '#fff';
     status.style.display = 'block';
-    const addrSpan = status.querySelector('span');
+    var addrSpan = status.querySelector('span');
     if (addrSpan) addrSpan.textContent = '\u{1F4F7} Listening on 127.0.0.1:' + port;
     document.getElementById('mitm-asset-label').textContent = sd.data.asset_id || '';
     if (!_mitmPoll) _mitmPoll = setInterval(refreshMitmStats, 15000);
     refreshMitmStats();
   }
-} catch(e){} })();
+} catch(e){} })(); }, 2000);
 
 // Global search
 async function doSearch() {
@@ -2615,8 +2791,8 @@ async function showNodeDetail(url) {
       const td = tj.data || [], ed = (await r.json()).data || {roots: []};
       const total = tj.total || td.length, pages = tj.pages || 1;
 
-      let h = '<div class="toolbar"><div class="asset-sel"><select onchange="switchAsset(this.value)">' + (assetList.length ? assetList.map(function(a){return '<option value=\"'+esc(a.id)+'\"'+(a.id===currentAsset?' selected':'')+'>'+esc(a.name||a.id)+'</option>'}).join('') : '<option value=\"'+currentAsset+'\">'+currentAsset+'</option>') + '</select><button class="btn outline small" onclick="openNewAssetModal()">+</button></div>';
-      h += '<input type="text" id="assets-search" placeholder="Search target..." value="' + esc(_assetsSearch) + '" style="width:180px;margin-left:8px" onkeydown="if(event.key===\'Enter\'){_assetsSearch=this.value;renderAssetsPage(1)}">';
+      let h = '<div class="toolbar">';
+      h += '<input type="text" id="assets-search" placeholder="Search target..." value="' + esc(_assetsSearch) + '" style="width:180px" onkeydown="if(event.key===\'Enter\'){_assetsSearch=this.value;renderAssetsPage(1)}">';
       h += '<button class="btn outline small" onclick="_assetsSearch=document.getElementById(\'assets-search\').value;renderAssetsPage(1)" style="margin-left:4px">Search</button>';
       h += '<span class="spacer"></span><button class="btn outline small" onclick="renderAssetsPage()">Refresh</button></div>';
 
@@ -2631,19 +2807,23 @@ async function showNodeDetail(url) {
         h += '<div style="margin-bottom:8px;font-size:12px;color:var(--muted)">' + total + ' targets</div>';
       }
 
-      h += '<div style="margin:12px 0 8px;font-weight:600">Seed Targets</div><table><thead><tr><th>Name</th><th>Type</th><th>Info</th><th>Created</th></tr></thead><tbody>';
+      h += '<div style="margin:12px 0 8px;font-weight:600">Seed Targets</div><table><thead><tr><th>Name</th><th>Type</th><th>Info</th><th>Created</th><th style="width:36px"></th></tr></thead><tbody>';
       if (td.length) td.forEach(x => {
-        let info = x.sub_count ? (x.type==='domain' ? x.sub_count+' subs' : x.type==='port' ? 'port '+x.sub_count : x.sub_count) : '';
-        if (x.type==='endpoint') info = 'HTTP ' + (x.sub_count||'');
-        if (x.type==='vulnerability') info = 'vuln';
-        if (x.type==='secret') info = 'secret';
-        h += '<tr data-nid="' + esc(x.id||'') + '" data-type="' + esc(x.type) + '" data-value="' + esc(x.value) + '" style="cursor:context-menu" title="Right-click for actions"><td><strong>' + esc(x.value) + '</strong></td><td><span class="badge ok">' + esc(x.type) + '</span></td><td>' + info + '</td><td>' + fmtTime(x.created_at) + '</td></tr>';
+        let info = '';
+        if (x.type === 'domain')    info = x.sub_count ? x.sub_count + ' subs' : '';
+        else if (x.type === 'ip')   info = x.sub_count ? x.sub_count + ' ports' : '';
+        else if (x.type === 'port') info = 'port ' + (x.sub_count || x.value || '');
+        else if (x.type === 'endpoint')       info = 'HTTP ' + (x.sub_count || '');
+        else if (x.type === 'vulnerability')  info = 'vuln';
+        else if (x.type === 'secret')         info = 'secret';
+        else info = x.sub_count ? String(x.sub_count) : '';
+        h += '<tr data-nid="' + esc(x.id||'') + '" data-type="' + esc(x.type) + '" data-value="' + esc(x.value) + '" oncontextmenu="return false"><td><strong>' + esc(x.value) + '</strong></td><td><span class="badge ok">' + esc(x.type) + '</span></td><td>' + info + '</td><td>' + fmtTime(x.created_at) + '</td><td style="text-align:center"><button class="btn outline small" onclick="_rowActions(event,this.closest(\'tr\'))" title="Run tools">⚡</button></td></tr>';
       });
-      else h += '<tr><td colspan="4" style="color:var(--muted)">No seed targets. Click + to add.</td></tr>';
+      else h += '<tr><td colspan="5" style="color:var(--muted)">No seed targets. Click + to add.</td></tr>';
       h += '</tbody></table>';
-      h += '<div style="margin:16px 0 8px;font-weight:600">Discovered Assets</div><table><thead><tr><th>Name</th><th>Detail</th><th>Created</th></tr></thead><tbody>';
-      if (ed.roots && ed.roots.length) ed.roots.forEach(x => h += '<tr data-nid="' + esc(x.id) + '" data-type="root_domain" data-value="' + esc(x.value) + '" style="cursor:context-menu" title="Right-click for actions"><td><strong>' + esc(x.value) + '</strong></td><td>' + (x.subdomain_count || 0) + ' subs, ' + (x.ip_count || x.port_count || 0) + ' IPs</td><td>' + fmtTime(x.created_at) + '</td></tr>');
-      else h += '<tr><td colspan="3" style="color:var(--muted)">No discoveries yet. Start a scan.</td></tr>';
+      h += '<div style="margin:16px 0 8px;font-weight:600">Discovered Assets</div><table><thead><tr><th>Name</th><th>Detail</th><th>Created</th><th style="width:36px"></th></tr></thead><tbody>';
+      if (ed.roots && ed.roots.length) ed.roots.forEach(x => h += '<tr data-nid="' + esc(x.id) + '" data-type="root_domain" data-value="' + esc(x.value) + '" oncontextmenu="return false"><td><strong>' + esc(x.value) + '</strong></td><td>' + (x.subdomain_count || 0) + ' subs, ' + (x.ip_count || x.port_count || 0) + ' IPs</td><td>' + fmtTime(x.created_at) + '</td><td style="text-align:center"><button class="btn outline small" onclick="_rowActions(event,this.closest(\'tr\'))" title="Run tools">⚡</button></td></tr>');
+      else h += '<tr><td colspan="4" style="color:var(--muted)">No discoveries yet. Start a scan.</td></tr>';
       h += '</tbody></table>';
       document.getElementById("page-assets").innerHTML = h;
     } catch (e) { document.getElementById("page-assets").innerHTML = '<div class="loading">Failed: ' + esc(e.message) + '</div>'; }
@@ -2658,7 +2838,7 @@ async function showNodeDetail(url) {
         fetch(API + "/report?asset_id=" + currentAsset)
       ]);
       const vd = (await v.json()).data || [], rm = r.ok ? await r.text() : '';
-      let h = '<div class="toolbar"><div class="asset-sel"><select onchange="switchAsset(this.value)">' + (assetList.length ? assetList.map(function(a){return '<option value=\"'+esc(a.id)+'\"'+(a.id===currentAsset?' selected':'')+'>'+esc(a.name||a.id)+'</option>'}).join('') : '<option value=\"'+currentAsset+'\">'+currentAsset+'</option>') + '</select></div>';
+      let h = '<div class="toolbar">';
       h += '<span class="spacer"></span><a href="' + API + '/report?asset_id=' + currentAsset + '" class="btn" download>Download .md</a> <a href="' + API + '/report?asset_id=' + currentAsset + '&format=json" class="btn outline" download>Download .json</a></div>';
       h += '<div style="margin:16px 0 8px;font-weight:600">Findings (' + vd.length + ')</div><table><thead><tr><th>Sev</th><th>Title</th><th>Endpoint</th></tr></thead><tbody>';
       if (vd.length) vd.forEach(x => h += '<tr><td>' + severityBadge(x.severity) + '</td><td>' + esc(x.title || '?') + '</td><td>' + (x.url ? '<a href="' + esc(x.url) + '" target="_blank">' + esc((x.url || '').substring(0, 60)) + '</a>' : '-') + '</td></tr>');
@@ -2669,9 +2849,20 @@ async function showNodeDetail(url) {
     } catch (e) { document.getElementById("page-reports").innerHTML = '<div class="loading">Failed: ' + esc(e.message) + '</div>'; }
   }
 
-// Lazy init — don't block first render
-setTimeout(loadHealth, 100);
-setTimeout(loadDashboard, 200);
+// 初始化：骨架先行，异步加载，带兜底重试
+var _initRan = false;
+setTimeout(function() {
+  loadHealth();
+  var dc = document.getElementById('dash-cards');
+  if (dc) dc.innerHTML = '<div class="card"><div class="label">Root Domains</div><div class="value accent">—</div></div><div class="card"><div class="label">Subdomains</div><div class="value accent">—</div></div><div class="card"><div class="label">IP Addresses</div><div class="value green">—</div></div><div class="card"><div class="label">Open Ports</div><div class="value orange">—</div></div><div class="card"><div class="label">HTTP Endpoints</div><div class="value purple">—</div></div>';
+  loadAssets().then(function() {
+    _initRan = true;
+  });
+  // 兜底：3s 后如果 loadAssets 还没完成，直接调 loadDashboard
+  setTimeout(function() {
+    if (!_initRan) { loadDashboard(); _initRan = true; }
+  }, 3000);
+}, 500);
 if (!localStorage.getItem('graphpt_tutorial_done')) { tutOpen(); }
 
 // "?" button in header to reopen tutorial

@@ -46,4 +46,6 @@ def get_redis(*, decode_responses: bool = False, socket_connect_timeout: int = 2
         ssl=cfg["ssl"],
         decode_responses=decode_responses,
         socket_connect_timeout=socket_connect_timeout,
+        socket_timeout=socket_connect_timeout,
+        socket_keepalive=True,
     )

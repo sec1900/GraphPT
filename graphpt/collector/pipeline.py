@@ -178,6 +178,14 @@ _temp_files_cleanup: set[str] = set()
 def _register_temp_cleanup(path: str) -> None:
     _temp_files_cleanup.add(path)
 
+def _unlink_temp(path: str) -> None:
+    """删除临时文件并同步清理 _temp_files_cleanup（防 set 内存泄漏）。"""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    _temp_files_cleanup.discard(path)
+
 def _cleanup_all_temps() -> None:
     for p in list(_temp_files_cleanup):
         try: os.unlink(p)
@@ -1059,7 +1067,10 @@ class PipelineExecutor:
                         if _MAX_TOOL_MEM_MB > 0:
                             try:
                                 import psutil
-                                _pmem = psutil.Process(proc.pid).memory_info().rss // (1024 * 1024)
+                                _pp = psutil.Process(proc.pid)
+                                if not _pp.is_running():  # PID 回收竞态保护
+                                    break
+                                _pmem = _pp.memory_info().rss // (1024 * 1024)
                                 if _pmem > _MAX_TOOL_MEM_MB:
                                     proc.kill(); proc.wait()
                                     raise RuntimeError(
@@ -1067,6 +1078,7 @@ class PipelineExecutor:
                                         f"(log={_log_file})"
                                     )
                             except RuntimeError: raise
+                            except (psutil.NoSuchProcess, ProcessLookupError): break
                             except Exception: pass
 
                         # 活性检测（渐进式：已有输出→宽限翻倍，允许等 OOB 回调）

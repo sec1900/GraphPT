@@ -570,8 +570,10 @@ def get_or_create_page(
 
 def cleanup_browser_context(task_id: int) -> None:
     """关闭当前线程中单个 task 的浏览器上下文。"""
-    _close_task_context(int(task_id or 0), close_browser=True, preserve_traffic=False, preserve_prefs=False)
-    _thread_state("browser_states").pop(int(task_id or 0), None)
+    tid = int(task_id or 0)
+    _close_task_context(tid, close_browser=True, preserve_traffic=False, preserve_prefs=False)
+    _thread_state("browser_states").pop(tid, None)
+    _thread_state("auth_sessions").pop(tid, None)  # P1: 清理 auth session 泄漏
     _log.info("browser_context_cleaned", extra={"task_id": task_id})
 
 
@@ -662,6 +664,26 @@ def cleanup_all_browsers() -> None:
             playwright.stop()
         except Exception:  # noqa: BLE001
             pass
+
+    # 清理超过 24h 的 browser_*.txt artifacts
+    try:
+        from pathlib import Path as _P
+        _art_dir = _P("data") / "artifacts"
+        if _art_dir.is_dir():
+            _now = time.time()
+            for _f in _art_dir.glob("browser_*.txt"):
+                try:
+                    if (_now - _f.stat().st_mtime) > 86400:
+                        _f.unlink()
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+
+# 进程退出时自动清理 Playwright 资源（防 Chromium 孤儿进程）
+import atexit as _atexit
+_atexit.register(cleanup_all_browsers)
 
 
 def _site_host_key(host: str) -> str:

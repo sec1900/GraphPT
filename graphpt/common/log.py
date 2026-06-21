@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import os
 import sys
 import threading
@@ -76,7 +77,13 @@ def get_logger(name: str) -> logging.Logger:
                 log_dir = Path.cwd() / "data" / "debug" / "logs"
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
-            file_handler = logging.FileHandler(log_dir / "graphpt.log.jsonl", encoding="utf-8")
+            # RotatingFileHandler：单文件最大 10MB，保留最近 5 个备份
+            file_handler = logging.handlers.RotatingFileHandler(
+                log_dir / "graphpt.log.jsonl",
+                maxBytes=10 * 1024 * 1024,
+                backupCount=5,
+                encoding="utf-8",
+            )
             file_handler.setFormatter(_JsonFormatter())
             logger.addHandler(file_handler)
         except Exception:  # noqa: BLE001

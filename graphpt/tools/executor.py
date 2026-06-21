@@ -93,20 +93,22 @@ OutputValidator = Any  # Callable[[ExecResult], str | None]
 
 
 def _kill_process(proc: subprocess.Popen) -> None:
-    """终止进程及其子进程。"""
+    """终止进程及其子进程（10s 超时，防 taskkill 卡死）。"""
     try:
         if proc.poll() is not None:
             return  # 进程已退出
-    except OSError:
+        pid = int(proc.pid)
+    except (OSError, ValueError):
         return
     if sys.platform == "win32":
         try:
             subprocess.call(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=10,
             )
-        except (FileNotFoundError, OSError) as exc:
-            _log.warning("taskkill_failed", extra={"pid": proc.pid, "error": str(exc)})
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            _log.warning("taskkill_failed", extra={"pid": pid, "error": str(exc)})
             try:
                 proc.kill()
             except OSError:

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GraphPT Admin</title>
 <link rel="stylesheet" href="/static/style.css?v=20260621">
-<script src="https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js"></script>
+<script src="https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js" defer onerror="var s=document.createElement('script');s.src='/static/vendor/vis-network.min.js';document.head.appendChild(s)"></script>
 </head>
 <body>
 
@@ -13,6 +13,11 @@
   <h1>GraphPT</h1>
   <span class="sub">Admin Panel</span>
   <input id="global-search" type="text" placeholder="Search subdomain/IP/URL..." style="margin-left:16px;padding:4px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;width:220px" onkeyup="if(event.key==='Enter')doSearch()">
+  <span class="spacer"></span>
+  <div class="asset-sel" id="header-asset-sel">
+    <select id="global-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
+    <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
+  </div>
   <a class="header-link" href="/docs" target="_blank">API Docs</a>
 </header>
 <div id="search-results" style="display:none;position:absolute;top:48px;left:300px;z-index:100;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;max-height:400px;overflow-y:auto;width:400px;box-shadow:0 4px 12px rgba(0,0,0,.3)"></div>
@@ -21,6 +26,7 @@
   <button data-page="dashboard" class="active">Dashboard</button>
   <button data-page="assets">Assets</button>
   <button data-page="vulns">Findings</button>
+  <button data-page="pipelines">Pipelines</button>
   <button data-page="reports">Reports</button>
   <button data-page="logs">Logs</button>
   <button data-page="graph">Graph</button>
@@ -34,11 +40,7 @@
   <!-- ==================== Dashboard ==================== -->
   <div id="page-dashboard" class="page active">
     <div class="toolbar">
-      <div class="asset-sel">
-        <select id="dash-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
-        <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
-      </div>
-      <button class="btn" onclick="startFullScan()" id="btn-start-scan" style="margin-left:12px;background:var(--green)">Start Full Scan</button>
+      <button class="btn" onclick="startFullScan()" id="btn-start-scan" style="background:var(--green)">Start Full Scan</button>
       <button class="btn outline" onclick="abortScan()" id="btn-abort-scan" style="display:none;margin-left:4px;background:var(--red);color:#fff">Abort</button>
       <label style="margin-left:12px;font-size:11px;color:var(--muted);cursor:pointer">
         <input type="checkbox" id="dash-auto-refresh" onchange="toggleAutoDashboard()"> Auto (30s)
@@ -62,6 +64,13 @@
       <div id="scan-progress-layers" style="font-size:11px;color:var(--muted)"></div>
     </div>
     <div class="card-grid" id="dash-cards"></div>
+    <div class="section" id="dash-severity-section" style="display:none">
+      <div class="section-title" style="cursor:pointer" onclick="var s=document.getElementById('dash-severity-section');s.dataset.expanded=s.dataset.expanded==='1'?'0':'1';document.getElementById('sev-chart').style.display=s.dataset.expanded==='0'?'none':'';this.querySelector('span').textContent=s.dataset.expanded==='0'?'▶':'▼';">
+        <span>▼</span> Vulnerability Severity Distribution
+        <span style="font-size:11px;color:var(--muted);font-weight:400" id="sev-total"></span>
+      </div>
+      <div id="sev-chart"></div>
+    </div>
     <div class="section">
       <div class="section-title">Endpoint Status</div>
       <table id="dash-endpoints"><tbody></tbody></table>
@@ -91,10 +100,6 @@
   <!-- ==================== Findings ==================== -->
   <div id="page-vulns" class="page">
     <div class="toolbar">
-      <div class="asset-sel">
-        <select id="vuln-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
-        <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
-      </div>
       <select id="vuln-severity" onchange="loadVulnerabilities(1)">
         <option value="">All severities</option>
         <option value="critical">Critical</option>
@@ -111,6 +116,7 @@
     </div>
     <table>
       <thead><tr>
+        <th style="width:24px"></th>
         <th style="width:100px">Severity</th>
         <th>Finding</th>
         <th>Endpoint</th>
@@ -127,17 +133,15 @@
     <div class="loading" id="vuln-loading">Loading</div>
   </div>
 
-  <!-- ==================== Reports ==================== -->
-  <div id="page-reports" class="page">
-    <div class="loading">Loading...</div>
-  </div>
+  <!-- ==================== Pipelines ==================== -->
+  <div id="page-pipelines" class="page">
     <div id="pipelines-panel">
       <div class="toolbar">
         <span id="pl-status"></span>
         <span class="spacer"></span>
         <span id="pl-broker" style="font-size:11px;color:var(--muted)"></span>
-        
-        
+        <button class="btn outline small" onclick="newPipeline()">New Pipeline</button>
+        <button class="btn outline small" onclick="loadPipelines()">Refresh</button>
       </div>
       <table>
         <thead><tr>
@@ -147,6 +151,11 @@
       </table>
       <div style="color:var(--muted);font-size:12px;padding:8px" id="pl-loading">No pipelines configured</div>
     </div>
+  </div>
+
+  <!-- ==================== Reports ==================== -->
+  <div id="page-reports" class="page">
+    <div class="loading">Loading...</div>
   </div>
 
   <!-- ==================== Config ==================== -->
@@ -249,11 +258,7 @@
   <!-- ==================== Graph Visualization ==================== -->
   <div id="page-graph" class="page">
     <div class="toolbar">
-      <div class="asset-sel">
-        <select id="graph-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
-        <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
-      </div>
-      <select id="graph-layout-sel" onchange="loadGraph()" style="min-width:100px;margin-left:8px">
+      <select id="graph-layout-sel" onchange="loadGraph()" style="min-width:100px">
         <option value="hierarchical" selected>层级</option>
         <option value="force">力导向</option>
         <option value="radial">径向</option>

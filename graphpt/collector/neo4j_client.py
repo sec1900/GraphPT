@@ -35,12 +35,15 @@ _USER = os.getenv("NEO4J_USER", "neo4j")
 _PASSWORD = os.getenv("NEO4J_PASSWORD", "graphpt123")
 
 _driver: GraphDatabase.driver | None = None
+_driver_lock = __import__("threading").Lock()
 
 
 def _get_driver() -> GraphDatabase.driver:
     global _driver
     if _driver is None:
-        _driver = GraphDatabase.driver(_URI, auth=(_USER, _PASSWORD), max_connection_lifetime=3600)
+        with _driver_lock:
+            if _driver is None:  # double-check
+                _driver = GraphDatabase.driver(_URI, auth=(_USER, _PASSWORD), max_connection_lifetime=3600)
     return _driver
 
 
@@ -1463,34 +1466,41 @@ def list_subdomains_for_fingerprint(asset_id: str) -> list[dict[str, str]]:
 
 
 def seed_root_domains(asset_id: str, domains: list[str]) -> int:
-    """将初始根域名写入 Neo4j（首次运行时的种子数据）。已存在的跳过。"""
+    """将初始根域名写入 Neo4j（首次运行时的种子数据）。已存在的跳过。
+
+    优化：单事务批量写入，避免 N 次往返。
+    """
     if not domains:
+        return 0
+    cleaned = [d.strip().strip(".").lower() for d in domains if d.strip()]
+    if not cleaned:
         return 0
     driver = _get_driver()
     now = _now_iso()
     count = 0
     with driver.session() as session:
-        for domain in domains:
-            d = domain.strip().strip(".").lower()
-            if not d:
-                continue
-            result = session.run(
-                """
-                MERGE (a:Asset {id: $asset_id})
-                  ON CREATE SET a.created_at = $now
-                MERGE (r:RootDomain {id: $root_id})
-                  ON CREATE SET r.value = $domain, r.created_at = $now
-                MERGE (a)-[:HAS_ROOT]->(r)
-                RETURN r.created_at = $now AS created
-                """,
-                asset_id=asset_id,
-                root_id=f"root:{d}",
-                domain=d,
-                now=now,
-            )
-            record = result.single()
-            if record and record["created"]:
-                count += 1
+        def _batch_write(tx):
+            nonlocal count
+            for d in cleaned:
+                result = tx.run(
+                    """
+                    MERGE (a:Asset {id: $asset_id})
+                      ON CREATE SET a.created_at = $now
+                    MERGE (r:RootDomain {id: $root_id})
+                      ON CREATE SET r.value = $domain, r.created_at = $now
+                    MERGE (a)-[:HAS_ROOT]->(r)
+                    RETURN r.created_at = $now AS created
+                    """,
+                    asset_id=asset_id,
+                    root_id=f"root:{d}",
+                    domain=d,
+                    now=now,
+                )
+                record = result.single()
+                if record and record["created"]:
+                    count += 1
+            return count
+        count = session.execute_write(_batch_write)
     return count
 
 

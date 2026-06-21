@@ -123,20 +123,6 @@ FINDING_NODE_LABELS: dict[str, str] = {
     "secret":           "Secret",
     "file":             "File",
     "dir_entry":        "DirEntry",
-    "credential":       "Credential",
-    "os_detection":     "IP",
-    "nse_script":       "NseScript",
-}
-
-# ftype → Neo4j 节点标签（供写入器选择目标节点）
-FINDING_NODE_LABELS: dict[str, str] = {
-    "subdomain":        "Subdomain",
-    "port":             "Port",
-    "http_endpoint":    "HTTPEndpoint",
-    "vulnerability":    "Vulnerability",
-    "secret":           "Secret",
-    "file":             "File",
-    "dir_entry":        "DirEntry",
     "bypass_result":    "BypassResult",
     "api_endpoint":     "ApiEndpoint",
     "credential":       "Credential",
