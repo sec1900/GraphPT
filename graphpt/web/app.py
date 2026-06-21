@@ -67,8 +67,20 @@ async def _auto_resume_interrupted_scans():
 
 
 async def _try_auto_resume():
-    """后台恢复扫描。"""
+    """后台恢复扫描（防重复启动）。"""
     try:
+        # 检查是否已有 scan_worker 在跑（防重复）
+        import psutil
+        existing = set()
+        for proc in psutil.process_iter(['pid', 'cmdline']):
+            try:
+                cmd = ' '.join(proc.info['cmdline'] or [])
+                if 'scan_worker' in cmd:
+                    for arg in proc.info['cmdline'] or []:
+                        if not arg.startswith('-') and 'scan_worker' not in arg:
+                            existing.add(arg)
+            except Exception: pass
+
         import redis as _rds, json as _json
         r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1, decode_responses=True)
         r.ping()
@@ -76,7 +88,7 @@ async def _try_auto_resume():
             try:
                 data = _json.loads(r.get(key) or "{}")
                 asset_id = data.get("asset_id", "")
-                if not asset_id: continue
+                if not asset_id or asset_id in existing: continue
                 r.delete(key)
                 subprocess.Popen(
                     [sys.executable, "-u", "-m", "graphpt.collector.scan_worker", asset_id],
