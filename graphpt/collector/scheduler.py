@@ -523,8 +523,10 @@ def _run_one_tool(tool: str, asset_id: str) -> dict[str, Any]:
     except RuntimeError as exc:
         if "scan aborted" in str(exc).lower():
             raise ScanAborted(str(exc)) from exc
+        _log.error("run_one_tool_runtime_error", exc_info=True, extra={"tool": tool, "asset_id": asset_id})
         result = {"status": "error", "tool": tool, "error": str(exc)}
     except Exception as exc:
+        _log.error("run_one_tool_failed", exc_info=True, extra={"tool": tool, "asset_id": asset_id})
         result = {"status": "error", "tool": tool, "error": str(exc)}
     finally:
         _release_lock(asset_id, tool)
