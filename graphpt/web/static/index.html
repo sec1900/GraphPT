@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>GraphPT Admin</title>
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?v=20260621">
 <script src="https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
@@ -274,7 +274,7 @@
 </main>
 
 <!-- Tutorial Overlay -->
-<div class="modal-overlay" id="tut-overlay" style="display:none">
+<div class="modal-overlay" id="tut-overlay" style="display:none" onclick="if(event.target===this)tutClose()">
   <div class="modal" style="max-width:680px;max-height:85vh;overflow-y:auto">
     <h3 style="font-size:18px;margin-bottom:4px">GraphPT Quick Guide</h3>
     <p style="color:var(--muted);font-size:12px;margin-bottom:16px">3-layer recon platform — collect assets, store in graph, drive pentest agent</p>
@@ -389,7 +389,7 @@
 </div>
 
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=20260621f"></script>
 
 
 </body>

@@ -29,6 +29,22 @@ _TOOLS_DIR = _PROJECT_ROOT / "tools"
 
 load_dotenv(_PROJECT_ROOT / ".env")
 
+# ── 通用搜索路径（路径模式, 搜索属性, 标签）──
+# 新增节点类型只需追加一行，无需改查询逻辑
+_SEARCH_PATHS: list[tuple[str, str, str]] = [
+    ("MATCH (a)-[:HAS_ROOT]->(n)", "n.value", "rootdomain"),
+    ("MATCH (a)-[:HAS_ROOT]->()-[:HAS_SUB]->(n)", "n.value", "subdomain"),
+    ("MATCH (a)-[:HAS_IP]->(n)", "n.value", "ip"),
+    ("MATCH (a)-[:HAS_IP]->()-[:HAS_PORT]->(n)",
+     "toString(n.number) OR n.service OR n.product", "port"),
+    ("MATCH (a)-[:HAS_IP]->()-[:HAS_PORT]->()-[:EXPOSES]->(n)",
+     "n.url OR n.title OR n.content_type", "endpoint"),
+    ("MATCH (a)-[:HAS_IP]->()-[:HAS_PORT]->()-[:EXPOSES]->()-[:MAY_BE_VULNERABLE_TO]->(n)",
+     "n.title OR n.vuln_type", "vulnerability"),
+    ("MATCH (a)-[:HAS_IP]->()-[:HAS_PORT]->()-[:EXPOSES]->()-[:MAY_CONTAIN]->(n)",
+     "n.secret_type OR n.value_preview", "secret"),
+]
+
 web_app = FastAPI(title="GraphPT Admin", version="0.1.0")
 
 
@@ -51,15 +67,21 @@ async def _auto_resume_interrupted_scans():
                 st = scan_state(asset_id)
                 if st.get("status") in ("scanning", "done", "aborted"):
                     continue  # 已经在跑或已完成
-                # 恢复扫描
-                import threading
+                # 恢复扫描 — 独立进程，与 web 隔离
                 _log = logging.getLogger("graphpt.web")
                 _log.info("auto_resume_scan asset=%s round=%d", asset_id, data.get("round", 0))
-                r.delete(key)  # 删除恢复点，避免重复
-                threading.Thread(
-                    target=lambda: run_full_scan(asset_id, start_layer=data.get("start_layer", 1)),
-                    daemon=True,
-                ).start()
+                r.delete(key)
+                try:
+                    subprocess.Popen(
+                        [sys.executable, "-u", "-m", "graphpt.collector.scan_worker", asset_id],
+                        env={**os.environ, "GRAPHPT_SCAN_LOG": str(
+                            _PROJECT_ROOT / "data" / "logs" / "scan_worker" /
+                            f"scan_{asset_id.replace(':', '_').replace('/', '_')}.log"
+                        ), "GRAPHPT_ASSET_ID": asset_id},
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
             except Exception:
                 pass
     except Exception:
@@ -136,11 +158,12 @@ def _sanitize_params(**params):
 
 
 def _neo4j_query(cypher: str, **params):
-    """执行 Neo4j 查询，连接失败自动重试 3 次。"""
+    """执行 Neo4j 查询 — 指数退避重试（1s, 2s, 4s）。"""
     import time as _time
     params = _sanitize_params(**params)
     last_exc = None
-    for attempt in range(3):
+    for attempt in range(4):
+        _delay = (1 << attempt)  # 1, 2, 4, 8
         try:
             if not _check_neo4j():
                 raise HTTPException(status_code=503, detail="neo4j unavailable")
@@ -151,9 +174,9 @@ def _neo4j_query(cypher: str, **params):
             raise
         except Exception as exc:
             last_exc = exc
-            if attempt < 2:
-                _time.sleep(1)
-    raise HTTPException(status_code=500, detail=f"neo4j query failed after 3 retries: {last_exc}") from last_exc
+            if attempt < 3:
+                _time.sleep(_delay)
+    raise HTTPException(status_code=500, detail=f"neo4j query failed after 4 retries: {last_exc}") from last_exc
 
 
 def _json_error(exc: Exception, *, status_code: int = 500) -> JSONResponse:
@@ -857,52 +880,98 @@ async def delete_asset(asset_id: str):
 # ============================================================
 
 @web_app.get("/api/targets")
-async def list_targets(asset_id: str = "default"):
-    """列出所有目标（根域名 + 独立 IP）。"""
+async def list_targets(
+    asset_id: str = "default",
+    per_page: int = 50,
+    page: int = 1,
+    search: str = "",
+):
+    """列出目标（根域名 + IP + 子域名），支持分页和搜索。"""
     try:
-        # 根域名
-        rows = _neo4j_query(
-            """
-            MATCH (:Asset {id: $aid})-[:HAS_ROOT]->(r:RootDomain)
-            OPTIONAL MATCH (r)-[:HAS_SUB]->(s:Subdomain)
-            RETURN r.id AS id, r.value AS value, r.created_at AS created_at,
-                   'domain' AS type, count(s) AS sub_count
-            ORDER BY r.value
-            """,
-            aid=asset_id,
-        )
-        targets = [
-            {
-                "id": r["id"],
-                "value": r["value"],
-                "type": r["type"],
-                "created_at": r["created_at"],
-                "sub_count": r["sub_count"],
-            }
-            for r in rows
-        ]
+        per_page = max(1, min(per_page, 500))
+        page = max(1, page)
+        skip = (page - 1) * per_page
 
-        # 独立 IP（无对应 Subdomain）
-        ip_rows = _neo4j_query(
-            """
-            MATCH (:Asset {id: $aid})-[:HAS_IP]->(ip:IP)
-            OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
-            RETURN ip.id AS id, ip.value AS value, ip.created_at AS created_at,
-                   'ip' AS type, count(p) AS port_count
-            ORDER BY ip.value
-            """,
-            aid=asset_id,
-        )
-        for r in ip_rows:
-            targets.append({
-                "id": r["id"],
-                "value": r["value"],
-                "type": r["type"],
-                "created_at": r["created_at"],
-                "sub_count": r["port_count"],
-            })
+        targets: list[dict[str, Any]] = []
+        total_domains = 0
+        total_ips = 0
+        total_subs = 0
 
-        return {"ok": True, "data": targets}
+        if search:
+            # ── 通用搜索：遍历预定义路径，每类单独查询，容错合并 ──
+            rows: list[dict[str, Any]] = []
+            for _path, _props, _label in _SEARCH_PATHS:
+                if len(rows) >= per_page:
+                    break
+                try:
+                    _props_list = [p.strip() for p in _props.split(" OR ")]
+                    _where = " OR ".join(f"{p} CONTAINS $search" for p in _props_list)
+                    _first_prop = _props_list[0].split(".")[-1]  # e.g. "value" or "url"
+                    _batch = _neo4j_query(
+                        f"MATCH (a:Asset {{id: $aid}}) {_path} "
+                        f"WHERE {_where} "
+                        f"RETURN DISTINCT coalesce({_props_list[0]}, n.value) AS value, "
+                        f"'{_label}' AS node_type "
+                        f"ORDER BY value SKIP 0 LIMIT $limit",
+                        aid=asset_id, search=search, limit=per_page + 1,
+                    )
+                    for r in _batch[:per_page - len(rows)]:
+                        rows.append({"value": r["value"], "type": r["node_type"], "sub_count": 0})
+                except Exception:
+                    continue  # 某类查询失败不阻塞其他
+            has_more = len(rows) > per_page
+            for r in rows[:per_page]:
+                targets.append({
+                    "value": r["value"],
+                    "type": r["type"].lower(),
+                    "sub_count": r["sub_count"],
+                })
+            pages = page + 1 if has_more else max(1, page)
+            total = pages * per_page  # 近似
+
+        else:
+            # ── 非搜索：RootDomain + IP 分页 ──
+            rows = _neo4j_query(
+                """
+                MATCH (:Asset {id: $aid})-[:HAS_ROOT]->(r:RootDomain)
+                OPTIONAL MATCH (r)-[:HAS_SUB]->(s:Subdomain)
+                RETURN r.id AS id, r.value AS value, r.created_at AS created_at,
+                       'domain' AS type, count(s) AS sub_count
+                ORDER BY r.value
+                """,
+                aid=asset_id,
+            )
+            total_domains = len(rows)
+            for r in rows[skip:skip + per_page]:
+                targets.append({
+                    "id": r["id"], "value": r["value"], "type": r["type"],
+                    "created_at": r["created_at"], "sub_count": r["sub_count"],
+                })
+
+            remaining = per_page - len(targets)
+            ip_skip = max(0, skip - total_domains)
+            if remaining > 0:
+                ip_rows = _neo4j_query(
+                    """
+                    MATCH (:Asset {id: $aid})-[:HAS_IP]->(ip:IP)
+                    OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
+                    RETURN ip.id AS id, ip.value AS value, ip.created_at AS created_at,
+                           'ip' AS type, count(p) AS port_count
+                    ORDER BY ip.value
+                    """,
+                    aid=asset_id,
+                )
+                total_ips = len(ip_rows)
+                for r in ip_rows[ip_skip:ip_skip + remaining]:
+                    targets.append({
+                        "id": r["id"], "value": r["value"], "type": r["type"],
+                        "created_at": r["created_at"], "sub_count": r["port_count"],
+                    })
+
+            total = total_domains + total_ips
+            pages = max(1, (total + per_page - 1) // per_page)
+
+        return {"ok": True, "data": targets, "total": total, "page": page, "pages": pages, "per_page": per_page}
     except Exception as exc:
         return _json_error(exc)
 

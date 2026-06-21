@@ -7,19 +7,21 @@ let currentAsset = 'default';
 let assetList = [];
 
 async function loadAssets() {
-  try {
-    const res = await fetch(API + '/assets');
-    const json = await res.json();
-    if (json.ok) {
-      assetList = json.data || [];
-      // currentAsset 默认 'default'，若不在真实资产列表中则切到第一个真实资产。
-      // 切换后刷新当前页，避免初始化竞态下用错误的 asset_id 拿到空数据。
-      const prev = currentAsset;
-      if (!assetList.find(a => a.id === currentAsset)) currentAsset = assetList[0]?.id || 'default';
-      renderAssetSelectors();
-      if (currentAsset !== prev) loadCurrentPage();
-    }
-  } catch(e) { /* ignore */ }
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(API + '/assets');
+      const json = await res.json();
+      if (json.ok && json.data?.length) {
+        assetList = json.data || [];
+        const prev = currentAsset;
+        if (!assetList.find(a => a.id === currentAsset)) currentAsset = assetList[0]?.id || 'default';
+        renderAssetSelectors();
+        if (currentAsset !== prev) loadCurrentPage();
+        return;
+      }
+    } catch(e) { /* ignore */ }
+    if (attempt < 2) await new Promise(r => setTimeout(r, 2000));
+  }
 }
 
 function renderAssetSelectors() {
@@ -67,7 +69,7 @@ function loadCurrentPage() {
   if (!active) return;
   switch (active.id) {
     case 'page-dashboard': loadDashboard(); break;
-    case 'page-assets': loadAssets(); break;
+    case 'page-assets': renderAssetsPage(); break;
     case 'page-vulns': loadVulnerabilities(); break;
     case 'page-reports': loadReports(); break;
     case 'page-logs': loadLogs(); break;
@@ -160,7 +162,7 @@ document.querySelectorAll('nav button[data-page]').forEach(btn => {
     document.getElementById('page-' + btn.dataset.page).classList.add('active');
     switch(btn.dataset.page) {
       case 'dashboard': loadDashboard(); break;
-      case 'assets': loadAssets(); break;
+      case 'assets': renderAssetsPage(); break;
       case 'vulns': loadVulnerabilities(); break;
       case 'reports': loadReports(); break;
       case 'logs': loadLogs(); break;
@@ -268,13 +270,13 @@ async function loadDashboard() {
 
     // Endpoint status
     let epRows = ep.map(e =>
-      `<tr><td><span class="badge ${e.status==='success'?'ok':e.status==='error'?'err':'warn'}">${e.status||'unknown'}</span></td><td>${e.code||'-'}</td><td>${e.count}</td></tr>`
+      `<tr><td><span class="badge ${e.status==='success'?'ok':e.status==='error'?'err':'warn'}">${e.status||'unknown'}</span></td><td>${esc(e.url||'')}</td><td>${e.status_code||'-'}</td></tr>`
     ).join('');
     document.getElementById('dash-endpoints').innerHTML = epRows || '<tr><td colspan="3" style="color:var(--muted)">No endpoints</td></tr>';
 
-    // Recent subdomains
+    // Recent subdomains — API返回{subdomain, ts}，适配为前端格式
     let subRows = (recent.recent_subdomains || []).map(s =>
-      `<tr><td>${esc(s.value)}</td><td style="color:var(--muted)">${esc(s.root||'')}</td><td>${fmtTime(s.created_at)}</td></tr>`
+      `<tr><td>${esc(s.subdomain||s.value)}</td><td style="color:var(--muted)">${esc(s.root||'')}</td><td>${fmtTime(s.ts||s.created_at)}</td></tr>`
     ).join('');
     document.getElementById('dash-recent-subs').innerHTML = subRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
 
@@ -2376,10 +2378,17 @@ async function refreshScanProgress() {
     }
 
     if (data.active_tools.length === 0 && data.scan_running === false) {
+      document.getElementById('btn-start-scan').style.display = '';
       document.getElementById('btn-start-scan').style.background = '';
+      document.getElementById('btn-abort-scan').style.display = 'none';
       document.getElementById('scan-progress-fill').style.width = '100%';
       document.getElementById('scan-progress-fill').textContent = '100%';
       return false; // done
+    }
+    // 扫描进行中：显示 Abort 按钮，隐藏 Start
+    if (data.scan_running || data.active_tools.length > 0) {
+      document.getElementById('btn-start-scan').style.display = 'none';
+      document.getElementById('btn-abort-scan').style.display = 'inline-block';
     }
     return true;
   } catch(e) { return true; }
@@ -2405,7 +2414,9 @@ function pollScanProgress() {
     if (!alive && wasRunning) {
       clearInterval(_scanPoll); _scanPoll = null;
       toast('Scan complete! All tools finished.');
+      document.getElementById('btn-start-scan').style.display = '';
       document.getElementById('btn-start-scan').style.background = '';
+      document.getElementById('btn-abort-scan').style.display = 'none';
       document.getElementById('scan-progress-fill').style.width = '100%';
       document.getElementById('scan-progress-fill').textContent = '100%';
       // Browser notification
@@ -2587,19 +2598,45 @@ async function showNodeDetail(url) {
 }
 
 // ============================================================
-  // ---- Assets page (merged Targets + Attack Surface) ----
-  async function loadAssets() {
+  // ---- Assets page (paginated + search) ----
+  let _assetsPage = 1, _assetsSearch = '';
+  async function renderAssetsPage(pg = _assetsPage) {
     document.getElementById("page-assets").innerHTML = '<div class="loading">Loading assets...</div>';
+    _assetsPage = pg || 1;
     try {
+      const params = 'asset_id=' + currentAsset + '&per_page=100&page=' + _assetsPage + '&search=' + encodeURIComponent(_assetsSearch);
       const [t, r] = await Promise.all([
-        fetch(API + "/targets?asset_id=" + currentAsset),
+        fetch(API + "/targets?" + params),
         fetch(API + "/explorer?asset_id=" + currentAsset)
       ]);
-      const td = (await t.json()).data || [], ed = (await r.json()).data || {roots: []};
+      const tj = await t.json();
+      const td = tj.data || [], ed = (await r.json()).data || {roots: []};
+      const total = tj.total || td.length, pages = tj.pages || 1;
+
       let h = '<div class="toolbar"><div class="asset-sel"><select onchange="switchAsset(this.value)">' + (assetList.length ? assetList.map(function(a){return '<option value=\"'+esc(a.id)+'\"'+(a.id===currentAsset?' selected':'')+'>'+esc(a.name||a.id)+'</option>'}).join('') : '<option value=\"'+currentAsset+'\">'+currentAsset+'</option>') + '</select><button class="btn outline small" onclick="openNewAssetModal()">+</button></div>';
-      h += '<span class="spacer"></span><button class="btn outline small" onclick="loadAssets()">Refresh</button></div>';
-      h += '<div style="margin:12px 0 8px;font-weight:600">Seed Targets</div><table><thead><tr><th>Name</th><th>Type</th><th>Count</th><th>Created</th></tr></thead><tbody>';
-      if (td.length) td.forEach(x => h += '<tr data-nid="' + esc(x.id) + '" data-type="' + esc(x.type) + '" data-value="' + esc(x.value) + '" style="cursor:context-menu" title="Right-click for actions"><td><strong>' + esc(x.value) + '</strong></td><td>' + esc(x.type) + '</td><td>' + (x.sub_count || '') + '</td><td>' + fmtTime(x.created_at) + '</td></tr>');
+      h += '<input type="text" id="assets-search" placeholder="Search target..." value="' + esc(_assetsSearch) + '" style="width:180px;margin-left:8px" onkeydown="if(event.key===\'Enter\'){_assetsSearch=this.value;renderAssetsPage(1)}">';
+      h += '<button class="btn outline small" onclick="_assetsSearch=document.getElementById(\'assets-search\').value;renderAssetsPage(1)" style="margin-left:4px">Search</button>';
+      h += '<span class="spacer"></span><button class="btn outline small" onclick="renderAssetsPage()">Refresh</button></div>';
+
+      // Pagination info
+      if (pages > 1) {
+        h += '<div style="margin-bottom:8px;font-size:12px;color:var(--muted)">';
+        h += 'Page ' + _assetsPage + ' / ' + pages + ' (' + total + ' total) &nbsp;';
+        if (_assetsPage > 1) h += '<button class="btn outline small" onclick="renderAssetsPage(' + (_assetsPage-1) + ')">← Prev</button> ';
+        if (_assetsPage < pages) h += '<button class="btn outline small" onclick="renderAssetsPage(' + (_assetsPage+1) + ')">Next →</button>';
+        h += '</div>';
+      } else if (total) {
+        h += '<div style="margin-bottom:8px;font-size:12px;color:var(--muted)">' + total + ' targets</div>';
+      }
+
+      h += '<div style="margin:12px 0 8px;font-weight:600">Seed Targets</div><table><thead><tr><th>Name</th><th>Type</th><th>Info</th><th>Created</th></tr></thead><tbody>';
+      if (td.length) td.forEach(x => {
+        let info = x.sub_count ? (x.type==='domain' ? x.sub_count+' subs' : x.type==='port' ? 'port '+x.sub_count : x.sub_count) : '';
+        if (x.type==='endpoint') info = 'HTTP ' + (x.sub_count||'');
+        if (x.type==='vulnerability') info = 'vuln';
+        if (x.type==='secret') info = 'secret';
+        h += '<tr data-nid="' + esc(x.id||'') + '" data-type="' + esc(x.type) + '" data-value="' + esc(x.value) + '" style="cursor:context-menu" title="Right-click for actions"><td><strong>' + esc(x.value) + '</strong></td><td><span class="badge ok">' + esc(x.type) + '</span></td><td>' + info + '</td><td>' + fmtTime(x.created_at) + '</td></tr>';
+      });
       else h += '<tr><td colspan="4" style="color:var(--muted)">No seed targets. Click + to add.</td></tr>';
       h += '</tbody></table>';
       h += '<div style="margin:16px 0 8px;font-weight:600">Discovered Assets</div><table><thead><tr><th>Name</th><th>Detail</th><th>Created</th></tr></thead><tbody>';

@@ -982,6 +982,7 @@ class PipelineExecutor:
             # 活性超时 — 统一由 GRAPHPT_STALE_TIMEOUT 控制（默认 300s）
             _STALE_TIMEOUT = int(os.getenv("GRAPHPT_STALE_TIMEOUT", "300"))
             _MAX_TOOL_TIME = int(os.getenv("GRAPHPT_MAX_TOOL_TIME", "0") or "0")  # 绝对上限，0=不限
+            _MAX_TOOL_MEM_MB = int(os.getenv("GRAPHPT_MAX_TOOL_MEM_MB", "4096"))  # 内存上限（MB），0=不限
             _POLL_INTERVAL = int(os.getenv("GRAPHPT_POLL_INTERVAL", "2"))
 
             try:
@@ -997,20 +998,55 @@ class PipelineExecutor:
                         _proc_env["NO_PROXY"] = "127.0.0.1,localhost,::1,*.local"
                         _proc_env["no_proxy"] = "127.0.0.1,localhost,::1,*.local"
                 except Exception: pass
-                # stdout → PIPE (二进制模式, select非阻塞读)
+                # stdout → PIPE (PeekNamedPipe 非阻塞读 — Windows 原生方案)
                 proc = subprocess.Popen(cmd, text=False,
                                         env=_proc_env,
                                         stdin=_stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 _start = _time.time()
-                _last_output = _start  # 活性计时：每次有输出时重置
+                _last_output = _start
                 _chunks: list[bytes] = []
+
+                # PeekNamedPipe 辅助：检查 pipe 中是否有数据可读（不阻塞）
+                _have_peek = False
+                _peek_fn = None
+                _osfhandle_fn = None
+                if sys.platform == "win32":
+                    try:
+                        import msvcrt as _msvcrt
+                        import ctypes as _ct
+                        _kernel32 = _ct.windll.kernel32
+                        _PeekNamedPipe = _kernel32.PeekNamedPipe
+                        _PeekNamedPipe.argtypes = [
+                            _ct.wintypes.HANDLE, _ct.wintypes.LPVOID, _ct.wintypes.DWORD,
+                            _ct.wintypes.LPDWORD, _ct.wintypes.LPDWORD, _ct.wintypes.LPDWORD,
+                        ]
+                        _PeekNamedPipe.restype = _ct.wintypes.BOOL
+                        _have_peek = True
+                        _osfhandle_fn = _msvcrt.get_osfhandle
+                        _peek_fn = _PeekNamedPipe
+                    except Exception:
+                        _have_peek = False
+
+                def _pipe_has_data(fd: int) -> bool:
+                    """PeekNamedPipe: 非阻塞检测 pipe 是否有可读数据"""
+                    if not _have_peek:
+                        return False
+                    try:
+                        handle = _osfhandle_fn(fd)
+                        _avail = _ct.wintypes.DWORD(0)
+                        if _peek_fn(handle, None, 0, None, _ct.byref(_avail), None):
+                            return _avail.value > 0
+                    except Exception:
+                        pass
+                    return False
+
                 with open(_log_file, "wb") as _lf:
                     while proc.poll() is None:
                         _now = _time.time()
                         _elapsed = _now - _start
-                        _stale = _now - _last_output  # 距离上次输出多久了
+                        _stale = _now - _last_output
 
-                        # 绝对上限（兜底安全网，默认 7200s=2h，设 0 关闭）
+                        # 绝对时间上限
                         if _MAX_TOOL_TIME > 0 and _elapsed > _MAX_TOOL_TIME:
                             proc.kill(); proc.wait()
                             raise RuntimeError(
@@ -1018,7 +1054,21 @@ class PipelineExecutor:
                                 f"(log={_log_file})"
                             )
 
-                        # 活性检测：无输出超过阈值 → 判定卡死
+                        # 内存上限（nuclei 15K 模板能吃 1GB+，超过阈值杀掉）
+                        if _MAX_TOOL_MEM_MB > 0:
+                            try:
+                                import psutil
+                                _pmem = psutil.Process(proc.pid).memory_info().rss // (1024 * 1024)
+                                if _pmem > _MAX_TOOL_MEM_MB:
+                                    proc.kill(); proc.wait()
+                                    raise RuntimeError(
+                                        f"tool memory limit: {_pmem}MB > {_MAX_TOOL_MEM_MB}MB "
+                                        f"(log={_log_file})"
+                                    )
+                            except RuntimeError: raise
+                            except Exception: pass
+
+                        # 活性检测
                         if _stale > _STALE_TIMEOUT:
                             proc.kill(); proc.wait()
                             raise RuntimeError(
@@ -1026,29 +1076,30 @@ class PipelineExecutor:
                                 f"(log={_log_file})"
                             )
 
-                        # 读 PIPE (非阻塞 — Windows 无 read1，用 select 兜底)
+                        # 非阻塞读：PeekNamedPipe 检测 → 有数据才读
+                        _did_read = False
                         try:
                             stdout_fd = proc.stdout.fileno()
-                            import select as _sel
-                            ready, _, _ = _sel.select([stdout_fd], [], [], 1.0)
-                            if ready:
+                            if _pipe_has_data(stdout_fd):
                                 _chunk = os.read(stdout_fd, 65536)
                                 if _chunk:
                                     _chunks.append(_chunk)
                                     _lf.write(_chunk)
                                     _lf.flush()
                                     _last_output = _time.time()
+                                    _did_read = True
                         except Exception:
                             pass
 
                         # 巡检间隔
-                        if _elapsed < 30:
-                            _sleep = _POLL_INTERVAL
+                        if _did_read:
+                            _time.sleep(0.1)  # 有数据→快速循环
+                        elif _elapsed < 30:
+                            _time.sleep(_POLL_INTERVAL)
                         elif _elapsed < 120:
-                            _sleep = 5
+                            _time.sleep(5)
                         else:
-                            _sleep = 15
-                        _time.sleep(_sleep)
+                            _time.sleep(10)
 
                         # 中止信号
                         try:
