@@ -526,7 +526,7 @@ class GraphWriter:
                     e.ssl_cert_issuer = $ssl_cert_issuer, e.tech = $tech,
                     e.crawl_status = $crawl_status, e.first_seen_at = $now,
                     e.sources = [$source], e.url_fragment = $url_fragment,
-                    e.created_at = $now
+                    e.asset_id = $asset_id, e.created_at = $now
                   ON MATCH SET
                     e.status_code = $status_code, e.title = $title,
                     e.body_hash = $body_hash, e.content_length = $content_length,
@@ -571,6 +571,7 @@ class GraphWriter:
                 vendors=vendors or [],
                 fingerprint_severity=fingerprint_severity,
                 favicon_hash=favicon_hash,
+                asset_id=asset_id,
                 now=now,
             )
             # 建立关系链
