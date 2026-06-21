@@ -747,8 +747,9 @@ def run_full_scan(asset_id: str, *,
         while round_num < _MAX_ROUNDS:
             round_num += 1
 
-            # 每轮开始前检查是否还有目标
-            if not _any_tool_has_targets(asset_id):
+            # 每轮开始前检查是否还有目标（首轮强制执行，不检查——新资产可能因
+            # targets.yaml 查询缓存/加载问题导致 _any_tool_has_targets 误判 False）
+            if round_num > 1 and not _any_tool_has_targets(asset_id):
                 _log.info("full_scan_all_clear asset=%s rounds=%d", asset_id, round_num - 1)
                 break
 
