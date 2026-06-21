@@ -2432,14 +2432,16 @@ async def scan_start(body: dict | None = None):
         if st.get("status") == "scanning":
             return {"ok": False, "error": "scan already running", "data": st}
 
-        # 独立进程启动扫描 — Web 重启不影响扫描
+        # 独立进程启动扫描 — scan_worker 自己写日志到 data/logs/scan_worker/
         proc = subprocess.Popen(
-            [sys.executable, "-m", "graphpt.collector.scan_worker", asset_id],
+            [sys.executable, "-u", "-m", "graphpt.collector.scan_worker", asset_id],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
+        safe_name = asset_id.replace(":", "_").replace("/", "_")
+        log_path = _PROJECT_ROOT / "data" / "logs" / "scan_worker" / f"scan_{safe_name}.log"
         return {"ok": True, "data": {"status": "started", "asset_id": asset_id,
-                "pid": proc.pid,
-                "note": "scan running in background (PID %d), poll /api/scan/state" % proc.pid}}
+                "pid": proc.pid, "log": str(log_path),
+                "note": "scan running (PID %d)" % proc.pid}}
     except Exception as exc:
         return _json_error(exc)
 

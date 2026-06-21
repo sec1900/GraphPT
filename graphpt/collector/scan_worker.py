@@ -15,16 +15,38 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 
 def main():
+    import time as _time
     asset_id = sys.argv[1] if len(sys.argv) > 1 else "default"
-    print(f"[scan_worker] starting for asset={asset_id}")
+    safe_name = asset_id.replace(":", "_").replace("/", "_")
+    log_dir = _PROJECT_ROOT / "data" / "logs" / "scan_worker"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"scan_{safe_name}.log"
 
-    from graphpt.collector.scheduler import run_full_scan
+    def log(msg):
+        ts = _time.strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}"
+        print(line, flush=True)
+        try:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
+
+    t0 = _time.time()
+    log(f"starting asset={asset_id} pid={os.getpid()}")
+
+    from graphpt.collector.scheduler import run_full_scan, _any_tool_has_targets
 
     try:
+        targets_before = _any_tool_has_targets(asset_id)
+        log(f"targets_before={targets_before}")
         result = run_full_scan(asset_id)
-        print(f"[scan_worker] done: {result['status']} rounds={result.get('rounds', '?')} findings={result.get('total_findings', 0)}")
+        elapsed = _time.time() - t0
+        log(f"done: status={result['status']} rounds={result.get('rounds','?')} findings={result.get('total_findings',0)} errors={result.get('total_errors',0)} elapsed={elapsed:.0f}s")
     except Exception as exc:
-        print(f"[scan_worker] crashed: {exc}")
+        import traceback
+        log(f"crashed: {exc}")
+        log(traceback.format_exc())
         sys.exit(1)
 
 
