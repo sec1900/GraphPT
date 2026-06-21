@@ -1111,6 +1111,19 @@ class PipelineExecutor:
                         except Exception:
                             pass
 
+                        # 写入 _SCAN_STATE，前端可查看工具死活
+                        try:
+                            from graphpt.collector.scheduler import _SCAN_STATE, _SCAN_STATE_LOCK
+                            with _SCAN_STATE_LOCK:
+                                st = _SCAN_STATE.get(self.asset_id, {})
+                                st["tool_health"] = {
+                                    "tool": tool, "pid": proc.pid,
+                                    "elapsed_s": int(_elapsed), "stale_s": int(_stale),
+                                    "output_bytes": sum(len(c) for c in _chunks),
+                                    "mem_mb": _pmem if '_pmem' in dir() else 0,
+                                }
+                        except Exception: pass
+
                         # 巡检间隔
                         if _did_read:
                             _time.sleep(0.1)  # 有数据→快速循环
