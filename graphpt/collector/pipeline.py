@@ -1121,13 +1121,15 @@ class PipelineExecutor:
             except Exception as exc:
                 msg = str(exc)
                 kind = "aborted" if "abort" in msg.lower() else ("stale" if "stale" in msg else "exec_error")
-                errors.append({
-                    "tool": tool,
-                    "target": _target_label(tgt),
-                    "kind": kind,
-                    "message": msg,
-                    "command": cmd,
-                })
+                # stale 是正常超时机制（nuclei 加载模板无输出），不作为错误展示
+                if kind != "stale":
+                    errors.append({
+                        "tool": tool,
+                        "target": _target_label(tgt),
+                        "kind": kind,
+                        "message": msg,
+                        "command": cmd,
+                    })
                 # 即使超时/异常，也尝试解析已输出的部分结果
                 _partial_stdout = ""
                 try:

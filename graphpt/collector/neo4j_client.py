@@ -488,6 +488,9 @@ class GraphWriter:
           - changed_at / changed_fields: 变化感知
         """
         normalized = normalize_url(url) or url
+        # 过滤本地地址，避免 Neo4j/Redis/Web 自身端口混入攻击面
+        if any(x in normalized for x in ("127.0.0.1", "localhost", "0.0.0.0")):
+            return {"id": "", "skipped": True, "reason": "localhost"}
         endpoint_id = f"ep:{method}:{normalized}"
         now = _now_iso()
         headers = response_headers or {}

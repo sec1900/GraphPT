@@ -425,7 +425,9 @@ async def dashboard_endpoints(asset_id: str = "default", limit: int = 15):
               MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
               RETURN ep
             }
-            RETURN DISTINCT ep.url AS url, ep.status_code AS status_code, ep.title AS title, ep.crawl_status AS status
+            WITH DISTINCT ep
+            WHERE NOT ep.url CONTAINS '127.0.0.1' AND NOT ep.url CONTAINS 'localhost'
+            RETURN ep.url AS url, ep.status_code AS status_code, ep.title AS title, ep.crawl_status AS status
             ORDER BY ep.url
             LIMIT $lim
             """,

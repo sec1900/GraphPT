@@ -276,14 +276,16 @@ async function loadDashboard() {
 
     // Recent subdomains — API返回{subdomain, ts}，适配为前端格式
     let subRows = (recent.recent_subdomains || []).map(s =>
-      `<tr><td>${esc(s.subdomain||s.value)}</td><td style="color:var(--muted)">${esc(s.root||'')}</td><td>${fmtTime(s.ts||s.created_at)}</td></tr>`
+      `<tr><td>${esc(s.subdomain||s.value)}</td><td style="color:var(--muted);font-size:11px">新发现</td><td>${fmtTime(s.ts||s.created_at)}</td></tr>`
     ).join('');
     document.getElementById('dash-recent-subs').innerHTML = subRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
 
     // Recent changes
     let chRows = '';
     (recent.recent_changes || []).forEach(c => {
-      chRows += `<tr><td><span class="badge warn">CHG</span> ${(c.fields||[]).join(', ')}</td><td>${esc(c.url||'')}</td><td>${fmtTime(c.changed_at)}</td></tr>`;
+      const fieldNames = {'status_code':'状态码','title':'标题','body_hash':'内容','ssl_cert_cn':'证书'};
+      const changed = (c.fields||[]).map(f => fieldNames[f] || f).join(', ') || '属性更新';
+      chRows += `<tr><td><span class="badge warn">更新</span> ${changed}</td><td>${esc(c.url||'')}</td><td>${fmtTime(c.changed_at)}</td></tr>`;
     });
     document.getElementById('dash-changes').innerHTML = chRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
 
