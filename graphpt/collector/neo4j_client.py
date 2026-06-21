@@ -1137,6 +1137,14 @@ class GraphWriter:
                             results.append(result)
                         continue
                 if ftype == "subdomain":
+                    result = self.write_subdomain(
+                        value=f["value"],
+                        asset_id=asset_id or f.get("asset_id", ""),
+                        root_domain=f.get("root_domain"),
+                        source=f.get("source", ""),
+                        cname=f.get("cname", ""),
+                        _session=batch_session,
+                    )
                 elif ftype == "ip":
                     result = self.write_ip(
                         ip=f["value"],
