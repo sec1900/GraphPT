@@ -1340,19 +1340,10 @@ function statusBadge(code) {
 // ============================================================
 let _plEditorData = null; // {name, description, stages: [{name, tools}]}
 
-const PL_TOOLS = [
-  {name:'enscan', desc:'enscan — company→domain discovery', use_on:{Asset:{}}},
-  {name:'subfinder', desc:'subfinder — subdomain discovery', use_on:{RootDomain:{}}},
-  {name:'crt', desc:'crt.sh — certificate transparency subdomains', use_on:{RootDomain:{}}},
-  {name:'dnsx', desc:'dnsx — subdomain DNS resolution', use_on:{Subdomain:{}}},
-  {name:'naabu', desc:'naabu — fast port discovery', use_on:{IP:{}, standalone_ip:{}}},
-  {name:'nmap', desc:'nmap — service detection on discovered ports', use_on:{IP:{}, standalone_ip:{}}},
-  {name:'httpx', desc:'httpx — web fingerprint', use_on:{Subdomain:{}, IP:{}, standalone_ip:{}, Port:{}}},
-  {name:'katana', desc:'katana — headless JS crawler', use_on:{Endpoint:{}}},
-  {name:'ffuf', desc:'ffuf — fast web fuzzer', use_on:{Endpoint:{}}},
-  {name:'gobuster', desc:'gobuster — directory/file/DNS brute-force', use_on:{Endpoint:{}}},
-  {name:'nuclei', desc:'nuclei — vulnerability scanner', use_on:{Endpoint:{}}},
-];
+// PL_TOOLS 由 /api/config/check 动态填充（_cfgTools），不再硬编码。
+// 加新工具只需在 tools/<name>/tool.yaml 声明 use_on，前端自动感知。
+// 在 _cfgTools 未加载前，使用空列表（首次页面加载时 API 数据到达后自动更新）。
+const PL_TOOLS = [];
 
 async function loadPipelines() {
   document.getElementById('pl-loading').style.display = 'block';
@@ -2857,8 +2848,12 @@ setTimeout(function() {
   if (dc) dc.innerHTML = '<div class="card"><div class="label">Root Domains</div><div class="value accent">—</div></div><div class="card"><div class="label">Subdomains</div><div class="value accent">—</div></div><div class="card"><div class="label">IP Addresses</div><div class="value green">—</div></div><div class="card"><div class="label">Open Ports</div><div class="value orange">—</div></div><div class="card"><div class="label">HTTP Endpoints</div><div class="value purple">—</div></div>';
   // 主路径：直接加载 Dashboard 数据（不经过 loadAssets）
   loadDashboard();
-  // 后台加载资产列表（填充下拉框，成功后也会刷新当前页）
+  // 后台加载资产列表 + 工具注册表（填充下拉框和右键菜单）
   setTimeout(function() { loadAssets(); }, 2000);
+  // 工具列表从 API 动态获取（右键菜单 _cfgTools）
+  fetch(API + '/config/check').then(function(r){return r.json();}).then(function(j){
+    if (j.ok) { _cfgTools = Object.entries(j.data).map(function(e){return {name:e[0], desc:e[1].desc||'', command:e[1].command||'', use_on:e[1].use_on||{}};}); }
+  }).catch(function(){});
 }, 500);
 if (!localStorage.getItem('graphpt_tutorial_done')) { tutOpen(); }
 

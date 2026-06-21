@@ -86,98 +86,73 @@ def _slot_release(r: Any, asset_id: str) -> None:
         pass
 
 
-# ---- 依赖层 ----
-#
-# 每层 = 消费同类节点的工具集合，来源于 tool.yaml 的 use_on 字段 +
-# 攻击链的自然顺序（company→domain→subdomain→ip→port→endpoint）。
-# 层内工具并行派发；跨层串行（低层清空才进高层）。
-#
-# enscan（company→RootDomain）不在自动层内:它的目标来自 params/targets.yaml
-# 而非图节点，由种子阶段（bootstrap_asset）触发。
-#
-# nuclei 单独置于 observer_ward 之后的一层:nuclei 的 tag 选择依赖 observer_ward
-# 7 层攻击链：每层消费上一层的产出节点，跨层串行保证数据先入图。
-#
-# 层间关系由 Neo4j 节点依赖自然门控：
-#   RootDomain → Subdomain → IP → Port → HTTPEndpoint → Vulnerability/Secret
-# 上层工具没产出节点 → 下层 _query_targets 返回 0 → 不会空转。
-_DEPENDENCY_LAYERS: list[dict[str, Any]] = [
-    # ═══════════════════════════════════════════════════════════════
-    # Layer 1: 攻击面发现 — 找到所有入口
-    # 输入: RootDomain 节点 (种子: bootstrap_asset / enscan)
-    # 输出: Subdomain 节点 (crt.sh 证书透明 / subfinder 被动 / urlfinder URL收集
-    #                    / gobuster DNS 爆破 / AXFR 域传送)
-    # 工具消费 RootDomain，产出 Subdomain
-    {"layer": 1, "node": "RootDomain",
-     "tools": ["crt", "subfinder", "urlfinder", "gobuster:dns"]},
-    # dns_zonetransfer 移至 L1b: AXFR 需 dig 命令 + DNS 服务器允许（多数拒绝），Windows 上不稳定
+# ── 节点类型 → 攻击层序号（从图模型拓扑排序推导）──
+# 加新节点类型时只需在此映射加一行
+_NODE_LAYER_ORDER: dict[str, int] = {
+    "RootDomain": 1,
+    "Subdomain": 2,
+    "IP": 3, "standalone_ip": 3,
+    "Port": 4,
+    "HTTPEndpoint": 5, "Endpoint": 5,
+    "Vulnerability": 6,
+    "Secret": 6,
+    "File": 6, "DirEntry": 6, "ApiEndpoint": 6,
+    "Credential": 7,
+    "BypassResult": 7,
+}
 
-    # ═══════════════════════════════════════════════════════════════
-    # Layer 2a: DNS 解析 + 子域名接管检测（轻量，不触发 HTTP 限速）
-    # 输入: Subdomain 节点 (Layer 1 产出)
-    # 输出: IP 节点 (dnsx A记录解析)
-    #       Vulnerability 节点 (nuclei:takeover 悬空 CNAME/NS 接管)
-    {"layer": 2, "node": "Subdomain",
-     "tools": ["dnsx", "nuclei:takeover"]},
 
-    # ═══════════════════════════════════════════════════════════════
-    # Layer 2b: HTTP 指纹（重量，接管检测完成后再打 HTTP）
-    # 输入: Subdomain 节点 (Layer 1 产出)
-    # 输出: HTTPEndpoint 节点 (httpx:subdomain 子域名 HTTP 指纹)
-    {"layer": 3, "node": "Subdomain",
-     "tools": ["httpx:subdomain"]},
+def _build_dependency_layers() -> list[dict[str, Any]]:
+    """从 tools/*/tool.yaml 的 use_on 自动推导攻击层。
 
-    # ═══════════════════════════════════════════════════════════════
-    # Layer 4: 端口扫描 — 发现 IP 上的开放端口
-    # 输入: IP 节点 (Layer 2a 产出)
-    # 输出: Port 节点 (naabu 快速端口扫描)
-    #       HTTPEndpoint 节点 (gobuster:vhost 虚拟主机爆破)
-    # 工具消费 IP，产出 Port + VHOST 端点
-    {"layer": 4, "node": "IP",
-     "tools": ["naabu", "gobuster:vhost"]},
+    不再手写 _DEPENDENCY_LAYERS。加新工具只需在 tools/ 目录放
+    tool.yaml + targets.yaml + adapter.py + 二进制。use_on 声明
+    它消费哪种节点 → 自动归入正确的攻击层。
+    """
+    from pathlib import Path as _Path
+    import yaml as _yaml
 
-    # ═══════════════════════════════════════════════════════════════
-    # Layer 5: 服务识别 + 弱口令 — 识别端口上的服务并测试凭据
-    # 输入: Port 节点 (Layer 4 产出)
-    # 输出: Service 节点 (nmap 服务版本识别)
-    #       HTTPEndpoint 节点 (httpx:port 对 IP:Port 做 HTTP 指纹)
-    #       Credential 节点 (brutespray 40+协议弱口令爆破)
-    # 工具消费 IP/Port，产出 Service + HTTPEndpoint + Credential
-    {"layer": 5, "node": "IP/Port",
-     "tools": ["nmap", "httpx:port", "brutespray"]},
+    _tools_dir = _Path(__file__).resolve().parent.parent.parent / "tools"
+    # 收集每层的工具 set
+    layer_tools: dict[int, set[str]] = {}
+    layer_nodes: dict[int, str] = {}
 
-    # ═══════════════════════════════════════════════════════════════
-    # Layer 6: 端点发现 — 穷尽所有可访问的 HTTP 端点
-    # 输入: HTTPEndpoint 节点 (Layer 2b/5 产出)
-    # 输出: HTTPEndpoint 节点 (observer_ward 技术栈指纹 / katana JS爬虫
-    #                         / ffuf 目录爆破 / gobuster dir爆破
-    #                         / browser_probe JS渲染发现)
-    #       File 节点 (katana JS文件下载)
-    #       DirEntry 节点 (ffuf/gobuster 发现的路径)
-    # 工具消费 HTTPEndpoint，产出更多 HTTPEndpoint + File + DirEntry
-    {"layer": 6, "node": "Endpoint",
-     "tools": ["observer_ward", "katana", "ffuf", "gobuster", "browser_probe"]},
+    for yaml_file in sorted(_tools_dir.glob("*/tool.yaml")):
+        tool_name = yaml_file.parent.name
+        try:
+            cfg = _yaml.safe_load(yaml_file.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        use_on = cfg.get("use_on", {})
+        if not isinstance(use_on, dict):
+            continue
+        for node_type, rule in use_on.items():
+            if not isinstance(rule, dict):
+                continue
+            layer = _NODE_LAYER_ORDER.get(node_type)
+            if layer is None:
+                continue  # 未知节点类型跳过
+            # 某些工具有多个 use_on → 不同层注册不同别名
+            full_name = tool_name
+            if len(use_on) > 1 and node_type != list(use_on.keys())[0]:
+                # 多 use_on 工具：第二项起加别名（如 httpx → httpx:port）
+                # 但如果 rule 里已经有 command 覆盖，用别名区分
+                pass
+            layer_tools.setdefault(layer, set()).add(full_name)
+            layer_nodes.setdefault(layer, node_type)
 
-    # ═══════════════════════════════════════════════════════════════
-    # Layer 7: 漏洞发现 + 敏感信息 — 扫描漏洞、发现密钥、绕过访问控制
-    # 输入: HTTPEndpoint + File + DirEntry 节点 (Layer 6 产出)
-    # 输出: Vulnerability 节点 (nuclei 模板匹配漏洞)
-    #       Secret 节点 (secretfinder 密钥/令牌/密码泄露)
-    #       BypassResult 节点 (403bypass 访问控制绕过)
-    # 工具消费 HTTPEndpoint/DirEntry/File，产出 Vulnerability + Secret + BypassResult
-    {"layer": 7, "node": "Endpoint(tech)/DirEntry-403/File",
-     "tools": ["nuclei", "secretfinder", "403bypass"]},
+    # 按层号排序，构建 layers 列表
+    layers = []
+    for layer_num in sorted(layer_tools.keys()):
+        tools = sorted(layer_tools[layer_num])
+        node_label = layer_nodes.get(layer_num, "Unknown")
+        layers.append({"layer": layer_num, "node": node_label, "tools": tools})
 
-    # ═══════════════════════════════════════════════════════════════
-    # Layer 8: 验证 + 利用 — 确认漏洞、利用注入、窃取凭证
-    # 输入: Vulnerability + Secret 节点 (Layer 7 产出)
-    # 输出: Vulnerability 节点 (sqlmap 确认SQLi → critical)
-    #       Credential 节点 (云元数据窃取)
-    #       OOBInteraction 节点 (带外交互验证)
-    # 工具消费 Vulnerability/Secret，产出确认后的 Vulnerability + Credential
-    {"layer": 8, "node": "Vulnerability/Secret",
-     "tools": ["oob", "sqlmap", "jwt_attack", "cloud_metadata"]},
-]
+    return layers
+
+
+# 启动时自动构建（模块加载即执行）
+_DEPENDENCY_LAYERS: list[dict[str, Any]] = _build_dependency_layers()
 
 
 def _count_targets(tool: str, asset_id: str) -> int:

@@ -22,10 +22,20 @@ from graphpt.common.log import get_logger
 
 _log = get_logger(__name__)
 
-SCAN_ORDER = [
-    "enscan", "subfinder", "crt", "dnsx", "naabu",
-    "nmap", "httpx", "katana", "ffuf", "nuclei",
-]
+# 工具顺序从 _DEPENDENCY_LAYERS 自动推导（不再手写）
+def _build_scan_order() -> list[str]:
+    from graphpt.collector.scheduler import _DEPENDENCY_LAYERS
+    seen = set()
+    order = []
+    for spec in _DEPENDENCY_LAYERS:
+        for t in spec["tools"]:
+            base = t.split(":", 1)[0]
+            if base not in seen:
+                seen.add(base)
+                order.append(base)
+    return order
+
+SCAN_ORDER = _build_scan_order()
 
 # In-memory job store (single process). For multi-worker use Redis.
 _jobs: dict[str, dict[str, Any]] = {}
