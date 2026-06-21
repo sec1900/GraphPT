@@ -12,8 +12,7 @@ from pathlib import Path
 
 import yaml
 
-# Celery 已移除——所有扫描由 scheduler.ThreadPoolExecutor 直连执行。
-# tasks.py 保留 _find_tool / _run_single_tool_pipeline 等工具函数。
+# Celery 已移除——扫描由 ThreadPoolExecutor 直连执行
 from graphpt.collector.neo4j_client import (
     get_graph_writer,
     list_root_domains,
@@ -314,7 +313,7 @@ def _query_crtsh(domain: str, *, timeout: float = 30.0) -> list[str]:
 
 # ---- L1 采集 ----
 
-defpassive_recon(self, asset_id: str | None = None):
+def passive_recon(self, asset_id: str | None = None):
     """被动信息收集 — enscan + crt.sh + urlfinder。
 
     全程不直接访问目标主机, 仅查询第三方公开数据源。
@@ -367,7 +366,7 @@ defpassive_recon(self, asset_id: str | None = None):
     }
 
 
-defdns_resolve(self, asset_id: str | None = None):
+def dns_resolve(self, asset_id: str | None = None):
     """DNS 解析 — 定时 / 手动触发。"""
     asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
     self.update_state(state="PROGRESS", meta={"stage": "dnsx"})
@@ -387,7 +386,7 @@ defdns_resolve(self, asset_id: str | None = None):
     }
 
 
-defweb_fingerprint(self, asset_id: str | None = None):
+def web_fingerprint(self, asset_id: str | None = None):
     """Web 指纹 — 通过 httpx 工具探测 HTTP 端点。"""
     asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
     self.update_state(state="PROGRESS", meta={"stage": "httpx"})
@@ -407,7 +406,7 @@ defweb_fingerprint(self, asset_id: str | None = None):
     }
 
 
-defport_scan(self, asset_id: str | None = None):
+def port_scan(self, asset_id: str | None = None):
     """端口扫描 — 通过 naabu 发现端口，再通过 nmap/httpx 识别服务。"""
     asset_id = asset_id or os.getenv("GRAPHPT_ASSET_ID", "default")
     self.update_state(state="PROGRESS", meta={"stage": "port_discovery"})
@@ -431,7 +430,7 @@ defport_scan(self, asset_id: str | None = None):
     }
 
 
-defbootstrap_asset(self, asset_id: str | None = None):
+def bootstrap_asset(self, asset_id: str | None = None):
     """一次性种子任务 — 从 targets.yaml 将全部目标灌入 Neo4j。
 
     幂等：已存在的节点不会重复创建（MERGE + ON CREATE）。
@@ -455,7 +454,7 @@ defbootstrap_asset(self, asset_id: str | None = None):
     }
 
 
-defquery_unverified(self, asset_id: str | None = None):
+def query_unverified(self, asset_id: str | None = None):
     """查询所有单来源节点，供 Agent/LLM 判断。
 
     返回按类型分组的未验证节点列表。
@@ -473,7 +472,7 @@ defquery_unverified(self, asset_id: str | None = None):
 
 # ---- L2 采集（Agent 按需触发）----
 
-defdeep_crawl(self, url: str, asset_id: str):
+def deep_crawl(self, url: str, asset_id: str):
     """L2 深度爬取 — Agent 按需触发。
 
     使用 katana 对指定 Endpoint 做深度爬取：
@@ -519,7 +518,7 @@ defdeep_crawl(self, url: str, asset_id: str):
 
 # ---- 事件触发（采集链级联）----
 
-defon_new_subdomain(self, subdomain: str, asset_id: str):
+def on_new_subdomain(self, subdomain: str, asset_id: str):
     """新子域名事件 → 级联触发 DNS 解析 + Web 指纹。"""
     chain = (
         dns_resolve.si(asset_id=asset_id)
@@ -530,7 +529,7 @@ defon_new_subdomain(self, subdomain: str, asset_id: str):
 
 # ---- 维护任务 ----
 
-defchange_detection(self, asset_id: str | None = None):
+def change_detection(self, asset_id: str | None = None):
     """变化感知巡检 — 每天一次。
 
     对比本次扫描结果与 Neo4j 中已有节点属性：
@@ -549,7 +548,7 @@ defchange_detection(self, asset_id: str | None = None):
 
 # ---- 节点驱动调度 ----
 
-defscan_tool(self, tool: str, asset_id: str = "default"):
+def scan_tool(self, tool: str, asset_id: str = "default"):
     """单工具扫描任务（节点驱动调度器 advance_once 的派发单元）。
 
     不传 targets —— PipelineExecutor 内部用 _query_targets(tool) 自选图中
