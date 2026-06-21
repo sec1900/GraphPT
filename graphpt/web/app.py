@@ -50,10 +50,41 @@ _SEARCH_PATHS: list[tuple[str, str, str]] = [
 web_app = FastAPI(title="GraphPT Admin", version="0.1.0")
 
 
+# ── 静态文件 no-cache（防浏览器缓存旧 JS/CSS）──
+@web_app.middleware("http")
+async def _static_no_cache(request: Request, call_next):
+    resp = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    return resp
+
+
 @web_app.on_event("startup")
 async def _auto_resume_interrupted_scans():
-    """Web 启动时异步恢复扫描，不阻塞。"""
-    pass
+    """异步恢复中断扫描，不阻塞 worker。"""
+    import asyncio
+    asyncio.create_task(_try_auto_resume())
+
+
+async def _try_auto_resume():
+    """后台恢复扫描。"""
+    try:
+        import redis as _rds, json as _json
+        r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1, decode_responses=True)
+        r.ping()
+        for key in r.scan_iter(match="scan:resume:*", count=10):
+            try:
+                data = _json.loads(r.get(key) or "{}")
+                asset_id = data.get("asset_id", "")
+                if not asset_id: continue
+                r.delete(key)
+                subprocess.Popen(
+                    [sys.executable, "-u", "-m", "graphpt.collector.scan_worker", asset_id],
+                    env={**os.environ, "GRAPHPT_ASSET_ID": asset_id},
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except Exception: pass
+    except Exception: pass
 
 # 采集产物（403 绕过数据包等）静态服务：BypassResult.packet_url 指向 /artifacts/...
 # 浏览器直接打开即可查看原始请求/响应数据包。
