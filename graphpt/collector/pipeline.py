@@ -1068,12 +1068,13 @@ class PipelineExecutor:
                             except RuntimeError: raise
                             except Exception: pass
 
-                        # 活性检测
-                        if _stale > _STALE_TIMEOUT:
+                        # 活性检测（渐进式：已有输出→宽限翻倍，允许等 OOB 回调）
+                        _stale_limit = _STALE_TIMEOUT * 2 if _chunks else _STALE_TIMEOUT
+                        if _stale > _stale_limit:
                             proc.kill(); proc.wait()
                             raise RuntimeError(
-                                f"tool stale: no output for {_stale:.0f}s > {_STALE_TIMEOUT}s "
-                                f"(log={_log_file})"
+                                f"tool stale: no output for {_stale:.0f}s > {_stale_limit}s "
+                                f"(chunks={len(_chunks)}, log={_log_file})"
                             )
 
                         # 非阻塞读：PeekNamedPipe 检测 → 有数据才读
