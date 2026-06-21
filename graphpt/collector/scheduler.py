@@ -879,7 +879,7 @@ def scan_state(asset_id: str = "default") -> dict[str, Any]:
         if raw:
             data = _json.loads(raw)
             ts = data.get("updated_at", 0)
-            if time.time() - ts < 180:  # 3 分钟内更新过 → 活跃
+            if time.time() - ts < 600:  # 10 分钟内更新过 → 活跃（首轮核弹可能很久）
                 return {
                     "status": "scanning", "asset_id": asset_id,
                     "round": data.get("round", 0),
