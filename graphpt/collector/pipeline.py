@@ -949,7 +949,8 @@ class PipelineExecutor:
 
             # OOB 自动注入：nuclei/httpx 等工具自动追加 -interactsh-url
             _oob_used = False
-            if base in ("nuclei", "httpx", "httpx:port", "httpx:subdomain", "ffuf"):
+            # nuclei 不自动注入 OOB——大量 HTTP 模板不需要，且会阻塞退出等回调
+            if base in ("httpx", "httpx:port", "httpx:subdomain", "ffuf"):
                 try:
                     from graphpt.collector.oob_service import get_oob_service
                     _oob = get_oob_service()
