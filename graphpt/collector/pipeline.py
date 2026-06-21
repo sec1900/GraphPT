@@ -997,14 +997,14 @@ class PipelineExecutor:
                         _proc_env["NO_PROXY"] = "127.0.0.1,localhost,::1,*.local"
                         _proc_env["no_proxy"] = "127.0.0.1,localhost,::1,*.local"
                 except Exception: pass
-                # stdout → PIPE (Windows 兼容) → 边读边写 log 文件(浏览器可 tail)
-                proc = subprocess.Popen(cmd, text=True, encoding='utf-8', errors='replace',
+                # stdout → PIPE (二进制模式, select非阻塞读)
+                proc = subprocess.Popen(cmd, text=False,
                                         env=_proc_env,
                                         stdin=_stdin, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 _start = _time.time()
                 _last_output = _start  # 活性计时：每次有输出时重置
-                _chunks: list[str] = []
-                with open(_log_file, "w", encoding="utf-8", errors="replace") as _lf:
+                _chunks: list[bytes] = []
+                with open(_log_file, "wb") as _lf:
                     while proc.poll() is None:
                         _now = _time.time()
                         _elapsed = _now - _start
@@ -1032,7 +1032,7 @@ class PipelineExecutor:
                             import select as _sel
                             ready, _, _ = _sel.select([stdout_fd], [], [], 1.0)
                             if ready:
-                                _chunk = os.read(stdout_fd, 65536).decode("utf-8", errors="replace")
+                                _chunk = os.read(stdout_fd, 65536)
                                 if _chunk:
                                     _chunks.append(_chunk)
                                     _lf.write(_chunk)
@@ -1063,9 +1063,9 @@ class PipelineExecutor:
                 _remaining, _ = proc.communicate(timeout=5)
                 if _remaining:
                     _chunks.append(_remaining)
-                    with open(_log_file, "a", encoding="utf-8", errors="replace") as _lf:
+                    with open(_log_file, "ab") as _lf:
                         _lf.write(_remaining)
-                stdout = "".join(_chunks)
+                stdout = b"".join(_chunks).decode("utf-8", errors="replace")
                 self.ctx["_last_tool_log"] = str(_log_file)
             except Exception as exc:
                 msg = str(exc)
