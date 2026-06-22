@@ -4,4 +4,4 @@ use_on:
   RootDomain:
     desc: "对 RootDomain 的 NS 服务器尝试 AXFR 域传送"
     params:
-      domain: "{value}"
+      domain: "{targets_file}"

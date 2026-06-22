@@ -4,15 +4,15 @@ use_on:
   Subdomain:
     desc: "探测子域名是否有 Web 服务"
     params:
-      urls_file: "{value}"
+      urls_file: "{targets_file}"
   IP:
     desc: "探测 IP 是否有 Web 服务"
     params:
-      urls_file: "{value}"
+      urls_file: "{targets_file}"
   standalone_ip:
     desc: "探测独立 IP 是否有 Web 服务"
     params:
-      urls_file: "{value}"
+      urls_file: "{targets_file}"
   Port:
     desc: "探测 IP:Port 是否有 Web 服务"
     params:

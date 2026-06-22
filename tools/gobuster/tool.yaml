@@ -10,7 +10,7 @@ use_on:
     desc: "子域名爆破"
     command: "{bin} dns --domain {domain} -w res/wordlists/dns_subdomains.txt -t 50"
     params:
-      domain: "{value}"
+      domain: "{targets_file}"
   IP:
     desc: "虚拟主机发现 — Top100 常见 vhost 名"
     command: "{bin} vhost -u http://{ip} -w res/wordlists/vhosts.txt -t 50"

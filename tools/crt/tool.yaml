@@ -4,4 +4,4 @@ use_on:
   RootDomain:
     desc: "从证书透明日志发现子域名"
     params:
-      targets_file: "{value}"
+      targets_file: "{targets_file}"

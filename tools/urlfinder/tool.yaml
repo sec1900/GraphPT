@@ -4,4 +4,4 @@ use_on:
   RootDomain:
     desc: "从根域名被动收集历史 URL（rdn 作用域自动展开全部子域名）"
     params:
-      targets_file: "{value}"
+      targets_file: "{targets_file}"

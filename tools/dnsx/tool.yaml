@@ -4,4 +4,4 @@ use_on:
   Subdomain:
     desc: "解析子域名到 IP"
     params:
-      targets_file: "{value}"
+      targets_file: "{targets_file}"
