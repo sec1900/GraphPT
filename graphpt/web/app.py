@@ -77,11 +77,18 @@ async def _auto_resume_interrupted_scans():
 
 
 async def _try_auto_resume():
-    """后台恢复扫描（防重复启动）。"""
+    """后台恢复扫描，任何异常不阻断服务器启动。"""
+    import asyncio
     try:
-        # 检查是否已有 scan_worker 在跑（防重复）
-        import psutil
-        existing = set()
+        await asyncio.wait_for(_do_auto_resume(), timeout=10)
+    except (asyncio.TimeoutError, Exception):
+        pass  # Redis 不可用 / psutil 慢 / 任何异常都不影响服务器
+
+
+async def _do_auto_resume():
+    import psutil, json as _json
+    existing = set()
+    try:
         for proc in psutil.process_iter(['pid', 'cmdline']):
             try:
                 cmd = ' '.join(proc.info['cmdline'] or [])
@@ -90,23 +97,27 @@ async def _try_auto_resume():
                         if not arg.startswith('-') and 'scan_worker' not in arg:
                             existing.add(arg)
             except Exception: pass
-
-        import redis as _rds, json as _json
-        r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1, decode_responses=True)
-        r.ping()
-        for key in r.scan_iter(match="scan:resume:*", count=10):
-            try:
-                data = _json.loads(r.get(key) or "{}")
-                asset_id = data.get("asset_id", "")
-                if not asset_id or asset_id in existing: continue
-                r.delete(key)
-                subprocess.Popen(
-                    [sys.executable, "-u", "-m", "graphpt.collector.scan_worker", asset_id],
-                    env={**os.environ, "GRAPHPT_ASSET_ID": asset_id},
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-            except Exception: pass
     except Exception: pass
+
+    import redis as _rds
+    try:
+        r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=2, socket_timeout=2, decode_responses=True)
+        r.ping()
+    except Exception:
+        return  # Redis 不可用，跳过恢复
+
+    for key in r.scan_iter(match="scan:resume:*", count=10):
+        try:
+            data = _json.loads(r.get(key) or "{}")
+            asset_id = data.get("asset_id", "")
+            if not asset_id or asset_id in existing: continue
+            r.delete(key)
+            subprocess.Popen(
+                [sys.executable, "-u", "-m", "graphpt.collector.scan_worker", asset_id],
+                env={**os.environ, "GRAPHPT_ASSET_ID": asset_id},
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception: pass
 
 # 采集产物（403 绕过数据包等）静态服务：BypassResult.packet_url 指向 /artifacts/...
 # 浏览器直接打开即可查看原始请求/响应数据包。
@@ -2797,7 +2808,23 @@ async def scan_progress(asset_id: str = "default"):
                     aid=asset_id,
                 )}
         except Exception:
-            pass  # Neo4j 不可用时不阻断前端进度展示
+            pass
+
+        # 同进程 _SCAN_STATE 补充实时进度（层完成数 + 当前工具）
+        scan_progress: dict[str, Any] = {}
+        try:
+            from graphpt.collector.scheduler import _SCAN_STATE, _SCAN_STATE_LOCK
+            with _SCAN_STATE_LOCK:
+                st = _SCAN_STATE.get(asset_id, {})
+                scan_progress = {
+                    "current_layer": st.get("layer"),
+                    "current_tool": st.get("tool"),
+                    "tools_done": st.get("tools_done", 0),
+                    "tools_total": st.get("tools_total", 0),
+                    "tool_health": st.get("tool_health"),
+                }
+        except Exception:
+            pass
 
         # 按 dependency layer 组织
         layers = []
@@ -2815,6 +2842,7 @@ async def scan_progress(asset_id: str = "default"):
             "layers": layers,
             "active_tools": active_tools,
             "scan_running": _scan_pool is not None,
+            "scan_progress": scan_progress,
         }}
         _cache_set(cache_key, result)
         return result

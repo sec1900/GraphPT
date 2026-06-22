@@ -96,7 +96,7 @@ def main():
             log(f"cleanup: deleted {cr['total_deleted']} files, freed {cr['total_bytes_freed']//1024}KB")
     except Exception: pass
 
-    from graphpt.collector.scheduler import run_full_scan, _any_tool_has_targets
+    from graphpt.collector.scheduler import run_full_scan
 
     # 启动后立即写 Redis 状态，让前端 scan_state 看到 scanning
     try:
@@ -111,8 +111,6 @@ def main():
     except Exception: pass
 
     try:
-        targets_before = _any_tool_has_targets(asset_id)
-        log(f"targets_before={targets_before}")
         result = run_full_scan(asset_id)
         elapsed = _time.time() - t0
         log(f"done: status={result['status']} rounds={result.get('rounds','?')} "
