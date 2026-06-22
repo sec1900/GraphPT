@@ -170,6 +170,7 @@ document.querySelectorAll('nav button[data-page]').forEach(btn => {
     btn.classList.add('active');
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.getElementById('page-' + btn.dataset.page).classList.add('active');
+    if (btn.dataset.page !== 'dashboard') { _stopSysResPoll(); _stopRunningTasksPoll(); }
     switch(btn.dataset.page) {
       case 'dashboard': loadDashboard(); break;
       case 'assets': renderAssetsPage(); break;
@@ -277,6 +278,8 @@ async function loadDashboard() {
     _loadScanCardsAsync();
     setTimeout(function(){ _loadSeverityChart(); }, 500);
     _loadErrorsAsync();
+    _startSysResPoll();
+    _startRunningTasksPoll();
   } catch(e) {
     toast(e.message, false);
   }
@@ -343,16 +346,202 @@ async function _loadErrorsAsync() {
     var errJson = await errRes.json();
     if (!errJson.ok) return;
     var errRows = '';
-    var errLimit = 5;
+    var errLimit = 10;
     var errors = (errJson.data || []);
-    errors.forEach(function(e, ei){
-      var hidden = ei >= errLimit ? ' style="display:none" class="dash-fold-row"' : '';
-      errRows += '<tr' + hidden + '><td><span class="badge err">' + esc(e.kind) + '</span></td><td><b>' + esc(e.tool) + '</b></td><td style="font-size:11px;color:var(--muted)">' + esc((e.message||'').substring(0,120)) + '</td><td>' + fmtTime(e.time) + '</td></tr>';
-    });
-    if (errors.length > errLimit) {
-      errRows += '<tr><td colspan="4" style="text-align:center;padding:4px"><button class="btn outline small" onclick="var r=this.closest(\'table\').querySelectorAll(\'.dash-fold-row\');var show=r.length>0&&r[0].style.display===\'none\';r.forEach(function(x){x.style.display=show?\'\':\'none\'});this.textContent=show?\'▲ Collapse\':\'Show ' + (errors.length-errLimit) + ' more\';" style="font-size:10px">Show ' + (errors.length-errLimit) + ' more</button></td></tr>';
+    var cleaned = errJson.cleaned || 0;
+
+    // 自动清理提示
+    if (cleaned > 0) {
+      errRows += '<tr><td colspan="4" style="text-align:center;padding:2px;font-size:10px;color:var(--muted)">'
+        + 'Auto-cleaned ' + cleaned + ' old error(s)</td></tr>';
     }
-    document.getElementById('dash-errors').innerHTML = errRows || '<tr><td colspan="4" style="color:var(--green)">No errors</td></tr>';
+
+    if (errors.length === 0) {
+      errRows += '<tr><td colspan="4" style="color:var(--green);text-align:center">No errors</td></tr>';
+    } else {
+      errors.forEach(function(e, ei){
+        var hidden = ei >= errLimit ? ' style="display:none" class="dash-fold-row"' : '';
+        errRows += '<tr' + hidden + '><td><span class="badge err">' + esc(e.kind) + '</span></td><td><b>' + esc(e.tool) + '</b></td><td style="font-size:11px;color:var(--muted)">' + esc((e.message||'').substring(0,120)) + '</td><td>' + fmtTime(e.time) + '</td></tr>';
+      });
+      if (errors.length > errLimit) {
+        errRows += '<tr><td colspan="4" style="text-align:center;padding:4px"><button class="btn outline small" onclick="var r=this.closest(\'table\').querySelectorAll(\'.dash-fold-row\');var show=r.length>0&&r[0].style.display===\'none\';r.forEach(function(x){x.style.display=show?\'\':\'none\'});this.textContent=show?\'▲ Collapse\':\'Show ' + (errors.length-errLimit) + ' more\';" style="font-size:10px">Show ' + (errors.length-errLimit) + ' more</button></td></tr>';
+      }
+    }
+    document.getElementById('dash-errors').innerHTML = errRows;
+  } catch(e) { /* ignore */ }
+}
+
+// === 运行中任务面板（跨资产，显示所有正在跑的扫描）===
+
+let _runningTasksTimer = null;
+let _expandedTasks = {};  // asset_id → true，记住展开状态
+
+function _startRunningTasksPoll() {
+  _stopRunningTasksPoll();
+  _loadRunningTasks();
+  _runningTasksTimer = setInterval(_loadRunningTasks, 8000);
+}
+
+function _stopRunningTasksPoll() {
+  if (_runningTasksTimer) { clearInterval(_runningTasksTimer); _runningTasksTimer = null; }
+}
+
+function _toggleTaskDetail(assetId) {
+  _expandedTasks[assetId] = !_expandedTasks[assetId];
+  _loadRunningTasks();  // 立即重绘
+}
+
+async function _loadRunningTasks() {
+  try {
+    var r = await fetch(API + '/scan/running');
+    var j = await r.json();
+    if (!j.ok) return;
+    var tasks = j.data.tasks || [];
+    var panel = document.getElementById('running-tasks-panel');
+    if (!panel) return;
+
+    if (tasks.length === 0) {
+      panel.style.display = 'none';
+      return;
+    }
+
+    panel.style.display = '';
+    document.getElementById('running-tasks-count').textContent = '(' + tasks.length + ')';
+
+    var rows = '';
+    tasks.forEach(function(t){
+      var pct = t.tools_total > 0 ? Math.round(t.tools_done / t.tools_total * 100) : 0;
+      var elapsed = t.elapsed_s > 3600 ? Math.floor(t.elapsed_s/3600)+'h'+Math.floor(t.elapsed_s%3600/60)+'m'
+                  : t.elapsed_s > 60 ? Math.floor(t.elapsed_s/60)+'m'+Math.round(t.elapsed_s%60)+'s'
+                  : t.elapsed_s + 's';
+      var isCurrent = t.asset_id === currentAsset;
+      var isExpanded = _expandedTasks[t.asset_id];
+      var rowStyle = isCurrent ? '' : 'style="opacity:0.7"';
+      var toggleIcon = isExpanded ? '▼' : '▶';
+
+      // 主行（可点击展开）
+      rows += '<tr ' + rowStyle + ' style="cursor:pointer" onclick="_toggleTaskDetail(\'' + esc(t.asset_id) + '\')">' +
+        '<td style="width:16px;color:var(--muted);font-size:10px">' + toggleIcon + '</td>' +
+        '<td><b>' + esc(t.asset_name || t.asset_id) + '</b>' + (isCurrent ? '' : ' <span style="font-size:9px;color:var(--muted)">(bg)</span>') + '</td>' +
+        '<td style="color:var(--muted)">' + (t.current_layer != null ? 'L' + t.current_layer : '-') + '</td>' +
+        '<td>' + esc(t.current_tool || '-') + '</td>' +
+        '<td>' + (t.tools_done||0) + '/' + (t.tools_total||0) + ' <span style="font-size:10px;color:var(--muted)">(' + pct + '%)</span></td>' +
+        '<td style="color:var(--muted)">' + elapsed + '</td>' +
+        '<td><button class="btn outline small" style="font-size:10px;padding:2px 6px" onclick="event.stopPropagation();abortAssetScan(\'' + esc(t.asset_id) + '\')" title="Abort scan">Abort</button></td>' +
+        '</tr>';
+
+      // 展开的详情行
+      if (isExpanded && t.layers) {
+        rows += '<tr ' + rowStyle + '><td></td><td colspan="6" style="padding:4px 8px 8px 8px">';
+        t.layers.forEach(function(l){
+          var allDone = l.tools.every(function(tl){ return tl.scans > 0 && !tl.active; });
+          var layerStyle = allDone ? 'color:var(--green)' : '';
+          var toolsHtml = l.tools.map(function(tl){
+            var mark = tl.active ? ' <span style="color:var(--accent)">●</span>'
+                     : (tl.scans > 0 ? ' <span style="color:var(--green)">✓</span>'
+                     : ' <span style="color:var(--muted)">○</span>');
+            return '<span style="font-size:10px">' + esc(tl.tool) + ':' + (tl.scans||0) + mark + '</span>';
+          }).join(' &nbsp;');
+          rows += '<div style="margin:2px 0;font-size:10px;' + layerStyle + '">' +
+            'L' + l.layer + ' <span style="color:var(--muted)">[' + esc(l.node) + ']</span> ' + toolsHtml +
+            '</div>';
+        });
+        rows += '</td></tr>';
+      }
+    });
+    document.getElementById('running-tasks-tbody').innerHTML = rows;
+  } catch(e) { /* ignore */ }
+}
+
+async function abortAssetScan(assetId) {
+  if (!confirm('Abort scan for "' + assetId + '"?')) return;
+  try {
+    var r = await fetch('/api/scan/abort', {method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({asset_id: assetId})});
+    var d = await r.json();
+    if (d.ok) toast('Aborted: ' + assetId);
+  } catch(e) { toast(e.message, false); }
+}
+
+// === 系统资源监控（Dashboard 实时 CPU / 内存 / 磁盘 / 工具进程）===
+
+let _sysResTimer = null;
+
+function _startSysResPoll() {
+  _stopSysResPoll();
+  _loadSystemResources();
+  _sysResTimer = setInterval(_loadSystemResources, 5000);
+}
+
+function _stopSysResPoll() {
+  if (_sysResTimer) { clearInterval(_sysResTimer); _sysResTimer = null; }
+}
+
+async function _loadSystemResources() {
+  try {
+    var r = await fetch(API + '/system/resources');
+    var j = await r.json();
+    if (!j.ok || !j.data) return;
+    var d = j.data;
+    var panel = document.getElementById('sys-resources');
+    if (!panel) return;
+    panel.style.display = '';
+
+    // ── CPU ──
+    var cpu = d.cpu || {};
+    document.getElementById('sys-cpu-pct').textContent = cpu.percent || 0;
+    document.getElementById('sys-cpu-bar').style.width = (cpu.percent || 0) + '%';
+    document.getElementById('sys-cpu-cores').textContent = (cpu.cores || 0) + ' cores';
+
+    // ── Memory ──
+    var mem = d.memory || {};
+    document.getElementById('sys-mem-pct').textContent = mem.percent || 0;
+    var memBar = document.getElementById('sys-mem-bar');
+    memBar.style.width = (mem.percent || 0) + '%';
+    memBar.className = 'res-bar-fill mem-fill' +
+      (mem.percent >= 90 ? ' crit' : mem.percent >= 75 ? ' warn' : '');
+    document.getElementById('sys-mem-detail').textContent =
+      (mem.used_gb != null ? mem.used_gb + ' / ' + mem.total_gb + ' GB' : '');
+
+    // ── Disk ──
+    var disk = d.disk || {};
+    document.getElementById('sys-disk-pct').textContent = disk.percent || 0;
+    var diskBar = document.getElementById('sys-disk-bar');
+    diskBar.style.width = (disk.percent || 0) + '%';
+    diskBar.className = 'res-bar-fill disk-fill' +
+      (disk.percent >= 90 ? ' warn' : '');
+    document.getElementById('sys-disk-detail').textContent =
+      (disk.free_gb != null ? disk.free_gb + ' GB free (' + (disk.path || '') + ')' : '');
+
+    // ── Memory Pressure badge ──
+    document.getElementById('sys-pressure-badge').style.display =
+      d.memory_pressure ? '' : 'none';
+
+    // ── Tool Processes ──
+    var tools = d.tool_processes || [];
+    var toolSection = document.getElementById('sys-tool-procs');
+    if (tools.length > 0) {
+      toolSection.style.display = '';
+      document.getElementById('sys-tool-count').textContent =
+        '(' + tools.length + ' proc, ' + (d.tool_mem_total_mb || 0) + ' MB total)';
+      document.getElementById('sys-tool-tbody').innerHTML = tools.map(function(t){
+        var memCls = t.mem_mb > 2000 ? 'style="color:var(--red);font-weight:600"' :
+                     t.mem_mb > 1000 ? 'style="color:var(--orange);font-weight:600"' : '';
+        var cpuCls = t.cpu_percent > 80 ? 'style="color:var(--red);font-weight:600"' : '';
+        var elapsed = t.elapsed_s > 3600 ? Math.floor(t.elapsed_s/3600)+'h'+Math.floor(t.elapsed_s%3600/60)+'m'
+                    : t.elapsed_s > 60 ? Math.floor(t.elapsed_s/60)+'m'+Math.round(t.elapsed_s%60)+'s'
+                    : t.elapsed_s + 's';
+        return '<tr>' +
+          '<td><span class="badge warn">' + esc(t.tool) + '</span></td>' +
+          '<td style="color:var(--muted)">' + t.pid + '</td>' +
+          '<td ' + memCls + '>' + t.mem_mb + ' MB</td>' +
+          '<td ' + cpuCls + '>' + t.cpu_percent + '%</td>' +
+          '<td style="color:var(--muted)">' + elapsed + '</td>' +
+          '</tr>';
+      }).join('');
+    } else {
+      toolSection.style.display = 'none';
+    }
   } catch(e) { /* ignore */ }
 }
 
@@ -2540,6 +2729,23 @@ async function refreshScanProgress() {
     }
     document.getElementById('scan-progress-layers').innerHTML = html;
 
+    // 人工验证警告：enscan 等爬虫工具遇到反爬，需用户打开浏览器验证
+    var verifEl = document.getElementById('scan-verif-warning');
+    var th = (data.scan_progress && data.scan_progress.tool_health) || {};
+    if (verifEl && th.needs_verification) {
+      verifEl.style.display = '';
+      document.getElementById('scan-verif-tool').textContent = th.tool || 'tool';
+      var waitSec = th.verification_since_s || 0;
+      var graceTotal = 600; // GRAPHPT_VERIFICATION_GRACE default
+      var remain = Math.max(0, graceTotal - waitSec);
+      var min = Math.floor(remain / 60);
+      var sec = remain % 60;
+      document.getElementById('scan-verif-waiting').textContent =
+        '(waiting ' + Math.floor(waitSec/60) + 'm' + (waitSec%60) + 's — timeout in ' + min + 'm' + sec + 's)';
+    } else if (verifEl) {
+      verifEl.style.display = 'none';
+    }
+
     if (data.active_tools.length === 0 && data.scan_running === false) {
       document.getElementById('btn-start-scan').style.display = '';
       document.getElementById('btn-start-scan').style.background = '';
@@ -2605,8 +2811,8 @@ document.addEventListener('click', () => {
 let _autoRefresh = false;
 function toggleAutoDashboard() {
   _autoRefresh = document.getElementById('dash-auto-refresh').checked;
-  if (_autoRefresh) { _autoTimer = setInterval(loadDashboard, 30000); }
-  else { if (_autoTimer) clearInterval(_autoTimer); }
+  if (_autoRefresh) { _autoTimer = setInterval(loadDashboard, 30000); _startSysResPoll(); }
+  else { if (_autoTimer) clearInterval(_autoTimer); _stopSysResPoll(); }
 }
 let _autoTimer = null;
 

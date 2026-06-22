@@ -195,12 +195,24 @@ _atexit.register(_cleanup_all_temps)
 
 
 def _set_active_marker(tool: str, asset_id: str) -> None:
-    """标记工具正在运行（Redis, 5min TTL 自动过期, 供 Logs 面板自动发现）。"""
+    """标记工具正在运行（Redis, 5min TTL 自动过期, 供 Logs 面板自动发现）。
+    键按 asset 隔离: tool:active:{asset_id}:{tool} — 避免跨资产泄漏。"""
     try:
         from graphpt.common.redis_client import get_redis
         _r = get_redis(decode_responses=True, socket_connect_timeout=1)
         _r.ping()
-        _r.setex(f"tool:active:{tool}", 300, asset_id)
+        _r.setex(f"tool:active:{asset_id}:{tool}", 300, "1")
+    except Exception:
+        pass
+
+
+def _clear_active_marker(tool: str, asset_id: str) -> None:
+    """清除工具活跃标记（工具正常结束或异常退出时调用）。"""
+    try:
+        from graphpt.common.redis_client import get_redis
+        _r = get_redis(decode_responses=True, socket_connect_timeout=1)
+        _r.ping()
+        _r.delete(f"tool:active:{asset_id}:{tool}")
     except Exception:
         pass
 
@@ -491,6 +503,8 @@ class PipelineExecutor:
         }
 
     def execute(self) -> dict[str, Any]:
+        import logging as _logging
+        _log_exec = _logging.getLogger("graphpt.pipeline")
         validation = self._tool_validation_result()
         if validation:
             return validation
@@ -996,9 +1010,70 @@ class PipelineExecutor:
                 _stdin = open(_urls, "r", encoding="utf-8", errors="replace")
             # 活性超时 — 统一由 GRAPHPT_STALE_TIMEOUT 控制（默认 300s）
             _STALE_TIMEOUT = int(os.getenv("GRAPHPT_STALE_TIMEOUT", "300"))
-            _MAX_TOOL_TIME = int(os.getenv("GRAPHPT_MAX_TOOL_TIME", "0") or "0")  # 绝对上限，0=不限
+            _MAX_TOOL_TIME = int(os.getenv("GRAPHPT_MAX_TOOL_TIME", "1800") or "0")  # 绝对上限，默认30min，0=不限
             _MAX_TOOL_MEM_MB = int(os.getenv("GRAPHPT_MAX_TOOL_MEM_MB", "4096"))  # 内存上限（MB），0=不限
             _POLL_INTERVAL = int(os.getenv("GRAPHPT_POLL_INTERVAL", "2"))
+            # 人工验证检测 — 爬虫工具（enscan 等）触发反爬后需用户打开浏览器验证
+            _VERIFICATION_GRACE = int(os.getenv("GRAPHPT_VERIFICATION_GRACE", "600"))
+            _VERIFICATION_PATTERNS = [
+                rb'(?i)AQC',                          # enscan 反爬验证码
+                rb'(?i)captcha',                      # 通用验证码
+                rb'(?i)verif(?:y|ication)',           # 验证请求
+                rb'(?i)human.*(?:verif|check)',       # 人工验证
+                rb'(?i)manual.*(?:verif|check)',      # 手动验证
+                rb'(?i)(?:open|launch).*browser',     # 打开浏览器
+            ]
+            # 中文验证提示（需 Unicode 匹配，单独处理）
+            _VERIFICATION_RE_CN = re.compile(r'(?i)(?:请.*(?:验证|认证)|(?:验证|认证).*(?:浏览器|人工))')
+            _verif_first_seen: float = 0.0
+            _verif_last_line: bytes = b""
+
+            def _is_verification_output(chunk: bytes) -> bool:
+                """检测输出中是否包含人工验证/反爬提示。"""
+                for _pat in _VERIFICATION_PATTERNS:
+                    if re.search(_pat, chunk):
+                        return True
+                # 中文模式需先解码
+                try:
+                    _text = chunk.decode("utf-8", errors="replace")
+                    if _VERIFICATION_RE_CN.search(_text):
+                        return True
+                except Exception:
+                    pass
+                return False
+
+            # 重复输出检测 — 区分"新信息"和"旧信息重放"（重试循环/spinner/相同错误）
+            _recent_line_hashes: set[int] = set()
+            _MAX_RECENT = 200          # 最近记忆行数上限
+            _DUPE_STREAK = 0           # 连续纯重复 chunk 计数
+            _DUPE_LIMIT = 3            # 连续 N 个纯重复 chunk 后不再重置 stale timer
+
+            def _has_new_content(chunk: bytes) -> bool:
+                """检查 chunk 中是否有没见过的行。False = 纯重复输出（重试循环等）。"""
+                nonlocal _DUPE_STREAK
+                try:
+                    _text = chunk.decode("utf-8", errors="replace")
+                    _lines = [l.strip() for l in _text.split("\n") if len(l.strip()) > 3]
+                    if not _lines:
+                        _DUPE_STREAK += 1
+                        return False  # 空白输出视为重复
+                    _has_new = False
+                    for _line in _lines:
+                        _h = hash(_line)
+                        if _h not in _recent_line_hashes:
+                            _recent_line_hashes.add(_h)
+                            _has_new = True
+                    # 集合上限：满了就清空（滚动窗口）
+                    if len(_recent_line_hashes) > _MAX_RECENT:
+                        _recent_line_hashes.clear()
+                    if _has_new:
+                        _DUPE_STREAK = 0
+                    else:
+                        _DUPE_STREAK += 1
+                    return _has_new
+                except Exception:
+                    _DUPE_STREAK = 0
+                    return True  # 解析失败 → 保守处理，算新内容
 
             try:
                 _proc_env = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
@@ -1087,14 +1162,36 @@ class PipelineExecutor:
                             except (psutil.NoSuchProcess, ProcessLookupError): break
                             except Exception: pass
 
-                        # 活性检测（渐进式：已有输出→宽限翻倍，允许等 OOB 回调）
+                        # 活性检测：不仅看 stdout，还看 CPU——nuclei 加载 15K 模板可能
+                        # 长时间无输出但 CPU 100%。只杀真正空闲的进程（无输出 + 无 CPU）。
                         _stale_limit = _STALE_TIMEOUT * 2 if _chunks else _STALE_TIMEOUT
-                        if _stale > _stale_limit:
-                            proc.kill(); proc.wait()
-                            raise RuntimeError(
-                                f"tool stale: no output for {_stale:.0f}s > {_stale_limit}s "
-                                f"(chunks={len(_chunks)}, log={_log_file})"
-                            )
+                        # 人工验证宽限期：首次检测到验证提示后给 GRAPHPT_VERIFICATION_GRACE 秒等待用户操作
+                        _in_verif_grace = _verif_first_seen > 0 and (_time.time() - _verif_first_seen) < _VERIFICATION_GRACE
+                        if _stale > _stale_limit and not _in_verif_grace:
+                            # 二次确认：检查进程是否真的空闲（CPU < 2% 持续 30s+）
+                            _really_idle = True
+                            try:
+                                import psutil as _psutil_mod
+                                _pp = _psutil_mod.Process(proc.pid)
+                                if _pp.is_running():
+                                    _cpu = _pp.cpu_percent(interval=0.5)
+                                    if _cpu > 2.0:
+                                        _really_idle = False  # CPU 活跃，不杀
+                            except Exception:
+                                pass  # psutil 不可用时回退到纯 stdout 判断
+                            if _really_idle:
+                                proc.kill(); proc.wait()
+                                raise RuntimeError(
+                                    f"tool idle: no output for {_stale:.0f}s > {_stale_limit}s, "
+                                    f"CPU idle (chunks={len(_chunks)}, log={_log_file})"
+                                )
+                            else:
+                                # CPU 活跃，重置 stale 计时（给工具更多时间）
+                                _last_output = _time.time()
+                                import logging as _logging
+                                _logging.getLogger("graphpt.pipeline").info(
+                                    "tool_stale_but_cpu_active tool=%s stale=%ds cpu_active=True",
+                                    base, int(_stale))
 
                         # 非阻塞读：PeekNamedPipe 检测 → 有数据才读
                         _did_read = False
@@ -1106,7 +1203,25 @@ class PipelineExecutor:
                                     _chunks.append(_chunk)
                                     _lf.write(_chunk)
                                     _lf.flush()
-                                    _last_output = _time.time()
+                                    # 活性判定：验证提示 + 重复输出均不计入有效活性
+                                    if _is_verification_output(_chunk):
+                                        # 人工验证检测（Layer 3）：首次给宽限期，后续不重置
+                                        if not _verif_first_seen:
+                                            _verif_first_seen = _time.time()
+                                            _last_output = _time.time()  # 首次给宽限期
+                                            import logging as _logging
+                                            _logging.getLogger("graphpt.pipeline").warning(
+                                                "tool_needs_verification tool=%s pid=%d asset=%s — "
+                                                "user must open browser to complete captcha/verification",
+                                                base, proc.pid, self.asset_id)
+                                        # 后续相同验证提示不重置 _last_output
+                                    elif not _has_new_content(_chunk) and _DUPE_STREAK > _DUPE_LIMIT:
+                                        # 重复输出检测（Layer 2）：连续 N 次纯重复 → 重试循环
+                                        # 不重置 _last_output，让 stale timeout 正常触发
+                                        pass
+                                    else:
+                                        _last_output = _time.time()
+                                        _verif_first_seen = 0.0  # 正常输出→清除验证跟踪
                                     _did_read = True
                         except Exception:
                             pass
@@ -1121,6 +1236,8 @@ class PipelineExecutor:
                                     "elapsed_s": int(_elapsed), "stale_s": int(_stale),
                                     "output_bytes": sum(len(c) for c in _chunks),
                                     "mem_mb": _pmem if '_pmem' in dir() else 0,
+                                    "needs_verification": _verif_first_seen > 0,
+                                    "verification_since_s": int(_time.time() - _verif_first_seen) if _verif_first_seen else 0,
                                 }
                         except Exception: pass
 
@@ -1153,9 +1270,14 @@ class PipelineExecutor:
                 self.ctx["_last_tool_log"] = str(_log_file)
             except Exception as exc:
                 msg = str(exc)
-                kind = "aborted" if "abort" in msg.lower() else ("stale" if "stale" in msg else "exec_error")
+                # 人工验证超时：用户在宽限期内未完成验证
+                _was_waiting_verif = _verif_first_seen > 0
+                kind = "aborted" if "abort" in msg.lower() else (
+                    "needs_verification" if _was_waiting_verif and "stale" in msg else (
+                    "stale" if "stale" in msg else "exec_error"))
                 # stale 是正常超时机制（nuclei 加载模板无输出），不作为错误展示
-                if kind != "stale":
+                # needs_verification 需要展示给用户，提醒人工验证
+                if kind not in ("stale",):
                     errors.append({
                         "tool": tool,
                         "target": _target_label(tgt),
@@ -1189,6 +1311,26 @@ class PipelineExecutor:
                                     pass
                         except Exception:
                             pass
+                # 超时/异常后标记目标——打断死循环。
+                # 工具超时且 returncode≠0 时，原逻辑走到 continue 完全跳过标记，
+                # 导致下轮 _count_targets 又找到同目标→再超时→永不退出。
+                # 现在：partial output 有 findings→只标记产出的目标；
+                # 无 findings→标记全部（避免无意义重试）。
+                if not ("abort" in str(exc).lower()):
+                    try:
+                        if batch_ph is not None:
+                            batch_target_labels = [str(label) for label in tgt.get("__batch_labels__", []) if label]
+                            if findings:
+                                finding_labels = _target_labels_from_findings(findings)
+                                labels_to_mark = [l for l in batch_target_labels if l in finding_labels]
+                            else:
+                                labels_to_mark = batch_target_labels
+                            self._mark_scanned_batch(tool, labels_to_mark, len(findings) if findings else 0)
+                        else:
+                            target_label = _target_label(tgt)
+                            self._mark_scanned(tool, target_label, len(findings) if findings else 0)
+                    except Exception:
+                        pass
                 _cleanup_iteration_file()
                 _stdin.close() if _stdin else None
                 try:
@@ -1321,17 +1463,17 @@ class PipelineExecutor:
 
             # 标记已扫描:与 write_batch 同 try 块保证原子性;
             # 即使无 findings 但工具成功(returncode==0),也标记避免永远重扫空目标。
+            #
+            # 修正: returncode==0 不再整批标记。dnsx 处理 100 个子域名只解析出 5 个 IP
+            # 时 returncode 仍是 0,若整批标记则其余 95 个永久失去重扫机会。
+            # 现在:有 finding 只标记真正产出结果的目标;无 finding+exit 0 才整批标记。
             if mark_needed:
                 try:
                     if batch_ph is not None:
                         batch_target_labels = [str(label) for label in tgt.get("__batch_labels__", []) if label]
                         if findings:
                             finding_labels = _target_labels_from_findings(findings)
-                            labels_to_mark = (
-                                [label for label in batch_target_labels if label in finding_labels]
-                                if proc.returncode != 0
-                                else batch_target_labels
-                            )
+                            labels_to_mark = [label for label in batch_target_labels if label in finding_labels]
                         else:
                             labels_to_mark = batch_target_labels
                         self._mark_scanned_batch(tool, labels_to_mark, len(findings) if findings else 0)
@@ -1387,6 +1529,15 @@ class PipelineExecutor:
                              tg=str(_e.get("target", ""))[:200], n=_now)
             except Exception:
                 pass
+        # P7: 工具执行结束后清除 tool_health + active marker，防止前端看到僵尸进程信息
+        try:
+            from graphpt.collector.scheduler import _SCAN_STATE, _SCAN_STATE_LOCK
+            with _SCAN_STATE_LOCK:
+                st = _SCAN_STATE.get(self.asset_id, {})
+                st.pop("tool_health", None)
+        except Exception:
+            pass
+        _clear_active_marker(tool, self.asset_id)
         return result
 
     def _resolve_template(self, template: str) -> str:

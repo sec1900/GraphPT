@@ -64,6 +64,7 @@ class HttpxAdapter(BaseAdapter):
                 "title": obj.get("title", ""),
                 "body_hash": obj.get("hash", {}).get("body_sha256", ""),
                 "content_length": obj.get("content_length", 0),
+                "content_type": obj.get("content_type", ""),
                 "response_headers": obj.get("header", {}),
                 "ssl_cert_cn": ssl_cert_cn,
                 "ssl_cert_issuer": ssl_cert_issuer,

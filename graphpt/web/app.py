@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 from graphpt.common.redis_client import get_redis as _eager_get_redis  # noqa: F401
 from graphpt.collector.neo4j_client import _get_driver as _eager_neo4j_driver  # noqa: F401
 from graphpt.catalog.node_types import NODE_CATALOG as _eager_node_catalog  # noqa: F401
-from graphpt.collector.scheduler import _DEPENDENCY_LAYERS as _eager_layers  # noqa: F401
+from graphpt.collector.scheduler import _DEPENDENCY_LAYERS  # noqa: F401
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -54,6 +54,8 @@ _SEARCH_PATHS: list[tuple[str, str, str]] = [
      "n.secret_type OR n.value_preview", "secret"),
 ]
 
+_web_log = logging.getLogger("graphpt.web")
+
 web_app = FastAPI(title="GraphPT Admin", version="0.1.0")
 
 
@@ -69,9 +71,11 @@ async def _security_headers(request: Request, call_next):
     return resp
 
 
+# ── 启动时自动恢复中断扫描（同进程线程模型）──
+# 进程重启后从 Redis scan:resume:* 恢复未完成的扫描，
+# ScanRun 去重保证已扫内容不会重复执行。
 @web_app.on_event("startup")
 async def _auto_resume_interrupted_scans():
-    """异步恢复中断扫描，不阻塞 worker。"""
     import asyncio
     asyncio.create_task(_try_auto_resume())
 
@@ -80,44 +84,82 @@ async def _try_auto_resume():
     """后台恢复扫描，任何异常不阻断服务器启动。"""
     import asyncio
     try:
-        await asyncio.wait_for(_do_auto_resume(), timeout=10)
+        await asyncio.wait_for(_do_auto_resume(), timeout=15)
     except (asyncio.TimeoutError, Exception):
-        pass  # Redis 不可用 / psutil 慢 / 任何异常都不影响服务器
+        _web_log.warning("auto_resume_startup_failed", exc_info=True)
 
 
 async def _do_auto_resume():
-    import psutil, json as _json
-    existing = set()
-    try:
-        for proc in psutil.process_iter(['pid', 'cmdline']):
-            try:
-                cmd = ' '.join(proc.info['cmdline'] or [])
-                if 'scan_worker' in cmd:
-                    for arg in proc.info['cmdline'] or []:
-                        if not arg.startswith('-') and 'scan_worker' not in arg:
-                            existing.add(arg)
-            except Exception: pass
-    except Exception: pass
+    """从 Redis scan:resume:* 读取中断扫描，在同进程线程池中恢复。
 
+    与旧 subprocess 模型不同：不再 fork scan_worker 子进程，
+    而是提交到 _scan_pool 线程池，进度直接写入 _SCAN_STATE 内存。
+    ScanRun 去重保证幂等——已完成的工具调用不会重复执行。
+    """
+    import json as _json
     import redis as _rds
+
+    # 检查 Redis 可达性
     try:
-        r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=2, socket_timeout=2, decode_responses=True)
+        r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=2,
+                       socket_timeout=2, decode_responses=True)
         r.ping()
     except Exception:
         return  # Redis 不可用，跳过恢复
 
+    import concurrent.futures as _cf
+    global _scan_pool
+
+    resumed = 0
     for key in r.scan_iter(match="scan:resume:*", count=10):
         try:
             data = _json.loads(r.get(key) or "{}")
             asset_id = data.get("asset_id", "")
-            if not asset_id or asset_id in existing: continue
-            r.delete(key)
-            subprocess.Popen(
-                [sys.executable, "-u", "-m", "graphpt.collector.scan_worker", asset_id],
-                env={**os.environ, "GRAPHPT_ASSET_ID": asset_id},
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        except Exception: pass
+            if not asset_id:
+                continue
+
+            # 检查是否已在运行。
+            # 直读 _SCAN_STATE 内存，不信任 scan_state() 的 Redis 回退——
+            # 刚重启时 _SCAN_STATE 为空，Redis 残留数据 600s 内会欺骗 scan_state()
+            # 返回 "scanning"，导致中断扫描永久不被恢复（P0-2）。
+            from graphpt.collector.scheduler import _SCAN_STATE, _SCAN_STATE_LOCK
+            with _SCAN_STATE_LOCK:
+                mem_st = dict(_SCAN_STATE.get(asset_id, {}))
+            if mem_st:
+                if mem_st.get("status") == "scanning":
+                    _web_log.info("auto_resume_skip_already_running asset=%s", asset_id)
+                    continue
+                # done / aborted 说明同进程已完成，不重复恢复
+                if mem_st.get("status") in ("done", "aborted"):
+                    _web_log.info("auto_resume_skip_completed asset=%s status=%s",
+                                  asset_id, mem_st.get("status"))
+                    continue
+            # _SCAN_STATE 无此 asset → 刚重启，必须从 Redis 恢复
+
+            _web_log.info("auto_resume_scan asset=%s round=%s",
+                          asset_id, data.get("round", "?"))
+
+            # 确保线程池存在（max_workers=3 允许最多 3 个资产并发扫描）
+            if _scan_pool is None:
+                _scan_pool = _cf.ThreadPoolExecutor(
+                    max_workers=3, thread_name_prefix="scan"
+                )
+
+            def _bg_resume(aid: str = asset_id):
+                try:
+                    from graphpt.collector.scheduler import run_full_scan
+                    _web_log.info("auto_resume_scan_started asset=%s", aid)
+                    run_full_scan(aid)
+                except Exception:
+                    _web_log.exception("auto_resume_scan_crashed asset=%s", aid)
+
+            _scan_pool.submit(_bg_resume)
+            resumed += 1
+        except Exception:
+            _web_log.warning("auto_resume_key_failed key=%s", key, exc_info=True)
+
+    if resumed:
+        _web_log.info("auto_resume_complete resumed=%d", resumed)
 
 # 采集产物（403 绕过数据包等）静态服务：BypassResult.packet_url 指向 /artifacts/...
 # 浏览器直接打开即可查看原始请求/响应数据包。
@@ -310,6 +352,156 @@ async def health():
 
 
 # ============================================================
+# System Resources API — Dashboard 实时资源监控
+# ============================================================
+
+def _system_cpu() -> dict[str, Any]:
+    try:
+        import psutil
+        return {
+            "percent": round(psutil.cpu_percent(interval=0.5), 1),
+            "cores": psutil.cpu_count(logical=True),
+            "per_core": [round(x, 1) for x in psutil.cpu_percent(interval=0.1, percpu=True)],
+        }
+    except Exception:
+        return {"percent": 0, "cores": 0, "per_core": []}
+
+
+def _system_memory() -> dict[str, Any]:
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        return {
+            "total_gb": round(mem.total / (1024**3), 1),
+            "available_gb": round(mem.available / (1024**3), 1),
+            "used_gb": round((mem.total - mem.available) / (1024**3), 1),
+            "percent": mem.percent,
+        }
+    except Exception:
+        return {"total_gb": 0, "available_gb": 0, "used_gb": 0, "percent": 0}
+
+
+def _system_disk() -> dict[str, Any]:
+    try:
+        import psutil
+        path = _PROJECT_ROOT.anchor
+        usage = psutil.disk_usage(str(_PROJECT_ROOT))
+        return {
+            "total_gb": round(usage.total / (1024**3), 1),
+            "used_gb": round(usage.used / (1024**3), 1),
+            "free_gb": round(usage.free / (1024**3), 1),
+            "percent": usage.percent,
+            "path": path,
+        }
+    except Exception:
+        return {"total_gb": 0, "used_gb": 0, "free_gb": 0, "percent": 0, "path": ""}
+
+
+def _detect_tool_processes() -> list[dict[str, Any]]:
+    """扫描系统中正在运行的工具进程（靠进程名匹配 tools/ 目录下的二进制）。"""
+    try:
+        import psutil
+    except Exception:
+        return []
+
+    tool_names: set[str] = set()
+    tools_cfg = _collector_tools_config()
+    for name in tools_cfg:
+        tool_names.add(name.lower())
+        tool_names.add(f"{name}.exe".lower())
+
+    procs: list[dict[str, Any]] = []
+    try:
+        for proc in psutil.process_iter(["pid", "name", "memory_info", "cpu_percent",
+                                          "create_time", "cmdline"]):
+            try:
+                info = proc.info
+                pname = (info.get("name") or "").lower()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+            matched_tool = ""
+            for tn in tool_names:
+                if tn in pname or pname.startswith(tn.replace(".exe", "")):
+                    matched_tool = tn.replace(".exe", "")
+                    break
+            if not matched_tool:
+                continue
+
+            mem = info.get("memory_info")
+            mem_mb = round(mem.rss / (1024 * 1024), 1) if mem else 0
+
+            create_time = info.get("create_time")
+            elapsed_s = int(time.time() - create_time) if create_time else 0
+
+            cmdline = info.get("cmdline") or []
+            cmdline_str = " ".join(str(x) for x in cmdline[:5])[:200] if cmdline else ""
+
+            procs.append({
+                "tool": matched_tool,
+                "pid": info["pid"],
+                "mem_mb": mem_mb,
+                "cpu_percent": round(info.get("cpu_percent") or 0, 1),
+                "elapsed_s": elapsed_s,
+                "cmdline": cmdline_str,
+            })
+    except Exception:
+        pass
+
+    procs.sort(key=lambda p: p["mem_mb"], reverse=True)
+    return procs
+
+
+@web_app.get("/api/system/resources")
+async def system_resources():
+    """系统资源监控 + 工具进程实况。Dashboard 自动轮询。
+    缓存 3s——资源数据变化快，但避免前端每秒都打 psutil。
+    """
+    cache_key = "sys_res"
+    cached = _cached(cache_key, ttl=3)
+    if cached:
+        return cached
+
+    import concurrent.futures as _hf
+
+    with _hf.ThreadPoolExecutor(max_workers=4) as pool:
+        f_cpu = pool.submit(_system_cpu)
+        f_mem = pool.submit(_system_memory)
+        f_disk = pool.submit(_system_disk)
+        f_tools = pool.submit(_detect_tool_processes)
+
+        cpu = f_cpu.result(timeout=3)
+        mem = f_mem.result(timeout=3)
+        disk = f_disk.result(timeout=3)
+        tools = f_tools.result(timeout=5)
+
+    # 内存压力（来自 scheduler）
+    pressure = False
+    try:
+        from graphpt.collector.scheduler import _memory_pressure
+        pressure = _memory_pressure()
+    except Exception:
+        pass
+
+    total_tool_mem = sum(t["mem_mb"] for t in tools)
+
+    result = {
+        "ok": True,
+        "data": {
+            "cpu": cpu,
+            "memory": mem,
+            "disk": disk,
+            "tool_processes": tools,
+            "tool_count": len(tools),
+            "tool_mem_total_mb": round(total_tool_mem, 1),
+            "memory_pressure": pressure,
+        },
+    }
+    _cache_set(cache_key, result)
+    return result
+
+
+# ============================================================
 # Dashboard API
 # ============================================================
 
@@ -351,8 +543,7 @@ async def dashboard_severity(asset_id: str = "default"):
         rows = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL {
-              WITH a
+            CALL (a) {
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
                     -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
                     -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
@@ -368,6 +559,9 @@ async def dashboard_severity(asset_id: str = "default"):
               UNION
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
                     -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+              RETURN v
+              UNION
+              MATCH (v:Vulnerability {asset_id: $aid})
               RETURN v
             }
             WITH DISTINCT v
@@ -398,7 +592,7 @@ async def dashboard_endpoints(asset_id: str = "default", limit: int = 15):
         rows = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {
+            CALL (a) {
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
               RETURN ep
               UNION
@@ -425,7 +619,7 @@ async def dashboard_recent(asset_id: str = "default", limit: int = 10):
         changes = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {
+            CALL (a) {
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
               WHERE ep.changed_at IS NOT NULL
               RETURN ep.url AS url, ep.title AS title, ep.changed_at AS ts, ep.changed_fields AS fields
@@ -470,19 +664,19 @@ async def dashboard(asset_id: str = "default"):
             "subdomains": "MATCH (:Asset {id: $aid})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(n:Subdomain) RETURN count(n) AS c",
             "ips": """
                 MATCH (a:Asset {id: $aid})
-                CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip
+                CALL (a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip
                        UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip }
                 RETURN count(DISTINCT ip) AS c
             """,
             "ports": """
                 MATCH (a:Asset {id: $aid})
-                CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p:Port) RETURN p
+                CALL (a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p:Port) RETURN p
                        UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(p:Port) RETURN p }
                 RETURN count(DISTINCT p) AS c
             """,
             "http_endpoints": """
                 MATCH (a:Asset {id: $aid})
-                CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep
+                CALL (a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep
                        UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep }
                 RETURN count(DISTINCT ep) AS c
             """,
@@ -495,7 +689,7 @@ async def dashboard(asset_id: str = "default"):
         rows = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {
+            CALL (a) {
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
                     -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
               RETURN ep
@@ -516,7 +710,7 @@ async def dashboard(asset_id: str = "default"):
         rows = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip
+            CALL (a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip
                    UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip }
             WITH DISTINCT ip
             OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
@@ -535,7 +729,7 @@ async def dashboard(asset_id: str = "default"):
         rows = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep
+            CALL (a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep
                    UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep }
             WITH DISTINCT ep
             OPTIONAL MATCH (ep)-[:EXPOSES_PATH]->(d:DirEntry)
@@ -558,7 +752,7 @@ async def dashboard(asset_id: str = "default"):
         rows = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {
+            CALL (a) {
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
                     -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
               RETURN ep
@@ -794,8 +988,7 @@ async def delete_asset(asset_id: str):
         result = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL {
-              WITH a
+            CALL (a) {
               OPTIONAL MATCH (a)-[:HAS_ROOT]->(r:RootDomain)
               OPTIONAL MATCH (r)-[:HAS_SUB]->(s:Subdomain)
               OPTIONAL MATCH (s)-[:RESOLVES_TO]->(ip:IP)
@@ -830,8 +1023,7 @@ async def delete_asset(asset_id: str):
                      collect(DISTINCT api) + collect(DISTINCT api2) + collect(DISTINCT api3) + collect(DISTINCT api4)
                      AS domain_nodes
             }
-            CALL {
-              WITH a
+            CALL (a) {
               OPTIONAL MATCH (a)-[:HAS_IP]->(ip:IP)
               OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
               OPTIONAL MATCH (p)-[:EXPOSES]->(ep:HTTPEndpoint)
@@ -849,8 +1041,7 @@ async def delete_asset(asset_id: str):
                      collect(DISTINCT byp) + collect(DISTINCT api) + collect(DISTINCT api2)
                      AS ip_nodes
             }
-            CALL {
-              WITH a
+            CALL (a) {
               OPTIONAL MATCH (a)-[:HAS_ICP]->(icp:ICPRecord)
               RETURN collect(DISTINCT icp) AS icp_nodes
             }
@@ -1620,7 +1811,7 @@ async def list_surfaces_ips(asset_id: str = "default", page: int = 1, per_page: 
         rows = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {
+            CALL (a) {
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)-[:RESOLVES_TO]->(ip:IP)
               OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
               RETURN ip, collect(DISTINCT s.value) AS subdomains, collect(DISTINCT p.number) AS ports
@@ -1641,7 +1832,7 @@ async def list_surfaces_ips(asset_id: str = "default", page: int = 1, per_page: 
         total_rows = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip
+            CALL (a) {  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip
                    UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip }
             RETURN count(DISTINCT ip) AS c
             """,
@@ -1693,7 +1884,7 @@ async def list_surfaces_endpoints(
         rows = _neo4j_query(
             f"""
             MATCH (a:Asset {{id: $aid}})
-            CALL (a, a) {{
+            CALL (a) {{
               WITH a
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
                     -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
@@ -1720,7 +1911,7 @@ async def list_surfaces_endpoints(
         total_rows = _neo4j_query(
             f"""
             MATCH (a:Asset {{id: $aid}})
-            CALL (a, a) {{
+            CALL (a) {{
               WITH a
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
                     -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
@@ -1788,7 +1979,7 @@ async def list_vulnerabilities(
 
         base_match = """
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {
+            CALL (a) {
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)
                     -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
                     -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
@@ -1805,6 +1996,10 @@ async def list_vulnerabilities(
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
                     -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
               OPTIONAL MATCH (s)-[:EXPOSES]->(ep:HTTPEndpoint)
+              RETURN ep, v
+              UNION
+              MATCH (v:Vulnerability {asset_id: $aid})
+              OPTIONAL MATCH (v)<-[:MAY_BE_VULNERABLE_TO]-(ep:HTTPEndpoint)
               RETURN ep, v
             }
             WITH DISTINCT v, ep
@@ -2029,7 +2224,7 @@ def _graph_ports_for_ip(asset_id: str, ip: str) -> list[int]:
     rows = _neo4j_query(
         """
         MATCH (a:Asset {id: $asset_id})
-        CALL (a, a) {
+        CALL (a) {
           MATCH (a)-[:HAS_IP]->(ip:IP {value: $ip})
           RETURN ip
           UNION
@@ -2311,8 +2506,8 @@ async def global_search(q: str = "", asset_id: str = "default", limit: int = 15)
         _safe_q = re.escape(q.strip()[:120])
         p = f".*{_safe_q}.*"
         subs = _neo4j_query("MATCH (:Asset {id:$aid})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain) WHERE s.value=~$p RETURN s.value AS v LIMIT $lim", aid=asset_id, p=p, lim=limit)
-        ips = _neo4j_query("MATCH (a:Asset {id:$aid}) CALL (a, a) { MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip } WITH DISTINCT ip WHERE ip.value=~$p RETURN ip.value AS v LIMIT $lim", aid=asset_id, p=p, lim=limit)
-        eps = _neo4j_query("MATCH (a:Asset {id:$aid}) CALL (a, a) { MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep } WITH DISTINCT ep WHERE ep.url=~$p RETURN ep.url AS url, ep.status_code AS sc, ep.title AS t LIMIT $lim", aid=asset_id, p=p, lim=limit)
+        ips = _neo4j_query("MATCH (a:Asset {id:$aid}) CALL (a) { MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP) RETURN ip UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip } WITH DISTINCT ip WHERE ip.value=~$p RETURN ip.value AS v LIMIT $lim", aid=asset_id, p=p, lim=limit)
+        eps = _neo4j_query("MATCH (a:Asset {id:$aid}) CALL (a) { MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep } WITH DISTINCT ep WHERE ep.url=~$p RETURN ep.url AS url, ep.status_code AS sc, ep.title AS t LIMIT $lim", aid=asset_id, p=p, lim=limit)
         return {"ok": True, "data": {
             "subdomains": [{"value":r["v"]} for r in subs],
             "ips": [{"value":r["v"]} for r in ips],
@@ -2332,11 +2527,11 @@ async def node_detail(node_id: str):
     try:
         rows = _neo4j_query("""
             MATCH (n) WHERE n.id = $nid
-            CALL (n, n) { OPTIONAL MATCH (n)-[:HAS_PORT]->(p:Port) RETURN collect(DISTINCT {id: p.id, number: p.number, protocol: p.protocol})[..20] AS ports }
-            CALL (n, n) { OPTIONAL MATCH (n)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN collect(DISTINCT {url: ep.url, status: ep.status_code, title: ep.title})[..20] AS endpoints }
-            CALL (n, n) { OPTIONAL MATCH (n)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability) RETURN collect(DISTINCT {title: v.title, severity: v.severity, type: v.type})[..20] AS vulns }
-            CALL (n, n) { OPTIONAL MATCH (n)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(:HTTPEndpoint)-[:MAY_CONTAIN]->(s:Secret) RETURN collect(DISTINCT {type: s.secret_type, preview: s.value_preview})[..10] AS secrets }
-            CALL (n, n) { OPTIONAL MATCH (n)-[:HAS_CREDENTIAL]->(c:Credential) RETURN collect(DISTINCT {service: c.service, cred_type: c.cred_type})[..10] AS creds }
+            CALL (n) { OPTIONAL MATCH (n)-[:HAS_PORT]->(p:Port) RETURN collect(DISTINCT {id: p.id, number: p.number, protocol: p.protocol})[..20] AS ports }
+            CALL (n) { OPTIONAL MATCH (n)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN collect(DISTINCT {url: ep.url, status: ep.status_code, title: ep.title})[..20] AS endpoints }
+            CALL (n) { OPTIONAL MATCH (n)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability) RETURN collect(DISTINCT {title: v.title, severity: v.severity, type: v.type})[..20] AS vulns }
+            CALL (n) { OPTIONAL MATCH (n)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(:HTTPEndpoint)-[:MAY_CONTAIN]->(s:Secret) RETURN collect(DISTINCT {type: s.secret_type, preview: s.value_preview})[..10] AS secrets }
+            CALL (n) { OPTIONAL MATCH (n)-[:HAS_CREDENTIAL]->(c:Credential) RETURN collect(DISTINCT {service: c.service, cred_type: c.cred_type})[..10] AS creds }
             RETURN n, ports, endpoints, vulns, secrets, creds
         """, nid=node_id)
         if not rows: raise HTTPException(404, "node not found")
@@ -2359,7 +2554,23 @@ async def node_detail(node_id: str):
 
 @web_app.get("/api/errors")
 async def list_errors(asset_id: str = "default", limit: int = 50):
-    """返回最近错误日志。"""
+    """返回最近错误日志 + 自动清理过期错误。"""
+    _ERROR_TTL_HOURS = int(os.getenv("GRAPHPT_ERROR_TTL_HOURS", "24"))
+    _cleaned = 0
+    try:
+        # 自动清理过期错误（超过 TTL 的 ErrorLog 节点）
+        if _ERROR_TTL_HOURS > 0:
+            import time as _err_time
+            _cutoff_epoch = _err_time.time() - _ERROR_TTL_HOURS * 3600
+            _cutoff = datetime.fromtimestamp(_cutoff_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            _del = _neo4j_query(
+                "MATCH (el:ErrorLog) WHERE el.asset_id = $aid AND el.created_at < $cutoff "
+                "DETACH DELETE el RETURN count(el) AS c",
+                aid=asset_id, cutoff=_cutoff,
+            )
+            _cleaned = _del[0]["c"] if _del else 0
+    except Exception:
+        pass
     try:
         rows = _neo4j_query("""
             MATCH (el:ErrorLog)
@@ -2372,7 +2583,7 @@ async def list_errors(asset_id: str = "default", limit: int = 50):
             "tool": r["tool"], "kind": r["kind"],
             "message": r["message"], "target": r["target"],
             "time": r["ts"],
-        } for r in rows]}
+        } for r in rows], "cleaned": _cleaned}
     except Exception as exc:
         return _json_error(exc)
 
@@ -2415,13 +2626,17 @@ async def scan_start(body: dict | None = None):
         import concurrent.futures as _cf
         global _scan_pool
         if _scan_pool is None:
-            _scan_pool = _cf.ThreadPoolExecutor(max_workers=1, thread_name_prefix="scan")
+            _scan_pool = _cf.ThreadPoolExecutor(max_workers=3, thread_name_prefix="scan")
 
         def _bg_scan():
             try:
-                run_full_scan(asset_id)
+                _web_log.info("scan_thread_start asset=%s", asset_id)
+                result = run_full_scan(asset_id)
+                _web_log.info("scan_thread_done asset=%s status=%s",
+                              asset_id, result.get("status", "?"))
             except Exception:
-                pass  # run_full_scan 内部已打日志
+                # run_full_scan 内部已捕获大多数异常，这是最后的安全网
+                _web_log.exception("scan_thread_crashed asset=%s", asset_id)
 
         _scan_pool.submit(_bg_scan)
         return {"ok": True, "data": {"status": "started", "asset_id": asset_id,
@@ -2438,6 +2653,110 @@ async def scan_state_endpoint(asset_id: str = "default"):
         return {"ok": True, "data": scan_state(asset_id)}
     except Exception as exc:
         return _json_error(exc)
+
+
+@web_app.get("/api/scan/running")
+async def scan_running():
+    """返回所有资产的运行中扫描任务列表 + 每层工具进度（Dashboard 运行中任务面板）。"""
+    import time as _time
+    tasks: list[dict[str, Any]] = []
+
+    try:
+        from graphpt.collector.scheduler import _SCAN_STATE, _SCAN_STATE_LOCK, _DEPENDENCY_LAYERS as _LAYERS
+        from graphpt.common.redis_client import get_redis as _get_redis_run
+
+        # 收集所有 scanning 状态的资产
+        with _SCAN_STATE_LOCK:
+            _scanning = [(aid, dict(st)) for aid, st in _SCAN_STATE.items()
+                         if st.get("status") == "scanning"]
+        if not _scanning:
+            return {"ok": True, "data": {"tasks": [], "total": 0}}
+
+        # 查资产名（Neo4j）
+        _asset_names: dict[str, str] = {}
+        # 查每资产每工具的 ScanRun 计数（按本轮扫描开始时间过滤）
+        _scan_runs: dict[str, dict[str, int]] = {}  # asset_id → {tool: count}
+        try:
+            from graphpt.collector.neo4j_client import _get_driver
+            _drv = _get_driver()
+            with _drv.session() as _s:
+                for _rec in _s.run("MATCH (a:Asset) WHERE a.id IN $ids RETURN a.id, a.name",
+                                   ids=[aid for aid, _ in _scanning]):
+                    _asset_names[_rec["a.id"]] = _rec.get("a.name", _rec["a.id"])
+                # 批量查 ScanRun — UNWIND 每资产的 start 时间，过滤历史结果
+                _filters = []
+                for _aid, _st in _scanning:
+                    _start_ep = _st.get("started_at")
+                    if _start_ep:
+                        _start_iso = datetime.fromtimestamp(_start_ep, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                        _filters.append({"aid": _aid, "start": _start_iso})
+                if _filters:
+                    for _rec in _s.run(
+                        "UNWIND $filters AS f "
+                        "MATCH (sr:ScanRun {asset_id: f.aid}) "
+                        "WHERE sr.last_run_at >= f.start "
+                        "RETURN sr.asset_id AS aid, sr.tool AS t, count(sr) AS c",
+                        filters=_filters):
+                        _aid = _rec["aid"]
+                        if _aid not in _scan_runs:
+                            _scan_runs[_aid] = {}
+                        _scan_runs[_aid][_rec["t"]] = _rec["c"]
+        except Exception:
+            pass
+
+        # 查活跃工具（Redis，按 asset 隔离）
+        _active_by_asset: dict[str, list[str]] = {}
+        try:
+            _rr = _get_redis_run(decode_responses=True, socket_connect_timeout=1)
+            _rr.ping()
+            for _aid, _ in _scanning:
+                _tools = []
+                for _k in _rr.keys(f"tool:active:{_aid}:*"):
+                    _tools.append(_k.replace(f"tool:active:{_aid}:", ""))
+                _active_by_asset[_aid] = _tools
+        except Exception:
+            pass
+
+        _now = _time.time()
+        for _aid, _st in _scanning:
+            _started = _st.get("started_at", 0)
+            _active_tools = _active_by_asset.get(_aid, [])
+            _runs = _scan_runs.get(_aid, {})
+
+            # 构建层进度
+            _layers_progress = []
+            for _spec in _LAYERS:
+                _ltools = []
+                for _t in _spec["tools"]:
+                    _base = _t.split(":", 1)[0]
+                    _ltools.append({
+                        "tool": _t,
+                        "scans": _runs.get(_t, _runs.get(_base, 0)),
+                        "active": _t in _active_tools or _base in _active_tools,
+                    })
+                _layers_progress.append({
+                    "layer": _spec["layer"],
+                    "node": _spec["node"],
+                    "tools": _ltools,
+                })
+
+            tasks.append({
+                "asset_id": _aid,
+                "asset_name": _asset_names.get(_aid, _aid),
+                "status": "scanning",
+                "current_layer": _st.get("layer"),
+                "current_tool": _st.get("tool"),
+                "tools_done": _st.get("tools_done", 0),
+                "tools_total": _st.get("tools_total", 0),
+                "elapsed_s": int(_now - _started) if _started else 0,
+                "started_at": _st.get("started_at"),
+                "active_tools": _active_tools,
+                "layers": _layers_progress,
+            })
+    except Exception:
+        pass
+
+    return {"ok": True, "data": {"tasks": tasks, "total": len(tasks)}}
 
 
 @web_app.get("/api/scan/completed")
@@ -2573,11 +2892,14 @@ async def generate_report(asset_id: str = "default", format: str = "markdown"):
         # 查询该资产下所有漏洞（按 title+type 聚合，去重）
         rows = _neo4j_query("""
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {
+            CALL (a) {
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[*1..5]->(v:Vulnerability)
               RETURN v
               UNION
               MATCH (a)-[:HAS_IP]->(:IP)-[*1..4]->(v:Vulnerability)
+              RETURN v
+              UNION
+              MATCH (v:Vulnerability {asset_id: $aid})
               RETURN v
             }
             WITH DISTINCT v
@@ -2786,27 +3108,51 @@ async def scan_progress(asset_id: str = "default"):
 
     import redis as _rds
     try:
-        # 活跃标记（Redis）
+        # 活跃标记（Redis）— 按 asset 隔离: tool:active:{asset_id}:{tool}
         active_tools: list[str] = []
         try:
             from graphpt.common.redis_client import get_redis
             _r = get_redis(decode_responses=True, socket_connect_timeout=1)
             _r.ping()
+            # 新格式（asset-scoped）
+            _prefix = f"tool:active:{asset_id}:"
+            for k in _r.keys(f"{_prefix}*"):
+                active_tools.append(k.replace(_prefix, ""))
+            # 兼容旧格式（无 asset 前缀，300s TTL 自动淘汰）
             for k in _r.keys("tool:active:*"):
-                active_tools.append(k.replace("tool:active:", ""))
+                _tool = k.replace("tool:active:", "")
+                if ":" not in _tool and _tool not in active_tools:
+                    active_tools.append(_tool)
         except Exception:
             pass
 
-        # ScanRun 计数（Neo4j——可能因同进程扫描争抢连接而超时，失败不阻断）
+        # ScanRun 计数 — 按本轮扫描开始时间过滤，避免新旧结果混显
         runs: dict[str, int] = {}
+        _scan_start_iso: str | None = None
+        try:
+            from graphpt.collector.scheduler import _SCAN_STATE as _st_state, _SCAN_STATE_LOCK as _st_lock
+            with _st_lock:
+                _start_epoch = _st_state.get(asset_id, {}).get("started_at")
+            if _start_epoch:
+                _scan_start_iso = datetime.fromtimestamp(_start_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            pass
         try:
             from graphpt.collector.neo4j_client import _get_driver
             d = _get_driver()
             with d.session() as s:
-                runs = {r["t"]: r["c"] for r in s.run(
-                    "MATCH (sr:ScanRun {asset_id: $aid}) RETURN sr.tool AS t, count(sr) AS c",
-                    aid=asset_id,
-                )}
+                if _scan_start_iso:
+                    runs = {r["t"]: r["c"] for r in s.run(
+                        "MATCH (sr:ScanRun {asset_id: $aid}) "
+                        "WHERE sr.last_run_at >= $start "
+                        "RETURN sr.tool AS t, count(sr) AS c",
+                        aid=asset_id, start=_scan_start_iso,
+                    )}
+                else:
+                    runs = {r["t"]: r["c"] for r in s.run(
+                        "MATCH (sr:ScanRun {asset_id: $aid}) RETURN sr.tool AS t, count(sr) AS c",
+                        aid=asset_id,
+                    )}
         except Exception:
             pass
 
@@ -3066,7 +3412,7 @@ async def graph_data(asset_id: str = "default"):
         rows = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {
+            CALL (a) {
               MATCH (a)-[r]->(n)
               RETURN a AS src, r, n AS tgt
               UNION
@@ -3117,7 +3463,7 @@ async def api_changes(asset_id: str = "default", since: str = "", limit: int = 5
         new_nodes = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {
+            CALL (a) {
               MATCH (a)-[:HAS_ROOT]->(r:RootDomain) WHERE r.created_at > $since
               RETURN r.id AS id, r.value AS value, 'RootDomain' AS type, r.created_at AS discovered_at
               UNION ALL
@@ -3145,7 +3491,7 @@ async def api_changes(asset_id: str = "default", since: str = "", limit: int = 5
         prop_changes = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {
+            CALL (a) {
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
               RETURN ep
               UNION
@@ -3491,8 +3837,9 @@ async def api_agent_prompt_put(request: Request):
 # ============================================================
 
 @web_app.get("/api/logs/active")
-def active_tool_logs():
-    """返回当前活跃工具及最新日志（Logs 面板自动展示）。"""
+def active_tool_logs(asset_id: str = ""):
+    """返回当前活跃工具及最新日志（Logs 面板自动展示）。
+    可选 asset_id 过滤特定资产的活跃工具。"""
     import redis as _rds
     from pathlib import Path as _Path
     _PROJECT_ROOT = _Path(__file__).resolve().parent.parent.parent
@@ -3507,8 +3854,17 @@ def active_tool_logs():
 
     active = []
     for k in keys:
-        tool = k.replace("tool:active:", "")
-        asset_id = _r.get(k) or ""
+        _suffix = k.replace("tool:active:", "")
+        # 新格式 tool:active:{asset_id}:{tool}，旧格式 tool:active:{tool}
+        if ":" in _suffix:
+            _parts = _suffix.split(":", 1)
+            _aid, tool = _parts[0], _parts[1]
+        else:
+            tool = _suffix
+            _aid = _r.get(k) or ""
+        # 按 asset_id 过滤（兼容旧格式：无 asset 前缀时 _aid 来自 Redis value）
+        if asset_id and _aid != asset_id:
+            continue
         logs_dir = _PROJECT_ROOT / "data" / "logs" / tool
         latest = None
         if logs_dir.is_dir():
@@ -3526,7 +3882,7 @@ def active_tool_logs():
                     }
                 except Exception:
                     pass
-        active.append({"tool": tool, "asset_id": asset_id, "latest_log": latest})
+        active.append({"tool": tool, "asset_id": _aid, "latest_log": latest})
 
     return {"ok": True, "data": active}
 
@@ -3621,11 +3977,14 @@ def scan_alerts(asset_id: str = "default", severity: str = "high"):
     try:
         rows = _neo4j_query("""
             MATCH (a:Asset {id: $aid})
-            CALL (a, a) {
+            CALL (a) {
               MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[*1..5]->(v:Vulnerability)
               RETURN v
               UNION
               MATCH (a)-[:HAS_IP]->(:IP)-[*1..4]->(v:Vulnerability)
+              RETURN v
+              UNION
+              MATCH (v:Vulnerability {asset_id: $aid})
               RETURN v
             }
             WITH DISTINCT v

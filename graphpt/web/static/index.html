@@ -61,9 +61,52 @@
     </div>
     <div id="scan-progress-bar" style="display:none;margin:0 0 16px 0;padding:10px 16px;background:var(--surface);border:1px solid var(--border);border-radius:6px">
       <div style="font-size:12px;color:var(--accent);margin-bottom:6px">Scan running...</div>
+      <div id="scan-verif-warning" style="display:none;margin:0 0 8px 0;padding:8px 12px;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;font-size:12px;color:#856404">
+        ⚠ <b>Verification needed:</b> <span id="scan-verif-tool"></span> requires browser verification.
+        <span style="font-size:10px;color:#997404;margin-left:4px" id="scan-verif-waiting"></span>
+      </div>
       <div id="scan-progress-layers" style="font-size:11px;color:var(--muted)"></div>
     </div>
+    <div id="running-tasks-panel" class="running-tasks" style="display:none">
+      <div class="section-title" style="cursor:pointer" onclick="var p=document.getElementById('running-tasks-panel');var d=document.getElementById('running-tasks-detail');var s=p.dataset.expanded==='1'?'0':'1';p.dataset.expanded=s;d.style.display=s==='0'?'none':'';this.querySelector('span').textContent=s==='0'?'▶':'▼';">
+        <span>▼</span> Running Tasks <span id="running-tasks-count" style="font-size:11px;color:var(--muted);font-weight:400"></span>
+      </div>
+      <div id="running-tasks-detail">
+        <table style="font-size:11px;width:100%"><thead><tr>
+          <th style="width:16px"></th><th>Asset</th><th>Layer</th><th>Tool</th><th>Progress</th><th>Elapsed</th><th></th>
+        </tr></thead><tbody id="running-tasks-tbody"></tbody></table>
+      </div>
+    </div>
     <div class="card-grid" id="dash-cards"></div>
+    <div id="sys-resources" class="sys-resources" style="display:none">
+      <div class="section-title" style="margin-bottom:8px">
+        System Resources <span style="font-size:10px;color:var(--muted);font-weight:400">(auto 5s)</span>
+        <span style="font-size:11px;color:var(--red);margin-left:8px;display:none" id="sys-pressure-badge">⚠ Memory Pressure</span>
+      </div>
+      <div class="res-bars">
+        <div class="res-bar-item">
+          <div class="res-bar-label">CPU <span id="sys-cpu-pct">—</span>%</div>
+          <div class="res-bar-track"><div class="res-bar-fill cpu-fill" id="sys-cpu-bar" style="width:0%"></div></div>
+          <div class="res-bar-cores" id="sys-cpu-cores"></div>
+        </div>
+        <div class="res-bar-item">
+          <div class="res-bar-label">MEM <span id="sys-mem-pct">—</span>%</div>
+          <div class="res-bar-track"><div class="res-bar-fill mem-fill" id="sys-mem-bar" style="width:0%"></div></div>
+          <div class="res-bar-detail" id="sys-mem-detail"></div>
+        </div>
+        <div class="res-bar-item">
+          <div class="res-bar-label">DISK <span id="sys-disk-pct">—</span>%</div>
+          <div class="res-bar-track"><div class="res-bar-fill disk-fill" id="sys-disk-bar" style="width:0%"></div></div>
+          <div class="res-bar-detail" id="sys-disk-detail"></div>
+        </div>
+      </div>
+      <div id="sys-tool-procs" style="display:none;margin-top:12px">
+        <div class="section-title" style="font-size:12px;margin-bottom:6px">Tool Processes <span style="font-size:10px;color:var(--muted);font-weight:400" id="sys-tool-count"></span></div>
+        <table style="font-size:11px"><thead><tr>
+          <th>Tool</th><th>PID</th><th>Memory</th><th>CPU</th><th>Elapsed</th>
+        </tr></thead><tbody id="sys-tool-tbody"></tbody></table>
+      </div>
+    </div>
     <div class="section" id="dash-severity-section" style="display:none">
       <div class="section-title" style="cursor:pointer" onclick="var s=document.getElementById('dash-severity-section');s.dataset.expanded=s.dataset.expanded==='1'?'0':'1';document.getElementById('sev-chart').style.display=s.dataset.expanded==='0'?'none':'';this.querySelector('span').textContent=s.dataset.expanded==='0'?'▶':'▼';">
         <span>▼</span> Vulnerability Severity Distribution

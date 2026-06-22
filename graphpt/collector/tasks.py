@@ -212,13 +212,14 @@ def _run_single_tool_pipeline(
     asset_id: str,
     stage_name: str = "",
     params: dict[str, str] | None = None,
+    command: str | None = None,
 ) -> dict:
     """通过 PipelineExecutor 运行单工具任务，避免任务层维护第二套扫描逻辑。"""
     from graphpt.collector.pipeline import PipelineExecutor, _tool_command
     target_overrides = {tool: targets} if targets else None
 
     executor = PipelineExecutor(
-        {"stages": [{"name": stage_name or tool, "tool": tool, "command": _tool_command(tool)}]},
+        {"stages": [{"name": stage_name or tool, "tool": tool, "command": command or _tool_command(tool)}]},
         asset_id=asset_id,
         params=params,
         target_overrides=target_overrides,

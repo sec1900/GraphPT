@@ -127,6 +127,10 @@ class GraphWriter:
     def __init__(self, driver: GraphDatabase.driver) -> None:
         self._driver = driver
 
+    @staticmethod
+    def _now() -> str:
+        return _now_iso()
+
     def _acquire_session(self, _session: Any = None) -> Any:
         """复用外部 session 或创建新的。
 
@@ -407,7 +411,9 @@ class GraphWriter:
         protocol: str = "tcp",
         *,
         service_name: str = "",
-        source: str = "", _session: Any | None = None) -> dict[str, Any]:
+        source: str = "",
+        asset_id: str = "",
+        _session: Any | None = None) -> dict[str, Any]:
         """写入 Port 节点，可附带 Service 节点。"""
         port_id = f"port:{ip_id}:{port}/{protocol}"
         service_id = f"svc:{ip_id}:{port}/{protocol}"
@@ -468,6 +474,7 @@ class GraphWriter:
         title: str = "",
         body_hash: str = "",
         content_length: int = 0,
+        content_type: str = "",
         response_headers: dict[str, str] | None = None,
         ssl_cert_cn: str = "",
         ssl_cert_issuer: str = "",
@@ -528,6 +535,7 @@ class GraphWriter:
                     e.url = $url, e.method = $method,
                     e.status_code = $status_code, e.title = $title,
                     e.body_hash = $body_hash, e.content_length = $content_length,
+                    e.content_type = $content_type,
                     e.response_headers = $headers, e.ssl_cert_cn = $ssl_cert_cn,
                     e.ssl_cert_issuer = $ssl_cert_issuer, e.tech = $tech,
                     e.crawl_status = $crawl_status, e.first_seen_at = $now,
@@ -536,6 +544,7 @@ class GraphWriter:
                   ON MATCH SET
                     e.status_code = $status_code, e.title = $title,
                     e.body_hash = $body_hash, e.content_length = $content_length,
+                    e.content_type = $content_type,
                     e.response_headers = $headers,
                     e.ssl_cert_cn = $ssl_cert_cn, e.crawl_status = $crawl_status,
                     e.url_fragment = $url_fragment, e.last_seen_at = $now
@@ -565,6 +574,7 @@ class GraphWriter:
                 title=title,
                 body_hash=body_hash,
                 content_length=content_length,
+                content_type=content_type,
                 headers=[f"{k}: {v}" for k, v in headers.items()],
                 ssl_cert_cn=ssl_cert_cn,
                 ssl_cert_issuer=ssl_cert_issuer,
@@ -609,22 +619,36 @@ class GraphWriter:
         tags: str = "",
         evidence: str = "",
         url: str = "",
-        source: str = "", _session: Any | None = None) -> dict[str, Any]:
-        """写入 Vulnerability 节点，关联到 HTTPEndpoint 和 Subdomain。"""
+        source: str = "",
+        asset_id: str = "",
+        _session: Any | None = None) -> dict[str, Any]:
+        """写入 Vulnerability 节点，关联到 HTTPEndpoint 和 Subdomain。
+
+        Subdomain 通过 Asset→RootDomain→Subdomain 完整链连接，
+        不再创建孤儿子域名（修复 severity dashboard 查询丢失漏洞）。
+        """
         import hashlib
 
         identity = "|".join([endpoint_id, vuln_type, title, severity])
         vuln_id = f"vuln:{hashlib.md5(identity.encode()).hexdigest()[:16]}"
         now = _now_iso()
 
-        # 从 endpoint_id 提取 hostname 用于关联 Subdomain
+        # 从 endpoint_id 提取 hostname，并推导 root_domain
         host = ""
+        root_domain = ""
         if endpoint_id.startswith("ep:"):
             parts = endpoint_id.split(":", 2)
             if len(parts) >= 3 and parts[2]:
                 from urllib.parse import urlparse
                 parsed = urlparse(parts[2])
                 host = (parsed.hostname or "").strip().lower()
+                # 推导根域名（取最后两段，单标签/纯 IP 跳过）
+                if host and not host.replace(".", "").isdigit():
+                    labels = host.split(".")
+                    if len(labels) >= 2:
+                        root_domain = ".".join(labels[-2:])
+                    else:
+                        root_domain = host  # 单标签如 localhost
 
         with self._acquire_session(_session) as session:
             session.run(
@@ -637,7 +661,8 @@ class GraphWriter:
                     v.detail = $detail, v.impact = $impact,
                     v.remediation = $remediation, v.tags = $tags,
                     v.evidence = $evidence, v.url = $vuln_url,
-                    v.sources = [$source], v.created_at = $now
+                    v.sources = [$source], v.created_at = $now,
+                    v.asset_id = $asset_id
                   ON MATCH SET v.last_seen_at = $now
                 WITH v, coalesce(v.sources, []) AS _cur
                 SET v.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
@@ -646,11 +671,17 @@ class GraphWriter:
                 FOREACH (_ IN CASE WHEN e IS NOT NULL THEN [1] ELSE [] END |
                   MERGE (e)-[:MAY_BE_VULNERABLE_TO]->(v)
                 )
-                WITH v
-                WHERE $host <> ''
-                MERGE (s:Subdomain {id: 'sub:' + $host})
-                ON CREATE SET s.value = $host, s.created_at = $now
-                MERGE (s)-[:MAY_BE_VULNERABLE_TO]->(v)
+                // 通过 root_domain 正确连接 Subdomain 到 Asset 树
+                FOREACH (_ IN CASE WHEN $root_domain <> '' AND $host <> '' THEN [1] ELSE [] END |
+                  MERGE (a:Asset {id: $asset_id})
+                  MERGE (rd:RootDomain {id: 'root:' + $root_domain})
+                    ON CREATE SET rd.value = $root_domain, rd.created_at = $now
+                  MERGE (a)-[:HAS_ROOT]->(rd)
+                  MERGE (s:Subdomain {id: 'sub:' + $host})
+                    ON CREATE SET s.value = $host, s.created_at = $now
+                  MERGE (rd)-[:HAS_SUB]->(s)
+                  MERGE (s)-[:MAY_BE_VULNERABLE_TO]->(v)
+                )
                 """,
                 vuln_id=vuln_id, vuln_type=vuln_type,
                 title=title, severity=severity,
@@ -659,7 +690,8 @@ class GraphWriter:
                 impact=impact, remediation=remediation,
                 tags=tags, evidence=evidence,
                 vuln_url=url, source=source, ep_id=endpoint_id,
-                host=host, now=now,
+                host=host, root_domain=root_domain,
+                asset_id=asset_id, now=now,
             )
             return {"id": vuln_id}
 
@@ -828,6 +860,7 @@ class GraphWriter:
         endpoint_id: str,
         url: str,
         *,
+        asset_id: str = "",
         content_type: str = "",
         size: int = 0,
         content_hash: str = "",
@@ -1145,7 +1178,7 @@ class GraphWriter:
                     for fk, wp in param_map.items():
                         if wp:
                             kwargs[wp] = f.get(fk, "" if isinstance(f.get(fk, ""), str) else None)
-                    if ftype in ("subdomain", "domain", "port", "http_endpoint", "file", "secret", "dir_entry", "api_endpoint"):
+                    if ftype in ("subdomain", "domain", "port", "http_endpoint", "file", "secret", "dir_entry", "api_endpoint", "vulnerability"):
                         kwargs.setdefault("asset_id", asset_id or f.get("asset_id", ""))
                     if ftype == "port":
                         kwargs.setdefault("ip_id", f.get("parent_id", ""))

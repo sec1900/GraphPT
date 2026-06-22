@@ -201,3 +201,26 @@
   .cfg-layout { display:grid; grid-template-columns:minmax(420px,1.35fr) minmax(360px,.9fr); gap:16px; align-items:start; }
   #cfg-editor { min-height:520px; font-family:Consolas, 'Cascadia Mono', monospace; font-size:12px; line-height:1.5; resize:vertical; }
   @media (max-width: 960px) { .cfg-layout { grid-template-columns:1fr; } }
+  /* System Resources */
+  .sys-resources { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:24px; }
+  .res-bars { display:flex; gap:16px; flex-wrap:wrap; }
+  .res-bar-item { flex:1; min-width:200px; }
+  .res-bar-label { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; font-weight:600; }
+  .res-bar-label span { font-size:18px; font-weight:700; }
+  .res-bar-track { height:12px; background:var(--bg); border-radius:6px; overflow:hidden; margin-bottom:4px; }
+  .res-bar-fill { height:100%; border-radius:6px; transition:width .5s ease; }
+  .cpu-fill { background:var(--accent); }
+  .mem-fill { background:var(--green); }
+  .mem-fill.warn { background:var(--orange); }
+  .mem-fill.crit { background:var(--red); }
+  .disk-fill { background:var(--purple); }
+  .disk-fill.warn { background:var(--orange); }
+  .res-bar-detail, .res-bar-cores { font-size:10px; color:var(--muted); }
+  #sys-tool-tbody td { font-size:11px; padding:4px 8px; }
+  /* Running Tasks */
+  .running-tasks { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:16px; margin-bottom:24px; }
+  .running-tasks .section-title { font-size:14px; font-weight:600; color:var(--accent); margin-bottom:8px; }
+  #running-tasks-tbody td { padding:5px 8px; border-bottom:1px solid var(--border); }
+  #running-tasks-tbody tr:last-child td { border-bottom:none; }
+  #sys-pressure-badge { animation:pulse 1.5s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }

@@ -295,12 +295,10 @@ def _graph_ports_for_ip(asset_id: str, ip: str) -> list[int]:
             rows = session.run(
                 """
                 MATCH (a:Asset {id: $asset_id})
-                CALL {
-                  WITH a
+                CALL (a) {
                   MATCH (a)-[:HAS_IP]->(ip:IP {value: $ip})
                   RETURN ip
                   UNION
-                  WITH a
                   MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP {value: $ip})
                   RETURN ip
                 }

@@ -1,6 +1,10 @@
 selectors:
   enscan:
-    desc: ICP备案/分支机构域名收集 — 取公司名
-    query: RETURN coalesce($company, '') AS company
+    desc: ICP备案/分支机构域名收集 — 取公司名(Asset.name)
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      WHERE a.name IS NOT NULL AND a.name <> ''
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = a.name }
+      RETURN a.name AS company
     mapping:
       company: '{targets_file}'

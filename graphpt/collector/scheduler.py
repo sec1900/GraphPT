@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 from typing import Any
 
@@ -33,8 +34,182 @@ _log = logging.getLogger("graphpt.scheduler")
 
 # ---- 资源隔离 ----
 
-# 总槽位数 = Celery worker 并发数（跟实际执行能力一致）
-_MAX_CONCURRENCY = int(os.getenv("GRAPHPT_CONCURRENCY", "10"))
+# ═══════════════════════════════════════════════════════════════
+# 自动调谐 — 根据物理内存动态设定并发上限，牛机自动扩、弱机自动缩
+# ═══════════════════════════════════════════════════════════════
+
+def _detect_system_memory_mb() -> int | None:
+    """检测系统总物理内存（MB）。psutil 不可用时返回 None。"""
+    try:
+        import psutil
+        return psutil.virtual_memory().total // (1024 * 1024)
+    except Exception:
+        return None
+
+
+def _detect_cpu_cores() -> int:
+    """检测 CPU 逻辑核心数。失败返回 4。"""
+    try:
+        import psutil
+        return psutil.cpu_count(logical=True) or 4
+    except Exception:
+        return os.cpu_count() or 4
+
+
+def _available_memory_mb() -> int | None:
+    """当前可用内存（MB）。psutil 不可用时返回 None。"""
+    try:
+        import psutil
+        return psutil.virtual_memory().available // (1024 * 1024)
+    except Exception:
+        return None
+
+
+def _auto_tune() -> dict[str, int]:
+    """启动时自动计算最佳资源参数。
+
+    环境变量显式设置时无条件信任用户值；
+    未设时按物理内存分档自动推算。
+
+    返回写入 os.environ 的参数 dict。
+    """
+    total_mb = _detect_system_memory_mb()
+    cpu_cores = _detect_cpu_cores()
+
+    if total_mb is None:
+        _log.warning("auto_tune_no_psutil — using conservative defaults")
+        total_gb = 4  # 保守假设
+    else:
+        total_gb = total_mb // 1024
+        _log.info("auto_tune_detected total_gb=%d cpu_cores=%d", total_gb, cpu_cores)
+
+    # ── 并发数：环境变量优先，否则按内存档位 ──
+    env_concurrency = os.getenv("GRAPHPT_CONCURRENCY", "").strip()
+    if env_concurrency:
+        concurrency = int(env_concurrency)
+        _log.info("auto_tune_concurrency user_override=%d", concurrency)
+    else:
+        if total_gb < 4:
+            concurrency = 1
+        elif total_gb < 8:
+            concurrency = 1
+        elif total_gb < 16:
+            concurrency = 2
+        elif total_gb < 32:
+            concurrency = 4
+        elif total_gb < 64:
+            concurrency = 6
+        else:
+            concurrency = 8
+        # 不超过 CPU 核心数（给系统和 Neo4j/Redis 留一半核心）
+        concurrency = min(concurrency, max(1, cpu_cores // 2))
+        _log.info("auto_tune_concurrency computed=%d (total_gb=%d cpu=%d)",
+                  concurrency, total_gb, cpu_cores)
+
+    # ── 单工具内存上限：取 (总内存×60%÷并发数)，留 40% 给系统/Neo4j/Redis ──
+    env_mem_limit = os.getenv("GRAPHPT_MAX_TOOL_MEM_MB", "").strip()
+    if env_mem_limit:
+        mem_limit = int(env_mem_limit)
+        _log.info("auto_tune_mem_limit user_override=%d MB", mem_limit)
+    elif total_mb is not None:
+        pool_mb = int(total_mb * 0.6)
+        per_tool = pool_mb // max(concurrency, 1)
+        mem_limit = max(512, min(per_tool, 8192))  # 512MB ~ 8GB 硬区间
+        _log.info("auto_tune_mem_limit computed=%d MB (pool=%d MB, per_tool=%d MB)",
+                  mem_limit, pool_mb, per_tool)
+    else:
+        mem_limit = 2048  # 无法检测时保守 2GB
+
+    # ── 层线程池上限：层之间并行数 ──
+    env_layers = os.getenv("GRAPHPT_LAYER_WORKERS", "").strip()
+    if env_layers:
+        layer_workers = int(env_layers)
+    else:
+        # 层线程数 = 并发数，但不少于 2、不多于 CPU 核心的一半
+        layer_workers = max(2, min(concurrency, max(2, cpu_cores // 2)))
+    _log.info("auto_tune_layer_workers=%d", layer_workers)
+
+    # 写入环境变量，下游 os.getenv() 全部自动生效
+    os.environ.setdefault("GRAPHPT_CONCURRENCY", str(concurrency))
+    os.environ.setdefault("GRAPHPT_MAX_TOOL_MEM_MB", str(mem_limit))
+    os.environ.setdefault("GRAPHPT_LAYER_WORKERS", str(layer_workers))
+    return {"concurrency": concurrency, "mem_limit_mb": mem_limit,
+            "layer_workers": layer_workers}
+
+
+def _memory_pressure(threshold_mb: int = 0) -> bool:
+    """当前可用内存是否低于安全水位线。True = 内存吃紧，应暂停派发新工具。
+
+    threshold_mb 默认取 (总内存 × 15%) 或 1GB，取较大值。
+    """
+    if threshold_mb <= 0:
+        total = _detect_system_memory_mb()
+        if total is None:
+            return False  # 无法检测，不阻塞
+        threshold_mb = max(1024, int(total * 0.15))
+    avail = _available_memory_mb()
+    if avail is None:
+        return False
+    return avail < threshold_mb
+
+
+# 模块加载时立即执行自动调谐（在 Job Object 之前，确保 env 已就绪）
+_TUNE_RESULT = _auto_tune()
+_MAX_CONCURRENCY = _TUNE_RESULT["concurrency"]
+
+
+# ── Windows Job Object: 父进程退出时内核自动清理所有子进程 ──
+def _setup_job_object() -> object | None:
+    """将当前进程放入 Job Object，设置 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE。
+
+    Web 进程崩溃/重启时，Windows 内核自动杀死由此进程创建的所有
+    subprocess 子进程（nuclei/nmap/httpx 等），防止僵尸进程堆积。
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes as _ct
+        from ctypes import wintypes as _w
+
+        _kernel32 = _ct.windll.kernel32
+
+        _kernel32.CreateJobObjectW.argtypes = [_ct.c_void_p, _w.LPCWSTR]
+        _kernel32.CreateJobObjectW.restype = _ct.c_void_p
+        hJob = _kernel32.CreateJobObjectW(None, f"GraphPT_Scheduler_{os.getpid()}")
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(_ct.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _ct.c_ulonglong * 10),
+                ("IoInfo", _ct.c_ulonglong * 2),
+                ("ProcessMemoryLimit", _ct.c_size_t),
+                ("JobMemoryLimit", _ct.c_size_t),
+                ("PeakProcessMemoryUsed", _ct.c_size_t),
+                ("PeakJobMemoryUsed", _ct.c_size_t),
+            ]
+
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation[2] = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
+        JobObjectExtendedLimitInformation = 9
+        _kernel32.SetInformationJobObject(
+            _ct.c_void_p(hJob),
+            JobObjectExtendedLimitInformation,
+            _ct.byref(info),
+            _ct.sizeof(info),
+        )
+
+        _kernel32.AssignProcessToJobObject(
+            _ct.c_void_p(hJob), _kernel32.GetCurrentProcess()
+        )
+        _log.info("job_object_created pid=%d", os.getpid())
+        return hJob
+    except Exception:
+        _log.warning("job_object_create_failed", exc_info=True)
+        return None
+
+# 模块加载时立即注册 Job Object（覆盖 Web 进程 + celery worker）
+_JOB_HANDLE = _setup_job_object()
 
 
 _active_count_cache: tuple[float, int] = (0, 1)  # (timestamp, count)
@@ -151,6 +326,27 @@ def _build_dependency_layers() -> list[dict[str, Any]]:
 
 # 启动时自动构建（模块加载即执行）
 _DEPENDENCY_LAYERS: list[dict[str, Any]] = _build_dependency_layers()
+
+
+def _load_fallback_command(tool: str) -> str | None:
+    """读取 tool.yaml 中的 fallback_command，无则返回 None。"""
+    from pathlib import Path as _Path
+    import yaml as _yaml
+    tf = _Path(__file__).resolve().parent.parent.parent / "tools" / tool / "tool.yaml"
+    try:
+        cfg = _yaml.safe_load(tf.read_text(encoding="utf-8")) or {}
+        return str(cfg.get("fallback_command", "")).strip() or None
+    except Exception:
+        return None
+
+
+def _tool_result_findings(r: dict[str, Any]) -> int:
+    """从 _run_single_tool_pipeline 返回值中提取 findings 总数。"""
+    inner = r.get("result", {}) if isinstance(r, dict) else {}
+    return sum(
+        s.get("findings", 0) + s.get("written", 0)
+        for s in inner.get("stages", []) if isinstance(s, dict)
+    )
 
 
 def _count_targets(tool: str, asset_id: str) -> int:
@@ -443,6 +639,22 @@ import threading as _threading
 _SCAN_STATE: dict[str, dict[str, Any]] = {}  # asset_id → {status, layer, tool_results, ...}
 _SCAN_STATE_LOCK = _threading.Lock()
 
+# 工具线程 generation 标记——防止超时/future.cancel() 后孤儿线程
+# 继续更新 _SCAN_STATE。每个 (asset_id, tool) 对有一个 generation，
+# _run() 开始时捕获，finally 中校验；超时/取消时 advance_tool_generation
+# 让旧线程的更新被静默丢弃。
+_TOOL_GENERATION: dict[str, int] = {}  # f"{asset_id}:{tool}" → gen
+_TOOL_GEN_LOCK = _threading.Lock()
+
+
+def _advance_tool_generation(asset_id: str, tool: str) -> int:
+    """推进 generation 并返回新值。超时/取消后调用，让孤儿线程的更新失效。"""
+    with _TOOL_GEN_LOCK:
+        key = f"{asset_id}:{tool}"
+        gen = _TOOL_GENERATION.get(key, 0) + 1
+        _TOOL_GENERATION[key] = gen
+        return gen
+
 
 class ScanAborted(Exception):
     """扫描被用户中止（区别于工具错误，需在整个调用链中识别并停止推进）。"""
@@ -476,10 +688,12 @@ def clear_scan_state(asset_id: str) -> None:
         pass
 
 
-def _run_one_tool(tool: str, asset_id: str) -> dict[str, Any]:
+def _run_one_tool(tool: str, asset_id: str, *,
+                   command: str | None = None) -> dict[str, Any]:
     """直接执行单个工具（不经过 Celery）。
     复用 PipelineExecutor 的完整流程：选目标 → 跑工具 → adapter → 入图 → 标记已扫。
 
+    command 为 None 时使用 tool.yaml 默认命令；传入则覆盖（fallback 机制）。
     ScanAborted 和 pipeline 层抛出的 "scan aborted" RuntimeError 均不被吞掉，
     向上传播以便 run_scan_layer / run_full_scan 停止推进。
     """
@@ -490,7 +704,8 @@ def _run_one_tool(tool: str, asset_id: str) -> dict[str, Any]:
         # 启动前先检查中止信号（快速路径：还没开始就不必创建 PipelineExecutor）
         if _is_aborted(asset_id):
             raise ScanAborted(f"scan aborted before {tool}")
-        result = _run_single_tool_pipeline(tool, asset_id=asset_id, stage_name=tool)
+        result = _run_single_tool_pipeline(tool, asset_id=asset_id, stage_name=tool,
+                                           command=command)
     except ScanAborted:
         raise  # F2: 不吞中止信号，向上传播
     except RuntimeError as exc:
@@ -521,7 +736,12 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
     layer_num = spec["layer"]
     tools = spec["tools"]
     if max_workers is None:
-        max_workers = min(len(tools), int(os.getenv("GRAPHPT_CONCURRENCY", "10")))
+        max_workers = min(len(tools), _MAX_CONCURRENCY)
+    # 内存吃紧时自动降级：可用内存低于总内存 15% 时，并发数砍半
+    if _memory_pressure() and max_workers > 1:
+        _log.warning("layer_%d_memory_pressure — throttling workers %d→%d",
+                     layer_num, max_workers, max(1, max_workers // 2))
+        max_workers = max(1, max_workers // 2)
 
     # 筛出有目标的工具（首轮全部执行，避免 _count_targets 的 20 次 Neo4j 连接风暴）
     ready: list[str] = []
@@ -548,6 +768,8 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
     aborted = False
 
     def _run(tool: str) -> dict[str, Any]:
+        # 捕获当前 generation；超时/取消后 advance 使旧线程的 finally 更新失效
+        gen = _TOOL_GENERATION.get(f"{asset_id}:{tool}", 0)
         with _SCAN_STATE_LOCK:
             st = _SCAN_STATE.get(asset_id, {})
             st["tool"] = tool
@@ -556,14 +778,16 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
         except ScanAborted:
             raise  # F2: 向上传播，外层处理
         finally:
-            with _SCAN_STATE_LOCK:
-                st = _SCAN_STATE.get(asset_id, {})
-                st["tools_done"] = st.get("tools_done", 0) + 1
+            # 仅当 generation 未变时才更新——超时/取消后孤儿线程被静默丢弃
+            if _TOOL_GENERATION.get(f"{asset_id}:{tool}", 0) == gen:
+                with _SCAN_STATE_LOCK:
+                    st = _SCAN_STATE.get(asset_id, {})
+                    st["tools_done"] = st.get("tools_done", 0) + 1
 
-    # F1: 线程级硬超时 — 兜底安全网，防止 read1 阻塞导致轮询循环卡死。
-    # 基于 GRAPHPT_STALE_TIMEOUT × 2（默认 600s），给轮询循环充足余量。
-    _stale_base = int(os.getenv("GRAPHPT_STALE_TIMEOUT", "300"))
-    _PER_TOOL_HARD_TIMEOUT = max(_stale_base * 2, 600)
+    # F1: 线程级硬超时 — 兜底安全网，防止单工具卡死阻塞后续层。
+    # 默认 600s（10 分钟），可通过 GRAPHPT_TOOL_HARD_TIMEOUT 覆盖。
+    # nuclei 在 Windows 上加载全套模板需 ~5min，300s 不够。
+    _PER_TOOL_HARD_TIMEOUT = int(os.getenv("GRAPHPT_TOOL_HARD_TIMEOUT", "600"))
 
     with _cf.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_run, tool): tool for tool in ready}
@@ -576,12 +800,15 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
                 except _cf.TimeoutError:
                     _log.error("layer_%d_tool_hard_timeout tool=%s timeout=%ds",
                               layer_num, tool, _PER_TOOL_HARD_TIMEOUT)
+                    _advance_tool_generation(asset_id, tool)  # 让孤儿线程的 finally 更新失效
                     results.append({"tool": tool, "status": "error",
                                     "error": f"hard timeout after {_PER_TOOL_HARD_TIMEOUT}s"})
                 except ScanAborted:
                     aborted = True
-                    # 取消所有未完成的 future
+                    # 取消所有未完成的 future——同时 invalidate 其 generation
                     for f in futures:
+                        t = futures[f]
+                        _advance_tool_generation(asset_id, t)
                         f.cancel()
                     break
                 except Exception as exc:
@@ -590,12 +817,14 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
         except ScanAborted:
             aborted = True
             for f in futures:
+                _advance_tool_generation(asset_id, futures[f])
                 f.cancel()
         except _cf.TimeoutError:
             # as_completed 本身超时：有工具超时未完成
             _log.error("layer_%d_as_completed_timeout asset=%s timeout=%ds",
                       layer_num, asset_id, _PER_TOOL_HARD_TIMEOUT)
             for f in futures:
+                _advance_tool_generation(asset_id, futures[f])
                 f.cancel()
             # 收集已完成的结果
             for f, tool in list(futures.items()):
@@ -653,12 +882,18 @@ def _any_tool_has_targets(asset_id: str) -> bool:
 
 
 def run_full_scan(asset_id: str, *,
-                  start_layer: int = 1,
+                  start_layer: int = 0,
                   max_workers: int | None = None) -> dict[str, Any]:
-    """执行完整 8 层攻击链，自动循环直到所有目标扫完。"""
+    """执行完整攻击链——所有层并行独立推进，不互相阻塞。
+
+    核心设计变更（v2）：
+      - 每层独立线程，层与层之间不等待。Layer 1 卡住不影响 Layer 2 执行。
+      - 每层循环：查目标 → 跑工具 → 标记结果。无目标时该层休眠。
+      - 整体退出条件：所有层连续 N 次检查均无目标，或所有层的线程全部空闲。
+      - 中止信号（scan:abort:asset_id）在所有层线程中独立检查。
+    """
     _log.info("full_scan_start asset=%s", asset_id)
 
-    # 运行日志（独立进程调试用）
     _scan_log_path = os.environ.get("GRAPHPT_SCAN_LOG", "")
     def _scan_log(msg: str) -> None:
         if _scan_log_path:
@@ -671,160 +906,276 @@ def run_full_scan(asset_id: str, *,
     _scan_log(f"full_scan_start asset={asset_id}")
 
     with _SCAN_STATE_LOCK:
-        _SCAN_STATE[asset_id] = {"status": "scanning", "layer": start_layer,
-                                  "tool": None, "round": 0, "total_rounds": "?",
-                                  "started_at": time.time()}
+        _SCAN_STATE[asset_id] = {
+            "status": "scanning", "layer": start_layer,
+            "tool": None, "started_at": time.time(),
+            "active_layers": {},  # layer_num → tool_name
+        }
 
-    all_layer_results: list[dict[str, Any]] = []
-    final_status = "ok"
     total_findings = 0
     total_errors = 0
-    aborted_layer = 0
-    current_spec: dict[str, Any] = {}
-    round_num = 0
-    dry_rounds = 0  # 连续无产出轮数
-    _DRY_EXIT = int(os.getenv("GRAPHPT_DRY_ROUNDS_EXIT", "2"))  # 连续 N 轮无产出则退出
-    _MAX_ROUNDS = int(os.getenv("GRAPHPT_MAX_SCAN_ROUNDS", "5000"))
+    final_status = "ok"
+    aborted = False
 
-    # 保存扫描状态到 Redis（崩溃恢复用）
+    # 每层独立统计
+    layer_findings: dict[int, int] = {}
+    layer_errors: dict[int, int] = {}
+    layer_stats_lock = _threading.Lock()
+
+    # 全局空闲检测：所有层连续 DRY_ROUNDS 次无目标则退出
+    _DRY_EXIT = int(os.getenv("GRAPHPT_DRY_ROUNDS_EXIT", "3"))
+    dry_counter = 0
+    dry_lock = _threading.Lock()
+
+    # 层状态追踪（供前端展示）
+    _active_layers: dict[int, str] = {}  # layer_num → current_tool
+    _active_lock = _threading.Lock()
+
+    # 全局停止信号——监控循环判断全链无目标后 set，通知各层收工
+    _stop = _threading.Event()
+
     def _save_resume_point():
         try:
             r = _redis_client()
             r.ping()
             import json as _json
+            _tf = sum(layer_findings.values())
+            _te = sum(layer_errors.values())
             r.setex(f"scan:resume:{asset_id}", 86400, _json.dumps({
-                "asset_id": asset_id, "round": round_num, "start_layer": start_layer,
-                "findings": total_findings, "errors": total_errors,
+                "asset_id": asset_id, "findings": _tf, "errors": _te,
                 "updated_at": time.time(),
             }))
-            _scan_log(f"resume_saved round={round_num} findings={total_findings}")
         except Exception:
             pass
 
-    _save_resume_point()  # 启动时立即写 Redis，前端立即可见
-    try:
-        while round_num < _MAX_ROUNDS:
-            round_num += 1
+    _save_resume_point()
 
-            # 每轮开始前检查是否还有目标（首轮强制执行，不检查——新资产可能因
-            # targets.yaml 查询缓存/加载问题导致 _any_tool_has_targets 误判 False）
-            if round_num > 1 and not _any_tool_has_targets(asset_id):
-                _log.info("full_scan_all_clear asset=%s rounds=%d", asset_id, round_num - 1)
-                break
+    # ── 每层独立工作线程 ──
+    # 层自己不决定退出——只要线程还活着就不停轮询 Neo4j。
+    # 退出由全局监控循环统一判断（所有层所有工具多轮查无目标）。
+    def _layer_worker(spec: dict[str, Any]) -> dict[str, Any]:
+        """持续推进单层，直到全局监控线程取消 future。"""
+        layer_num = spec["layer"]
+        tools = spec["tools"]
+        layer_fc = 0
+        layer_ec = 0
 
-            # 检查中止信号
-            if _is_aborted(asset_id):
-                raise ScanAborted(f"scan aborted at round {round_num}")
+        # 立即注册到活跃层表——即使尚无目标，前端和下游层也需要知道此层还在
+        with _active_lock:
+            _active_layers[layer_num] = "waiting"
 
-            with _SCAN_STATE_LOCK:
-                _SCAN_STATE[asset_id].update({
-                    "status": "scanning", "round": round_num,
-                    "layer": start_layer, "tool": None,
-                })
-
-            _log.info("full_scan_round_%d asset=%s", round_num, asset_id)
-            _scan_log(f"round_{round_num}_start")
-            round_findings = 0
-
-            for spec in _DEPENDENCY_LAYERS:
-                current_spec = spec
-                if spec["layer"] < start_layer:
-                    continue
-
-                if _is_aborted(asset_id):
-                    raise ScanAborted(f"scan aborted at round {round_num} layer {spec['layer']}")
-
+        while not _stop.is_set() and not _is_aborted(asset_id):
+            # 检查本层是否有目标
+            ready = []
+            for tool in tools:
                 try:
-                    _clear_stale_locks(asset_id)
+                    if _count_targets(tool, asset_id) > 0:
+                        ready.append(tool)
                 except Exception:
                     pass
 
-                result = run_scan_layer(spec, asset_id, max_workers=max_workers)
-                all_layer_results.append(result)
-                round_findings += result.get("findings", 0)
+            if not ready:
+                # 无目标 → 不休不退出，等待上游产出
+                with _active_lock:
+                    _active_layers[layer_num] = "waiting"
+                time.sleep(10)
+                continue
 
-                if result.get("status") == "error":
-                    final_status = "partial"
+            # 内存吃紧时休眠等待，避免系统卡死
+            _pressure_slept = 0
+            while _memory_pressure() and not _is_aborted(asset_id):
+                _pressure_slept += 1
+                if _pressure_slept == 1:
+                    _avail = _available_memory_mb() or 0
+                    _log.warning("layer_%d_memory_pressure_wait asset=%s avail_mb=%d",
+                                 layer_num, asset_id, _avail)
+                time.sleep(15)
+                if _pressure_slept > 60:  # 15min 后放弃等待
+                    _log.error("layer_%d_memory_pressure_timeout asset=%s — skipping batch",
+                              layer_num, asset_id)
+                    break
+            if _pressure_slept:
+                _log.info("layer_%d_memory_pressure_cleared asset=%s waited=%ds",
+                         layer_num, asset_id, _pressure_slept * 15)
 
-            total_findings += round_findings
-            total_errors += sum(r.get("errors", 0) for r in all_layer_results[-len(_DEPENDENCY_LAYERS):]
-                                if isinstance(r, dict))
-            _log.info("full_scan_round_%d_done asset=%s findings=%d",
-                      round_num, asset_id, round_findings)
-            _save_resume_point()
-            _scan_log(f"round_{round_num}_done findings={round_findings}")
+            with _active_lock:
+                _active_layers[layer_num] = ",".join(ready[:3])
 
-            # G15: 更新累积进度供前端展示（每 5 轮或首末轮计算，避免频繁 Neo4j 查询）
-            if round_num == 1 or round_num % 5 == 0:
+            _log.info("layer_%d_run asset=%s tools=%d ready=%s",
+                      layer_num, asset_id, len(ready), ready[:3])
+
+            try:
+                _clear_stale_locks(asset_id)
+            except Exception:
+                pass
+
+            sub_spec = {"layer": layer_num, "node": spec.get("node", ""), "tools": ready}
+            try:
+                result = run_scan_layer(sub_spec, asset_id, max_workers=max_workers)
+            except ScanAborted:
+                raise
+            except Exception as exc:
+                _log.error("layer_%d_crashed asset=%s error=%s", layer_num, asset_id, exc)
+                result = {"layer": layer_num, "status": "error",
+                          "tools_run": len(ready), "findings": 0,
+                          "errors": 1, "results": []}
+
+            fc = result.get("findings", 0)
+            ec = result.get("errors", 0)
+
+            # ── Fallback: 工具跑完还有剩余目标且有 fallback_command → 用备用命令重试 ──
+            for r in result.get("results", []):
+                tool_name = str(r.get("tool", ""))
+                if not tool_name:
+                    continue
+                fb_cmd = _load_fallback_command(tool_name)
+                if not fb_cmd:
+                    continue
                 try:
-                    from graphpt.collector.neo4j_client import get_graph_writer
-                    w = get_graph_writer()
-                    with w._driver.session() as s:
-                        r = s.run(
-                            "MATCH (sr:ScanRun {asset_id: $aid}) "
-                            "RETURN count(sr) AS total_scanned",
-                            aid=asset_id,
-                        )
-                        scanned = r.single()["total_scanned"] if r.peek() else 0
-                    remaining = sum(
-                        _count_targets(tool, asset_id)
-                        for spec in _DEPENDENCY_LAYERS
-                        for tool in spec["tools"]
-                    )
-                    with _SCAN_STATE_LOCK:
-                        st = _SCAN_STATE.get(asset_id, {})
-                        st["cumulative"] = {
-                            "scanned": scanned,
-                            "remaining": max(0, remaining),
-                            "total_estimate": scanned + max(0, remaining),
-                            "rounds_done": round_num,
-                        }
+                    if _count_targets(tool_name, asset_id) <= 0:
+                        continue  # 全部扫完，无需 fallback
                 except Exception:
-                    pass  # 进度统计失败不影响扫描
+                    continue
+                _log.info("layer_%d_fallback tool=%s asset=%s",
+                          layer_num, tool_name, asset_id)
+                try:
+                    fb_result = _run_one_tool(tool_name, asset_id, command=fb_cmd)
+                    fb_fc = _tool_result_findings(fb_result)
+                    fc += fb_fc
+                    if fb_result.get("status") == "error":
+                        ec += 1
+                    _log.info("layer_%d_fallback_done tool=%s findings=%d",
+                              layer_num, tool_name, fb_fc)
+                except ScanAborted:
+                    raise
+                except Exception as exc:
+                    _log.error("layer_%d_fallback_crashed tool=%s error=%s",
+                              layer_num, tool_name, exc)
+                    ec += 1
 
-    except ScanAborted as exc:
-        aborted_layer = current_spec.get("layer", 0) if current_spec else 0
-        _log.info("full_scan_aborted asset=%s round=%d layer=%d", asset_id, round_num, aborted_layer)
-        _scan_log(f"aborted round={round_num} layer={aborted_layer}")
-        _notify_completion(asset_id, "aborted", round_num, total_findings, total_errors)
-        with _SCAN_STATE_LOCK:
-            st = _SCAN_STATE.get(asset_id, {})
-            st.update({"status": "aborted", "aborted_at": time.time(),
-                       "aborted_layer": aborted_layer, "round": round_num})
-        return {
-            "status": "aborted",
-            "asset_id": asset_id,
-            "rounds": round_num,
-            "aborted_layer": aborted_layer,
-            "total_findings": total_findings,
-            "total_errors": total_errors,
-        }
+            layer_fc += fc
+            layer_ec += ec
+
+            with layer_stats_lock:
+                layer_findings[layer_num] = layer_findings.get(layer_num, 0) + fc
+                layer_errors[layer_num] = layer_errors.get(layer_num, 0) + ec
+
+            # 更新全局 SCAN_STATE 供前端
+            with _SCAN_STATE_LOCK:
+                st = _SCAN_STATE.get(asset_id, {})
+                st["layer"] = layer_num
+                st["active_layers"] = dict(_active_layers)
+
+            _save_resume_point()
+            _scan_log(f"layer_{layer_num}_batch findings={fc} errors={ec}")
+
+            time.sleep(2)  # 批次间短暂间隔
+
+        with _active_lock:
+            _active_layers.pop(layer_num, None)
+        _log.info("layer_%d_worker_exit asset=%s findings=%d errors=%d",
+                  layer_num, asset_id, layer_fc, layer_ec)
+        return {"layer": layer_num, "findings": layer_fc, "errors": layer_ec}
+
+    # ── 启动所有层 ──
+    try:
+        layer_specs = [s for s in _DEPENDENCY_LAYERS if s["layer"] >= start_layer]
+        with _cf.ThreadPoolExecutor(
+            max_workers=min(len(layer_specs), _TUNE_RESULT["layer_workers"]),
+            thread_name_prefix="scan_layer"
+        ) as layer_pool:
+            layer_futures = {
+                layer_pool.submit(_layer_worker, spec): spec["layer"]
+                for spec in layer_specs
+            }
+
+            # 监控循环：收集完的层、检查全局退出条件、处理中止
+            _MONITOR_INTERVAL = int(os.getenv("GRAPHPT_SCAN_MONITOR_INTERVAL", "15"))
+            _GLOBAL_DRY_EXIT = int(os.getenv("GRAPHPT_GLOBAL_DRY_ROUNDS", "6"))
+            while layer_futures:
+                if _is_aborted(asset_id):
+                    _log.info("full_scan_aborted asset=%s", asset_id)
+                    aborted = True
+                    _stop.set()
+                    break
+
+                # 收集已完成的层（异常退出等少数情况）
+                done = [f for f in layer_futures if f.done()]
+                for f in done:
+                    layer_num = layer_futures.pop(f)
+                    try:
+                        r = f.result()
+                        _log.info("layer_%d_complete asset=%s findings=%d",
+                                  layer_num, asset_id, r.get("findings", 0))
+                    except Exception as exc:
+                        _log.error("layer_%d_future_failed asset=%s error=%s",
+                                  layer_num, asset_id, exc)
+
+                # 全局干枯检测：所有工具所有层都查无目标 + 无层在跑工具？
+                # 只靠 _count_targets 不够——目标被 ScanRun 认领后计数归零，
+                # 但工具可能还在跑（长时间无 stdout 输出），认领到产出间是盲区。
+                # 必须叠加 _active_layers：只要有层不在 "waiting" 状态，说明有
+                # 工具正在执行，即使暂时无未认领目标也不能判定为全链干枯。
+                _any_has_targets = False
+                try:
+                    _any_has_targets = _any_tool_has_targets(asset_id)
+                except Exception:
+                    pass
+
+                with _active_lock:
+                    _any_running = any(
+                        v != "waiting" for v in _active_layers.values()
+                    )
+
+                if not _any_has_targets and not _any_running:
+                    dry_counter += 1
+                    if dry_counter >= _GLOBAL_DRY_EXIT:
+                        _log.info("full_scan_global_dry asset=%s dry=%d",
+                                  asset_id, dry_counter)
+                        _stop.set()
+                        break
+                else:
+                    dry_counter = 0
+
+                time.sleep(_MONITOR_INTERVAL)
+
+    except ScanAborted:
+        aborted = True
     except Exception as exc:
+        _log.exception("full_scan_crashed asset=%s", asset_id)
         _scan_log(f"crashed: {exc}")
         import traceback
         _scan_log(traceback.format_exc())
-        _notify_completion(asset_id, "crashed", round_num, total_findings, total_errors)
+        _notify_completion(asset_id, "crashed", 0,
+                           sum(layer_findings.values()),
+                           sum(layer_errors.values()))
         return {"status": "crashed", "asset_id": asset_id, "error": str(exc),
+                "total_findings": sum(layer_findings.values()),
+                "total_errors": sum(layer_errors.values())}
+
+    total_findings = sum(layer_findings.values())
+    total_errors = sum(layer_errors.values())
+
+    if aborted:
+        _notify_completion(asset_id, "aborted", 0, total_findings, total_errors)
+        with _SCAN_STATE_LOCK:
+            st = _SCAN_STATE.get(asset_id, {})
+            st.update({"status": "aborted", "aborted_at": time.time()})
+        return {"status": "aborted", "asset_id": asset_id,
                 "total_findings": total_findings, "total_errors": total_errors}
 
-    _notify_completion(asset_id, final_status, round_num, total_findings, total_errors)
+    _notify_completion(asset_id, final_status, 0, total_findings, total_errors)
     with _SCAN_STATE_LOCK:
         st = _SCAN_STATE.get(asset_id, {})
-        st.update({"status": "done" if final_status == "ok" else final_status,
-                   "layer": None, "tool": None, "round": round_num,
+        st.update({"status": "done", "layer": None, "tool": None,
                    "finished_at": time.time()})
 
-    _log.info("full_scan_done asset=%s status=%s rounds=%d findings=%d errors=%d",
-              asset_id, final_status, round_num, total_findings, total_errors)
-    _scan_log(f"done status={final_status} rounds={round_num} findings={total_findings} errors={total_errors}")
+    _log.info("full_scan_done asset=%s findings=%d errors=%d",
+              asset_id, total_findings, total_errors)
+    _scan_log(f"done findings={total_findings} errors={total_errors}")
 
-    return {
-        "status": final_status,
-        "asset_id": asset_id,
-        "rounds": round_num,
-        "total_findings": total_findings,
-        "total_errors": total_errors,
-    }
+    return {"status": final_status, "asset_id": asset_id,
+            "total_findings": total_findings, "total_errors": total_errors}
 
 
 def _notify_completion(asset_id: str, status: str, round_num: int,
