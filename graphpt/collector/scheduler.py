@@ -89,16 +89,14 @@ def _slot_release(r: Any, asset_id: str) -> None:
 # ── 节点类型 → 攻击层序号（从图模型拓扑排序推导）──
 # 加新节点类型时只需在此映射加一行
 _NODE_LAYER_ORDER: dict[str, int] = {
+    "Asset": 0,
     "RootDomain": 1,
     "Subdomain": 2,
     "IP": 3, "standalone_ip": 3,
     "Port": 4,
-    "HTTPEndpoint": 5, "Endpoint": 5,
-    "Vulnerability": 6,
-    "Secret": 6,
-    "File": 6, "DirEntry": 6, "ApiEndpoint": 6,
-    "Credential": 7,
-    "BypassResult": 7,
+    "HTTPEndpoint": 5, "Endpoint": 5, "File": 5, "DirEntry": 5, "ApiEndpoint": 5,
+    "Vulnerability": 6, "Secret": 6,
+    "Credential": 7, "BypassResult": 7,
 }
 
 

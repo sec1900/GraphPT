@@ -1,5 +1,5 @@
 desc: "DNS 解析"
-command: "{bin} -l {targets_file} -a -cname -json -silent"
+command: "{bin} -l {targets_file} -a -cname -json -silent -t 2000 -retry 1 -c 50"
 use_on:
   Subdomain:
     desc: "解析子域名到 IP"
