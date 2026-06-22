@@ -675,12 +675,14 @@ def clear_scan_state(asset_id: str) -> None:
     """清除指定 asset 的内存扫描状态（F3: abort/unlock 时调用）。"""
     with _SCAN_STATE_LOCK:
         _SCAN_STATE.pop(asset_id, None)
-    # 同时清理 Redis 中的 abort 信号和残留锁
+    # 清理 Redis 中的残留锁和恢复标记，但 **不删** scan:abort:{asset_id}
+    # —— 那个有 60s TTL，必须保留给运行中的 pipeline 内循环检测并执行 proc.kill()
     try:
         _r = _redis_client()
         _r.ping()
-        _r.delete(f"scan:abort:{asset_id}")
-        for pat in (f"scheduler:lock:{asset_id}:*", f"scheduler:heartbeat:{asset_id}:*"):
+        # ★ 不删 abort key —— 留给 _is_aborted() 和 pipeline 内循环
+        for pat in (f"scheduler:lock:{asset_id}:*", f"scheduler:heartbeat:{asset_id}:*",
+                     f"tool:active:{asset_id}:*", f"scan:resume:{asset_id}"):
             _keys = _r.keys(pat)
             if _keys:
                 _r.delete(*_keys)

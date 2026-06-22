@@ -2770,6 +2770,8 @@ async function refreshScanProgress() {
       document.getElementById('btn-abort-scan').style.display = 'none';
       document.getElementById('scan-progress-fill').style.width = '100%';
       document.getElementById('scan-progress-fill').textContent = '100%';
+      document.getElementById('scan-progress-bar').style.display = 'none';
+      if (_scanPoll) { clearInterval(_scanPoll); _scanPoll = null; }
       return false; // done
     }
     // 扫描进行中：显示 Abort 按钮，隐藏 Start
@@ -2802,6 +2804,7 @@ function pollScanProgress() {
     if (alive) { wasRunning = true; idleCount = 0; }
     else { idleCount++; }
     // 连续 3 次 idle（30s）且之前确实运行过 → 才算完成
+    // ★ wasRunning 一旦设 true 就保持，不随 alive=false 重置
     if (!alive && wasRunning && idleCount >= 3) {
       clearInterval(_scanPoll); _scanPoll = null;
       toast('Scan complete! All tools finished.');
@@ -2810,13 +2813,14 @@ function pollScanProgress() {
       document.getElementById('btn-abort-scan').style.display = 'none';
       document.getElementById('scan-progress-fill').style.width = '100%';
       document.getElementById('scan-progress-fill').textContent = '100%';
+      document.getElementById('scan-progress-bar').style.display = 'none';
       // Browser notification
       if (Notification.permission === 'granted') {
         new Notification('GraphPT Scan Complete', {body: 'All tools finished for ' + currentAsset});
       }
       loadDashboard();
     }
-    wasRunning = alive;
+    // wasRunning 已在 alive 分支设为 true，不随 idle 重置
   }, 10000);
 }
 

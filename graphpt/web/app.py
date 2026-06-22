@@ -3168,6 +3168,8 @@ async def scan_progress(asset_id: str = "default"):
                     "tools_done": st.get("tools_done", 0),
                     "tools_total": st.get("tools_total", 0),
                     "tool_health": st.get("tool_health"),
+                    "verification_alerts": st.get("verification_alerts"),
+                    "verification_grace_s": int(os.getenv("GRAPHPT_VERIFICATION_GRACE", "600")),
                 }
         except Exception:
             pass
@@ -3187,7 +3189,7 @@ async def scan_progress(asset_id: str = "default"):
         result = {"ok": True, "data": {
             "layers": layers,
             "active_tools": active_tools,
-            "scan_running": _scan_pool is not None,
+            "scan_running": len(active_tools) > 0 or bool(scan_progress.get("current_tool")),
             "scan_progress": scan_progress,
         }}
         _cache_set(cache_key, result)
