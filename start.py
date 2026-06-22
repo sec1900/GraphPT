@@ -42,22 +42,23 @@ def run_service(name: str, cmd: list[str], cwd: str, port: int = 0):
 
 
 def _clean_redis_on_startup():
-    """清理上次非正常退出残留的调度锁和槽位，防止 worker 僵尸。"""
+    """清理上次非正常退出残留的调度锁、槽位和扫描恢复标记，防止误恢复。"""
     try:
         from graphpt.common.redis_client import get_redis
         _r = get_redis(socket_connect_timeout=2)
         _r.ping()
         removed = 0
-        cursor = 0
-        while True:
-            cursor, keys = _r.scan(cursor, match="scheduler:*", count=100)
-            if keys:
-                _r.delete(*keys)
-                removed += len(keys)
-            if cursor == 0:
-                break
+        for pattern in ("scheduler:*", "scan:resume:*"):
+            cursor = 0
+            while True:
+                cursor, keys = _r.scan(cursor, match=pattern, count=100)
+                if keys:
+                    _r.delete(*keys)
+                    removed += len(keys)
+                if cursor == 0:
+                    break
         if removed:
-            print(f"[init] Cleaned {removed} stale scheduler keys from Redis")
+            print(f"[init] Cleaned {removed} stale keys from Redis (scheduler + scan:resume)")
     except Exception:
         pass  # Redis 未启动时静默跳过
 

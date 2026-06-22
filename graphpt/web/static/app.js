@@ -300,16 +300,22 @@ async function _loadCountCardsAsync() {
       {label:'Open Ports', value: cnt.ports||0, cls:'orange'},
       {label:'HTTP Endpoints', value: cnt.http_endpoints||0, cls:'purple'},
     ];
-    document.getElementById('dash-cards').innerHTML = cards.map(function(c){
+    var countHtml = cards.map(function(c){
       return '<div class="card"><div class="label">' + c.label + '</div><div class="value ' + c.cls + '">' + c.value + '</div></div>';
     }).join('');
+    // ★ 边缘情况：scan API 先于 count API 返回时，已有 Scan Progress/Last Scan/Total Scans 卡片，需保留
+    var existing = document.getElementById('dash-cards').innerHTML;
+    var scanSuffix = '';
+    var scanIdx = existing.indexOf('Scan Progress');
+    if (scanIdx >= 0) scanSuffix = existing.substring(scanIdx);
+    document.getElementById('dash-cards').innerHTML = countHtml + scanSuffix;
   } catch(e) {}
 }
 
 async function _loadScanCardsAsync() {
   var cardsEl = document.getElementById('dash-cards');
-  // 收集现有卡片 HTML 用于后续拼接
-  var existing = cardsEl ? cardsEl.innerHTML : '';
+  // ★ 不再提前捕获 existing — counts API 更快，等 scan API 返回时 counts 大概率已写好真实数字
+  // 直接用 += 追加，避免覆盖 counts 卡片
   try {
     var spRes = await _fetchTimeout(aq(API + '/scan/progress?asset_id=' + currentAsset), null, 8000);
     var sp = spRes ? await spRes.json() : {};
@@ -325,19 +331,18 @@ async function _loadScanCardsAsync() {
         total++;
       });});
       var overall = total > 0 ? Math.round(done / total * 100) : 0;
-      // 拼接 Scan Progress 卡片
-      existing += '<div class="card"><div class="label">Scan Progress</div><div class="value accent">' + overall + '%</div></div>';
+      // ★ 直接追加到现有的 counts 卡片后面
+      if (cardsEl) cardsEl.innerHTML += '<div class="card"><div class="label">Scan Progress</div><div class="value accent">' + overall + '%</div></div>';
     }
   } catch(e) {}
   try {
     var hRes = await _fetchTimeout(aq(API + '/scan/history?asset_id=' + currentAsset), null, 8000);
     var h = hRes ? await hRes.json() : {};
-    if (h.ok && h.data.last_scan) {
-      existing += '<div class="card"><div class="label">Last Scan</div><div class="value accent">' + fmtTime(h.data.last_scan) + '</div></div>';
-      existing += '<div class="card"><div class="label">Total Scans</div><div class="value green">' + h.data.total_scans + '</div></div>';
+    if (h.ok && h.data.last_scan && cardsEl) {
+      cardsEl.innerHTML += '<div class="card"><div class="label">Last Scan</div><div class="value accent">' + fmtTime(h.data.last_scan) + '</div></div>';
+      cardsEl.innerHTML += '<div class="card"><div class="label">Total Scans</div><div class="value green">' + h.data.total_scans + '</div></div>';
     }
   } catch(e) {}
-  if (cardsEl) cardsEl.innerHTML = existing;
 }
 
 async function _loadErrorsAsync() {
@@ -2730,13 +2735,26 @@ async function refreshScanProgress() {
     document.getElementById('scan-progress-layers').innerHTML = html;
 
     // 人工验证警告：enscan 等爬虫工具遇到反爬，需用户打开浏览器验证
+    // 从 verification_alerts 读取（独立字典，不会被并行工具覆盖）
     var verifEl = document.getElementById('scan-verif-warning');
+    var va = (data.scan_progress && data.scan_progress.verification_alerts) || {};
+    // 退回兼容：verification_alerts 为空时检查 tool_health
     var th = (data.scan_progress && data.scan_progress.tool_health) || {};
-    if (verifEl && th.needs_verification) {
+    var verifTools = Object.values(va);
+    var needsVerif = verifTools.length > 0 || th.needs_verification;
+    if (verifEl && needsVerif) {
       verifEl.style.display = '';
-      document.getElementById('scan-verif-tool').textContent = th.tool || 'tool';
-      var waitSec = th.verification_since_s || 0;
-      var graceTotal = 600; // GRAPHPT_VERIFICATION_GRACE default
+      // 优先使用 verification_alerts 中的第一条，退回 tool_health
+      var vinfo = verifTools.length > 0 ? verifTools[0] : th;
+      document.getElementById('scan-verif-tool').textContent = vinfo.tool || 'tool';
+      // 显示触发文本（匹配到的验证输出片段）
+      var triggerEl = document.getElementById('scan-verif-trigger');
+      if (triggerEl) {
+        triggerEl.textContent = vinfo.trigger_text || '';
+        triggerEl.style.display = vinfo.trigger_text ? '' : 'none';
+      }
+      var waitSec = vinfo.verification_since_s || 0;
+      var graceTotal = (data.scan_progress && data.scan_progress.verification_grace_s) || 600;
       var remain = Math.max(0, graceTotal - waitSec);
       var min = Math.floor(remain / 60);
       var sec = remain % 60;
