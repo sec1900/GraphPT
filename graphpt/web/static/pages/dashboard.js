@@ -291,19 +291,8 @@ async function loadSystemResources() {
     if (!panel) return;
     panel.style.display = '';
 
-    // CPU
     const cpu = d.cpu || {};
-    const cpuEl = document.getElementById('sys-cpu-pct'); if (cpuEl) cpuEl.textContent = cpu.percent || 0;
-    const cpuB = document.getElementById('sys-cpu-bar'); if (cpuB) cpuB.style.width = (cpu.percent || 0) + '%';
-    const cpuC = document.getElementById('sys-cpu-cores'); if (cpuC) cpuC.textContent = (cpu.cores || 0) + ' cores';
-
-    // Memory
     const mem = d.memory || {};
-    const memEl = document.getElementById('sys-mem-pct'); if (memEl) memEl.textContent = mem.percent || 0;
-    const memBar = document.getElementById('sys-mem-bar'); if (memBar) { memBar.style.width = (mem.percent || 0) + '%'; memBar.className = 'res-bar-fill mem-fill' + (mem.percent >= 90 ? ' crit' : mem.percent >= 75 ? ' warn' : ''); }
-    const memD = document.getElementById('sys-mem-detail'); if (memD) memD.textContent = (mem.used_gb != null ? mem.used_gb + ' / ' + mem.total_gb + ' GB' : '');
-
-    // Disk
     const disk = d.disk || {};
 
     // Render system resources as cards
