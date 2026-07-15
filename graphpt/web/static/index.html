@@ -361,9 +361,15 @@
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Agent Output</div>
         <pre id="agent-output" style="font-size:12px;white-space:pre-wrap;word-break:break-word;margin:0;max-height:none"></pre>
       </div>
-      <div style="width:320px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;overflow-y:auto">
-        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Tool Calls</div>
-        <div id="agent-tools"></div>
+      <div style="width:320px;display:flex;flex-direction:column;gap:8px">
+        <div style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;overflow-y:auto;max-height:60%">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Tool Calls</div>
+          <div id="agent-tools"></div>
+        </div>
+        <div style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;overflow-y:auto;max-height:40%">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:4px">Session History</div>
+          <div id="agent-sessions"></div>
+        </div>
       </div>
     </div>
   </div>

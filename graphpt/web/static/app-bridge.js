@@ -2067,7 +2067,43 @@ function loadAgent() {
   }).catch(()=>{
     sel.innerHTML = '<option value="mlws">mlws1900.cn</option>';
   });
+  loadAgentSessions();
 }
+
+function loadAgentSessions() {
+  const box = document.getElementById('agent-sessions');
+  if (!box) return;
+  fetch('/api/agent/status').then(r=>r.json()).then(d=>{
+    const sessions = d.sessions || {};
+    const keys = Object.keys(sessions);
+    if (!keys.length) { box.innerHTML = '<div style="font-size:11px;color:var(--muted)">No sessions yet</div>'; return; }
+    box.innerHTML = keys.map(k => {
+      const status = sessions[k];
+      const badge = status === 'done' ? 'ok' : status === 'error' ? 'err' : 'warn';
+      return '<div style="padding:4px 0;border-bottom:1px solid var(--border);cursor:pointer;font-size:11px" onclick="loadAgentSession(\'' + k + '\')">'
+        + '<span class="badge ' + badge + '">' + status + '</span> '
+        + k.substring(0, 12) + '...</div>';
+    }).join('');
+  });
+}
+
+function loadAgentSession(sid) {
+  fetch('/api/agent/status?session_id=' + encodeURIComponent(sid)).then(r=>r.json()).then(d=>{
+    const out = document.getElementById('agent-output');
+    const toolsDiv = document.getElementById('agent-tools');
+    let txt = '';
+    if (d.output_buf) txt += d.output_buf + '\n\n';
+    txt += '=== RESULT ===\n\n' + (d.result || '(no output)');
+    out.textContent = txt;
+    if (toolsDiv && d.logs) {
+      toolsDiv.innerHTML = d.logs.filter(l => l.includes('调用工具') || l.includes('tool'))
+        .map(l => '<div style="font-size:11px;padding:3px 0;border-bottom:1px solid var(--border)">' + esc(l.substring(0, 220)) + '</div>').join('');
+    }
+    document.getElementById('agent-status').textContent = 'Viewing: ' + sid.substring(0, 16) + ' (' + (d.tool_calls||0) + ' tool calls)';
+  });
+}
+window.loadAgentSession = loadAgentSession;
+window.loadAgentSessions = loadAgentSessions;
 
 function startAgent() {
   const assetId = document.getElementById('agent-asset').value.trim();
@@ -2145,6 +2181,7 @@ function pollAgent() {
         _agentPoll = null;
         agentReset();
         document.getElementById('agent-status').textContent = 'Done (' + (d.tool_calls||0) + ' tool calls)';
+        loadAgentSessions();
         let txt = '';
         if(d.output_buf) txt += d.output_buf + '\n\n';
         txt += '=== FINAL REPORT ===\n\n';
@@ -2155,6 +2192,7 @@ function pollAgent() {
         clearInterval(_agentPoll);
         _agentPoll = null;
         agentReset();
+        loadAgentSessions();
         document.getElementById('agent-status').innerHTML = `<span class="badge err">error</span> ${_agentSessionId}`;
         out.textContent = d.error||'Unknown error';
       }
