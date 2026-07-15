@@ -214,9 +214,13 @@ async function loadHealth() {
       ['Redis', d.redis && d.redis.ok],
       ['Tools', d.tools && d.tools.ok],
     ];
+    const agentRunning = (d.agent && d.agent.running) || 0;
+    let agentHtml = '';
+    if (agentRunning > 0) agentHtml = `<span class="badge warn">Agent: ${agentRunning} running</span>`;
+    else agentHtml = '<span class="badge ok">Agent: idle</span>';
     el.innerHTML = items.map(([label, ok]) =>
       `<span class="badge ${ok ? 'ok' : 'err'}">${label}: ${ok ? 'OK' : 'DOWN'}</span>`
-    ).join('') + (json.status === 'degraded' ? '<span style="color:var(--orange)">degraded</span>' : '');
+    ).join('') + agentHtml;
   } catch(e) {
     el.innerHTML = '<span class="badge err">Health: DOWN</span>';
   }

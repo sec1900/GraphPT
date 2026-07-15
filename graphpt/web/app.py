@@ -324,11 +324,12 @@ async def health():
         return _tool_config_health()
 
     # M1: 并行执行所有健康检查，单项超时 3s，总体不超过 5s
-    with _hf.ThreadPoolExecutor(max_workers=3) as pool:
+    with _hf.ThreadPoolExecutor(max_workers=4) as pool:
         futures = {
             pool.submit(_neo4j_check): "neo4j",
             pool.submit(_redis_check): "redis",
             pool.submit(_tools_check): "tools",
+            pool.submit(lambda: {"ok": True, "running": sum(1 for s in _list_agent_session_statuses().values() if s == "running")}): "agent",
         }
         results = {}
         for f in _hf.as_completed(futures, timeout=5):
@@ -337,7 +338,7 @@ async def health():
                 results[key] = f.result(timeout=4)
             except (_hf.TimeoutError, Exception) as exc:
                 results[key] = {"ok": False, "error": str(exc) if str(exc) else "timeout"}
-        for key in ("neo4j", "redis", "tools"):
+        for key in ("neo4j", "redis", "tools", "agent"):
             if key not in results:
                 results[key] = {"ok": False, "error": "check did not complete"}
 
