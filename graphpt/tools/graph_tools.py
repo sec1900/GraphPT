@@ -1,10 +1,11 @@
 """Neo4j 图数据库查询工具 — Agent 读图分析专用。
 
-提供 4 个工具：
+提供 5 个工具：
   - graph_query: 执行只读 Cypher（限定 asset_id 范围）
   - graph_summary: 按资产返回结构化概览
   - graph_attack_paths: 按资产查找攻击路径
   - trigger_scan: 执行单工具扫描并写入图数据库
+  - run_tool_on_node: 右键菜单式单节点工具执行（精确到节点）
 """
 
 from __future__ import annotations
@@ -439,6 +440,130 @@ def _exec_trigger_scan(arguments: dict[str, Any], **kwargs: Any) -> dict[str, An
         return {"error": str(e), "success": False}
 
 
+# ---- run_tool_on_node: 右键菜单式单节点工具执行 ----
+
+def _exec_run_tool_on_node(arguments: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    """在指定节点上执行单个工具——等价于前端右键菜单"Run tool on node"。
+
+    Agent 应该这样用：
+      1. graph_query 查到目标节点（如 Domain: api.acme.com）
+      2. 决定需要运行的工具（如 httpx 探测 Web 服务）
+      3. run_tool_on_node(tool="httpx", target="api.acme.com",
+                          node_type="Domain", asset_id="acme-corp")
+
+    与 trigger_scan 的区别：
+      - trigger_scan: 批量扫描器模式，工具自己发现目标
+      - run_tool_on_node: 精确到单个节点，Agent 说"就这个节点，跑这个工具"
+    """
+    import yaml as _yaml
+    from pathlib import Path as _Path
+
+    tool = arguments.get("tool", "").strip()
+    target = arguments.get("target", "").strip()
+    node_type = arguments.get("node_type", "").strip()
+    asset_id = arguments.get("asset_id", "").strip()
+
+    if not tool or not target or not asset_id:
+        return {"error": "tool, target, and asset_id are all required", "success": False}
+
+    # 读取 tool.yaml
+    tools_dir = _Path(__file__).resolve().parent.parent.parent / "tools"
+    tool_yaml = tools_dir / tool / "tool.yaml"
+    if not tool_yaml.is_file():
+        return {"error": f"tool not found: {tool}", "success": False}
+
+    try:
+        cfg = _yaml.safe_load(tool_yaml.read_text(encoding="utf-8")) or {}
+    except Exception as e:
+        return {"error": f"failed to load tool.yaml: {e}", "success": False}
+
+    # 取 use_on 中的命令（匹配节点类型）
+    command = ""
+    use_on = cfg.get("use_on", {})
+    if isinstance(use_on, dict) and node_type:
+        rule = use_on.get(node_type, {})
+        if isinstance(rule, dict):
+            command = str(rule.get("command") or "").strip()
+    if not command:
+        command = str(cfg.get("command") or "").strip()
+    if not command:
+        return {"error": f"no command found for tool={tool} node_type={node_type}", "success": False}
+
+    # 从 tool.yaml use_on 取参数模板
+    params_template = {}
+    if isinstance(use_on, dict) and node_type:
+        rule = use_on.get(node_type, {})
+        if isinstance(rule, dict):
+            params_template = rule.get("params", {}) or {}
+
+    # 构建节点上下文: 从 arguments.node 取属性, 兜底用 target
+    node_data = arguments.get("node") if isinstance(arguments.get("node"), dict) else {}
+    context: dict[str, str] = {
+        "domain": str(node_data.get("value") or node_data.get("domain") or target),
+        "url": str(node_data.get("url") or node_data.get("value") or target),
+        "target_url": str(node_data.get("url") or target),
+        "value": str(node_data.get("value") or target),
+        "ip": str(node_data.get("parent_ip") or node_data.get("value")
+                  or node_data.get("ip") or target),
+        "token": str(node_data.get("token") or node_data.get("value") or ""),
+        "target_id": str(node_data.get("id") or target),
+    }
+    # 端口上下文
+    port_num = node_data.get("number") or node_data.get("port")
+    if port_num:
+        context["port"] = str(port_num)
+        context["ports"] = str(port_num)
+        context["number"] = str(port_num)
+    # 父 IP
+    parent_ip = node_data.get("parent_ip")
+    if parent_ip:
+        context["parent_ip"] = str(parent_ip)
+
+    # 渲染命令模板中的占位符
+    rendered_command = command
+    for key, val in context.items():
+        rendered_command = rendered_command.replace("{" + key + "}", str(val))
+
+    # 构建 target_data
+    target_data: dict[str, str] = {}
+    for param_key, template in params_template.items():
+        value = str(template)
+        for ctx_key, ctx_val in context.items():
+            value = value.replace("{" + ctx_key + "}", str(ctx_val))
+        target_data[param_key] = value
+
+    if not target_data:
+        # 没有显式 params → 把 target 放到第一个占位符位置
+        target_data["target"] = target
+
+    try:
+        from graphpt.collector.pipeline import PipelineExecutor
+        executor = PipelineExecutor(
+            {"stages": [{"name": f"agent_node_{tool}", "tool": tool,
+                         "command": rendered_command}]},
+            asset_id=asset_id,
+            target_overrides={tool: [target_data]},
+        )
+        result = executor.execute()
+        status = str(result.get("status") or "")
+        return {
+            "success": status in {"ok", "partial"},
+            "mode": "single_node",
+            "tool": tool,
+            "target": target,
+            "node_type": node_type,
+            "asset_id": asset_id,
+            "status": status,
+            "command_used": rendered_command[:200],
+            "findings": sum(
+                len(s.get("findings") or []) for s in (result.get("stages") or [])
+            ),
+            "result": result,
+        }
+    except Exception as e:
+        return {"error": str(e), "success": False}
+
+
 # ---- 注册入口 ----
 
 def init_graph_tools() -> None:
@@ -502,7 +627,7 @@ def init_graph_tools() -> None:
     register_tool(
         ToolDef(
             name="trigger_scan",
-            description="执行一个真实采集工具阶段并写入 Neo4j。执行后应使用 graph_summary 或 graph_query 查询新增图数据。",
+            description="批量扫描。仅在需要全量覆盖时使用。日常应优先 run_tool_on_node 做单点验证。执行后用 graph_query 回查。",
             parameters={
                 "type": "object",
                 "properties": {
