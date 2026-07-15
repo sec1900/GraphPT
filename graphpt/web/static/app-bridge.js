@@ -2050,7 +2050,7 @@ async function loadGraph() {
   const loading = document.getElementById('graph-loading');
   loading.style.display = 'block';
   try {
-    const res = await fetch(aq(API + '/graph/data'));
+    const res = await fetch(aq(API + '/graph/data', currentAsset));
     const json = await res.json();
     if (!json.ok) { toast(json.error||'Failed','err'); loading.style.display='none'; return; }
     _graphRawData = json.data;
