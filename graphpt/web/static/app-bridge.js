@@ -2079,8 +2079,9 @@ function loadAgentSessions() {
     if (!keys.length) { box.innerHTML = '<div style="font-size:11px;color:var(--muted)">No sessions yet</div>'; return; }
     box.innerHTML = keys.map(k => {
       const status = sessions[k];
-      const badge = status === 'done' ? 'ok' : status === 'error' ? 'err' : 'warn';
-      const stopBtn = status === 'running'
+      const badge = status === 'done' ? 'ok' : status === 'error' ? 'err' : status === 'orphaned' ? 'stopped' : 'warn';
+      const canStop = status === 'running' || status === 'orphaned';
+      const stopBtn = canStop
         ? ' <button class="btn outline small" style="font-size:9px;padding:1px 4px;margin-left:4px" onclick="event.stopPropagation();agentStopSession(\'' + k + '\')">Stop</button>'
         : '';
       return '<div style="padding:4px 0;border-bottom:1px solid var(--border);cursor:pointer;font-size:11px" onclick="loadAgentSession(\'' + k + '\')">'
