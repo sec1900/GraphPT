@@ -349,14 +349,14 @@
     <div style="display:flex;gap:12px;margin-bottom:12px">
       <div style="flex:1">
         <label style="font-size:11px;color:var(--muted)">Task</label>
-        <textarea id="agent-prompt" rows="3" style="width:100%;font-size:13px">Analyze this asset thoroughly. Start with graph_summary to understand the attack surface. Use Bash/curl to manually probe interesting endpoints. Use graph_query to dig deeper into findings. For speculative scanning needs, use trigger_scan — it runs async so you can continue analyzing while it works. Identify vulnerabilities, prioritize by severity, and output a clear report.</textarea>
+        <textarea id="agent-prompt" rows="3" style="width:100%;font-size:13px">Analyze this asset for vulnerabilities. Manually probe endpoints, identify weaknesses, and report findings with severity ratings.</textarea>
       </div>
       <div style="width:200px">
         <label style="font-size:11px;color:var(--muted)">Asset</label>
         <select id="agent-asset" style="width:100%"><option value="">Loading...</option></select>
       </div>
     </div>
-    <div style="display:flex;gap:12px;height:calc(100vh - 280px)">
+    <div style="display:flex;gap:12px;height:calc(100vh - 350px)">
       <div style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;overflow-y:auto">
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Agent Output</div>
         <pre id="agent-output" style="font-size:12px;white-space:pre-wrap;word-break:break-word;margin:0;max-height:none"></pre>
@@ -371,6 +371,11 @@
           <div id="agent-sessions"></div>
         </div>
       </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <input type="text" id="agent-steer-input" placeholder="Message the agent... (e.g. Check the admin panel too, or Look at the JWT token in the API response)" style="flex:1;font-size:13px"
+        onkeydown="if(event.key==='Enter'){sendAgentPrompt();this.value=''}">
+      <button class="btn small" onclick="sendAgentPrompt();document.getElementById('agent-steer-input').value=''" id="agent-steer-btn" disabled>Send</button>
     </div>
   </div>
 
