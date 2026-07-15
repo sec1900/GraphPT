@@ -422,19 +422,22 @@ def _exec_trigger_scan(arguments: dict[str, Any], **kwargs: Any) -> dict[str, An
             asset_id=asset_id,
             target_overrides={tool: [target_data]},
         )
-        result = executor.execute()
-        status = str(result.get("status") or "")
+        import threading as _thr
+        def _bg_run():
+            try:
+                executor.execute()
+            except Exception:
+                pass
+
+        _thr.Thread(target=_bg_run, daemon=True, name=f"agent_trigger_{tool}").start()
         return {
-            "success": status in {"ok", "partial"},
-            "mode": "sync_pipeline",
+            "success": True,
+            "mode": "async",
             "tool": tool,
             "target": target,
             "asset_id": asset_id,
-            "status": status,
-            "findings": _count_pipeline_result(result, "findings"),
-            "written": _count_pipeline_result(result, "written"),
-            "result": result,
-            "next_step": "use graph_summary or graph_query to inspect newly written graph data",
+            "status": "queued",
+            "note": f"{tool} is running in the background. Use graph_query to check for new results in ~30-60 seconds.",
         }
     except Exception as e:
         return {"error": str(e), "success": False}
@@ -544,21 +547,24 @@ def _exec_run_tool_on_node(arguments: dict[str, Any], **kwargs: Any) -> dict[str
             asset_id=asset_id,
             target_overrides={tool: [target_data]},
         )
-        result = executor.execute()
-        status = str(result.get("status") or "")
+        import threading as _thr
+        def _bg_run():
+            try:
+                executor.execute()
+            except Exception:
+                pass
+
+        _thr.Thread(target=_bg_run, daemon=True, name=f"agent_node_{tool}").start()
         return {
-            "success": status in {"ok", "partial"},
-            "mode": "single_node",
+            "success": True,
+            "mode": "async",
             "tool": tool,
             "target": target,
             "node_type": node_type,
             "asset_id": asset_id,
-            "status": status,
+            "status": "queued",
             "command_used": rendered_command[:200],
-            "findings": sum(
-                len(s.get("findings") or []) for s in (result.get("stages") or [])
-            ),
-            "result": result,
+            "note": f"{tool} is running in the background. Use graph_query to check for new results in 30-60 seconds.",
         }
     except Exception as e:
         return {"error": str(e), "success": False}
