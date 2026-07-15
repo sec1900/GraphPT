@@ -433,14 +433,40 @@ def _exec_trigger_scan(arguments: dict[str, Any], **kwargs: Any) -> dict[str, An
             asset_id=asset_id,
             target_overrides={tool: [target_data]},
         )
-        import threading as _thr
+        import threading as _thr, os as _os
+        _hard_timeout = int(_os.getenv("GRAPHPT_MAX_TOOL_TIME", "600"))
+        _bg_result = {"done": False}
+
         def _bg_run():
             try:
                 executor.execute()
             except Exception:
                 pass
+            finally:
+                _bg_result["done"] = True
 
         _thr.Thread(target=_bg_run, daemon=True, name=f"agent_trigger_{tool}").start()
+        # 守护线程：硬超时后强制杀进程
+        def _watchdog():
+            import time as _t
+            _deadline = _t.time() + _hard_timeout
+            while _t.time() < _deadline and not _bg_result["done"]:
+                _t.sleep(5)
+            if not _bg_result["done"]:
+                # Hard kill: find and kill the tool process
+                try:
+                    import psutil, subprocess
+                    for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+                        try:
+                            cmd = ' '.join(p.info.get('cmdline') or [])
+                            if tool in cmd and str(p.pid) != str(_os.getpid()):
+                                p.kill()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        _thr.Thread(target=_watchdog, daemon=True, name=f"agent_watchdog_{tool}").start()
+
         return {
             "success": True,
             "mode": "async",
@@ -448,7 +474,7 @@ def _exec_trigger_scan(arguments: dict[str, Any], **kwargs: Any) -> dict[str, An
             "target": target,
             "asset_id": asset_id,
             "status": "queued",
-            "note": f"{tool} is running in the background. Use graph_query to check for new results in ~30-60 seconds.",
+            "note": f"{tool} running (max {_hard_timeout}s). Check graph_query for results.",
         }
     except Exception as e:
         return {"error": str(e), "success": False}
@@ -558,14 +584,38 @@ def _exec_run_tool_on_node(arguments: dict[str, Any], **kwargs: Any) -> dict[str
             asset_id=asset_id,
             target_overrides={tool: [target_data]},
         )
-        import threading as _thr
+        import threading as _thr, os as _os
+        _hard_timeout = int(_os.getenv("GRAPHPT_MAX_TOOL_TIME", "600"))
+        _bg_result = {"done": False}
+
         def _bg_run():
             try:
                 executor.execute()
             except Exception:
                 pass
+            finally:
+                _bg_result["done"] = True
 
         _thr.Thread(target=_bg_run, daemon=True, name=f"agent_node_{tool}").start()
+        def _watchdog():
+            import time as _t
+            _deadline = _t.time() + _hard_timeout
+            while _t.time() < _deadline and not _bg_result["done"]:
+                _t.sleep(5)
+            if not _bg_result["done"]:
+                try:
+                    import psutil
+                    for p in psutil.process_iter(['pid', 'cmdline']):
+                        try:
+                            cmd = ' '.join(p.info.get('cmdline') or [])
+                            if tool in cmd and str(p.pid) != str(_os.getpid()):
+                                p.kill()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        _thr.Thread(target=_watchdog, daemon=True, name=f"agent_watchdog_{tool}").start()
+
         return {
             "success": True,
             "mode": "async",
@@ -575,7 +625,7 @@ def _exec_run_tool_on_node(arguments: dict[str, Any], **kwargs: Any) -> dict[str
             "asset_id": asset_id,
             "status": "queued",
             "command_used": rendered_command[:200],
-            "note": f"{tool} is running in the background. Use graph_query to check for new results in 30-60 seconds.",
+            "note": f"{tool} running (max {_hard_timeout}s). Check graph_query for results.",
         }
     except Exception as e:
         return {"error": str(e), "success": False}
