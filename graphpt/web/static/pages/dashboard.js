@@ -76,7 +76,6 @@ async function loadAllCards() {
     );
     const toolMem = sys.tool_mem_total_mb || 0;
     cards.push(`<div class="card sys-card" id="sys-proc-card" style="display:${tools.length ? '' : 'none'}"><div class="label">Processes</div><div class="value warn" id="sys-proc-val">${tools.length}</div><div class="sub" id="sys-proc-sub">${toolMem} MB</div></div>`);
-    }
   }
 
   cardsEl.innerHTML = cards.join('');
