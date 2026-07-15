@@ -1,0 +1,12 @@
+desc: "泛解析检测 - 检测域名是否配置了 Wildcard DNS，输出泛解析IP列表"
+command: "{bin} {domain}"
+output_type: "wildcard_result"
+
+use_on:
+  RootDomain:
+    desc: "检测根域名的泛解析配置"
+    params:
+      domain: "{domain}"
+    target_query: |
+      MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(r:RootDomain)
+      RETURN r.value AS domain

@@ -31,9 +31,16 @@ import { Vulnerabilities } from './pages/vulnerabilities.js';
 window.currentAsset = _currentAsset;
 window.assetList = _assetList;
 
-// 同步 currentAsset 的变化
+// 同步 currentAsset 的变化 + 刷新当前页数据
 window.addEventListener('asset-changed', (e) => {
   window.currentAsset = e.detail.assetId;
+  // Reload current visible page data
+  var activePage = document.querySelector('.page.active');
+  if (!activePage) return;
+  if (activePage.id === 'page-dashboard') window.loadDashboard();
+  else if (activePage.id === 'page-assets') window.renderAssetsPage();
+  else if (activePage.id === 'page-vulns') window.loadVulnerabilities();
+  else if (activePage.id === 'page-pipelines') window.loadPipelines();
 });
 
 // 导出核心函数

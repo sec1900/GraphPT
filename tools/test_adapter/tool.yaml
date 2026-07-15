@@ -1,0 +1,7 @@
+desc: "测试工具 - 用于验证 Adapter 错误处理（根据域名前缀自动选择场景）"
+command: "{bin} {domain}"
+use_on:
+  RootDomain:
+    desc: "测试各种失败场景"
+    params:
+      domain: "{domain}"
