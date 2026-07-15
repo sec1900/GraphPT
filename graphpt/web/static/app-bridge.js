@@ -2801,7 +2801,15 @@ setTimeout(function() {
   var dc = document.getElementById('dash-cards');
   if (dc) dc.innerHTML = '<div class="card"><div class="label">Domains</div><div class="value accent">—</div></div><div class="card"><div class="label">IP Addresses</div><div class="value green">—</div></div><div class="card"><div class="label">Open Ports</div><div class="value orange">—</div></div><div class="card"><div class="label">HTTP Endpoints</div><div class="value purple">—</div></div>';
   // 主路径：直接加载 Dashboard 数据（不经过 loadAssets）
-  loadDashboard();
+  // 恢复到上次的标签页
+  var savedTab = localStorage.getItem('activeTab');
+  if (savedTab) {
+    var btn = document.querySelector('nav button[data-page="' + savedTab + '"]');
+    if (btn) { btn.click(); }
+    else { loadDashboard(); }
+  } else {
+    loadDashboard();
+  }
   // 后台加载资产列表 + 工具注册表（填充下拉框和右键菜单）
   setTimeout(function() { loadAssets(); }, 2000);
   // 工具列表从 API 动态获取（右键菜单 _cfgTools）
@@ -2941,6 +2949,7 @@ document.querySelectorAll('nav button[data-page]').forEach(btn => {
     btn.classList.add('active');
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     document.getElementById('page-' + btn.dataset.page).classList.add('active');
+    localStorage.setItem('activeTab', btn.dataset.page);
     if (btn.dataset.page !== 'dashboard') { pollingManager.stopAll(); }
     switch(btn.dataset.page) {
       case 'dashboard': window.loadDashboard(); break;
