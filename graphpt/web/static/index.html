@@ -40,114 +40,64 @@
 
   <!-- ==================== Dashboard ==================== -->
   <div id="page-dashboard" class="page active">
-    <div class="toolbar">
-      <button class="btn" onclick="startFullScan()" id="btn-start-scan" style="background:var(--green)">Start Full Scan</button>
-      <button class="btn outline" onclick="abortScan()" id="btn-abort-scan" style="display:none;margin-left:4px;background:var(--red);color:#fff">Abort</button>
-      <label style="margin-left:12px;font-size:11px;color:var(--muted);cursor:pointer" title="Ignore ScanRun records and rescan all targets">
-        <input type="checkbox" id="force-rescan-check"> Force Rescan
-      </label>
-      <button class="btn outline" onclick="toggleAutoDashboard()" id="btn-auto-refresh" style="margin-left:12px;font-size:11px" title="Toggle auto-refresh dashboard data every 30 seconds">
-        <span id="auto-refresh-icon">⟳</span> Auto Refresh
-      </button>
+    <div class="toolbar" style="flex-wrap:wrap;gap:4px">
+      <button class="btn" onclick="startFullScan()" id="btn-start-scan" style="background:var(--green);font-size:12px">Start Full Scan</button>
+      <button class="btn outline" onclick="abortScan()" id="btn-abort-scan" style="display:none;background:var(--red);color:#fff;font-size:12px">Abort</button>
+      <label style="font-size:11px;color:var(--muted);cursor:pointer;white-space:nowrap"><input type="checkbox" id="force-rescan-check"> Force</label>
+      <button class="btn outline" onclick="toggleAutoDashboard()" id="btn-auto-refresh" style="font-size:11px"><span id="auto-refresh-icon">⟳</span></button>
       <span class="spacer"></span>
-      <button class="btn outline" onclick="showScanConfig()" style="font-size:11px;margin-right:8px" title="Configure scan profiles and wordlists">⚙️ Scan Settings</button>
-      <button class="btn outline" onclick="showToolsValidation()" style="font-size:11px;margin-right:8px" title="Check all tools configuration">🔧 Tools Health</button>
-      <button class="btn outline" onclick="generateReport('markdown')" style="font-size:11px" title="Generate Markdown report">&#128196; Report</button>
-      <span style="font-size:11px;color:var(--muted);margin-left:auto" id="dash-asset-name"></span>
+      <span style="font-size:11px;color:var(--muted)">Proxy:</span>
+      <input type="number" id="mitm-port" value="8888" style="width:52px;font-size:11px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text)">
+      <button class="btn outline" onclick="toggleMitm()" id="btn-mitm-toggle" style="font-size:11px" title="Traffic intercept proxy">📷</button>
+      <button class="btn outline" onclick="showScanConfig()" style="font-size:11px">⚙️</button>
+      <button class="btn outline" onclick="showToolsValidation()" style="font-size:11px">🔧</button>
+      <button class="btn outline" onclick="generateReport('markdown')" style="font-size:11px">📄</button>
     </div>
-    <div class="toolbar" style="margin-top:8px;padding:8px 0;border-top:1px solid var(--border)">
-      <span style="font-size:11px;color:var(--muted);margin-right:8px">Proxy Intercept:</span>
-      <input type="number" id="mitm-port" value="8888" min="1024" max="65535" style="width:60px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:11px;padding:2px 4px" title="Proxy listen port">
-      <button class="btn outline" onclick="toggleMitm()" id="btn-mitm-toggle" style="font-size:11px;margin-left:4px" title="Start/Stop traffic intercept proxy">&#128247; Start Intercept</button>
+    <div id="mitm-status" style="display:none;margin-bottom:8px;padding:6px 12px;background:var(--surface);border:1px solid var(--accent);border-radius:4px;font-size:11px">
+      📷 Listening on :8888 | Asset: <strong id="mitm-asset-label">-</strong> | <a href="/api/mitm/cert">CA Cert</a> | <span id="mitm-stats"></span>
     </div>
-    <div id="mitm-status" style="display:none;margin:0 0 16px 0;padding:10px 16px;background:var(--surface);border:1px solid var(--accent);border-radius:6px">
-      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-        <span style="font-size:13px;color:var(--accent);font-weight:600">&#128247; Listening on 127.0.0.1:8888</span>
-        <span style="font-size:11px;color:var(--muted)">Asset: <strong id="mitm-asset-label">-</strong></span>
-        <span style="font-size:11px;color:var(--muted)">CA: <a href="/api/mitm/cert" style="color:var(--accent)">Download Cert</a></span>
-        <span style="font-size:11px;color:var(--green)" id="mitm-stats"> </span>
-        <button class="btn outline small" onclick="toggleMitm()" style="font-size:10px;margin-left:auto">Stop</button>
-      </div>
+    <div id="scan-progress-bar" style="display:none;margin-bottom:8px;padding:6px 12px;background:var(--surface);border:1px solid var(--border);border-radius:4px;font-size:11px"></div>
+    <div id="running-tasks-panel" style="display:none;margin-bottom:8px;font-size:11px">
+      <span onclick="var d=document.getElementById('running-tasks-detail');d.style.display=d.style.display==='none'?'':'none'" style="cursor:pointer;font-weight:600">▼ Running Tasks <span id="running-tasks-count"></span></span>
+      <div id="running-tasks-detail"><table style="width:100%"><thead><tr><th>Tool</th><th>Progress</th><th>Elapsed</th><th></th></tr></thead><tbody id="running-tasks-tbody"></tbody></table></div>
     </div>
-    <div id="scan-progress-bar" style="display:none;margin:0 0 16px 0;padding:10px 16px;background:var(--surface);border:1px solid var(--border);border-radius:6px">
-      <div style="font-size:12px;color:var(--accent);margin-bottom:6px">Scan running...</div>
-      <div id="scan-verif-warning" style="display:none;margin:0 0 8px 0;padding:8px 12px;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;font-size:12px;color:#856404">
-        ⚠ <b>Verification needed:</b> <span id="scan-verif-tool"></span> requires browser verification.
-        <div id="scan-verif-trigger" style="display:none;margin-top:4px;font-family:monospace;font-size:11px;color:#997404;background:#fff8e1;padding:3px 6px;border-radius:3px;word-break:break-all"></div>
-        <span style="font-size:10px;color:#997404;margin-left:4px" id="scan-verif-waiting"></span>
-      </div>
-      <div id="scan-progress-layers" style="font-size:11px;color:var(--muted)"></div>
-    </div>
-    <div id="running-tasks-panel" class="running-tasks" style="display:none">
-      <div class="section-title" style="cursor:pointer" onclick="var p=document.getElementById('running-tasks-panel');var d=document.getElementById('running-tasks-detail');var s=p.dataset.expanded==='1'?'0':'1';p.dataset.expanded=s;d.style.display=s==='0'?'none':'';this.querySelector('span').textContent=s==='0'?'▶':'▼';">
-        <span>▼</span> Running Tasks <span id="running-tasks-count" style="font-size:11px;color:var(--muted);font-weight:400"></span>
-      </div>
-      <div id="running-tasks-detail">
-        <table style="font-size:11px;width:100%"><thead><tr>
-          <th style="width:16px"></th><th>Asset</th><th>Layer</th><th>Tool</th><th>Progress</th><th>Elapsed</th><th></th>
-        </tr></thead><tbody id="running-tasks-tbody"></tbody></table>
-      </div>
-    </div>
-    <div class="card-grid" id="dash-cards"></div>
-    <div id="sys-resources" class="sys-resources" style="display:none">
-      <div class="section-title" style="margin-bottom:8px">
-        System Resources <span style="font-size:10px;color:var(--muted);font-weight:400">(auto 5s)</span>
-        <span style="font-size:11px;color:var(--red);margin-left:8px;display:none" id="sys-pressure-badge">⚠ Memory Pressure</span>
-      </div>
-      <div class="res-bars">
-        <div class="res-bar-item">
-          <div class="res-bar-label">CPU <span id="sys-cpu-pct">—</span>%</div>
-          <div class="res-bar-track"><div class="res-bar-fill cpu-fill" id="sys-cpu-bar" style="width:0%"></div></div>
-          <div class="res-bar-cores" id="sys-cpu-cores"></div>
+    <div class="card-grid" id="dash-cards" style="margin-bottom:8px"></div>
+    <div style="display:grid;grid-template-columns:1fr 300px;gap:12px">
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div id="sys-resources" style="display:none;font-size:11px">
+          <span style="font-weight:600;margin-right:12px">Sys</span>
+          CPU <span id="sys-cpu-pct">—</span>% <span id="sys-cpu-cores" style="color:var(--muted)"></span>
+          <span style="margin:0 8px">|</span>
+          MEM <span id="sys-mem-pct">—</span>% <span id="sys-mem-detail" style="color:var(--muted)"></span>
+          <span style="margin:0 8px">|</span>
+          DISK <span id="sys-disk-pct">—</span>% <span id="sys-disk-detail" style="color:var(--muted)"></span>
+          <span id="sys-tool-count" style="margin-left:12px;color:var(--muted)"></span>
+          <span id="sys-pressure-badge" style="display:none;color:var(--red);margin-left:8px">⚠ Memory</span>
+          <span id="sys-temp-cleanup" style="display:none;color:var(--muted);margin-left:8px"></span>
         </div>
-        <div class="res-bar-item">
-          <div class="res-bar-label">MEM <span id="sys-mem-pct">—</span>%</div>
-          <div class="res-bar-track"><div class="res-bar-fill mem-fill" id="sys-mem-bar" style="width:0%"></div></div>
-          <div class="res-bar-detail" id="sys-mem-detail"></div>
+        <div id="sys-tool-procs" style="display:none;font-size:11px;max-height:120px;overflow-y:auto">
+          <table style="width:100%"><thead><tr><th>Tool</th><th>PID</th><th>Mem</th><th>CPU</th><th>Time</th></tr></thead><tbody id="sys-tool-tbody"></tbody></table>
         </div>
-        <div class="res-bar-item">
-          <div class="res-bar-label">DISK <span id="sys-disk-pct">—</span>%</div>
-          <div class="res-bar-track"><div class="res-bar-fill disk-fill" id="sys-disk-bar" style="width:0%"></div></div>
-          <div class="res-bar-detail" id="sys-disk-detail"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+          <div class="section" style="margin:0">
+            <div class="section-title" style="font-size:12px">Endpoint Status</div>
+            <table id="dash-endpoints" style="font-size:11px"><tbody></tbody></table>
+          </div>
+          <div class="section" style="margin:0">
+            <div class="section-title" style="font-size:12px">Recent Discoveries</div>
+            <table id="dash-recent-subs" style="font-size:11px"><tbody></tbody></table>
+          </div>
         </div>
       </div>
-      <div id="sys-tool-procs" style="display:none;margin-top:12px">
-        <div class="section-title" style="font-size:12px;margin-bottom:6px">Tool Processes <span style="font-size:10px;color:var(--muted);font-weight:400" id="sys-tool-count"></span></div>
-        <table style="font-size:11px"><thead><tr>
-          <th>Tool</th><th>PID</th><th>Memory</th><th>CPU</th><th>Elapsed</th>
-        </tr></thead><tbody id="sys-tool-tbody"></tbody></table>
-      </div>
-      <div id="sys-temp-cleanup" style="display:none;margin-top:12px;font-size:11px;color:var(--muted)">
-        <div style="display:flex;gap:16px">
-          <span>Temp Files: <strong id="temp-tracked">0</strong> tracked</span>
-          <span>Memory: <strong id="temp-memory">0</strong> KB</span>
-          <span>Next cleanup: <strong id="temp-next">—</strong> ops</span>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <div class="section" style="margin:0">
+          <div class="section-title" style="font-size:12px">Recent Errors <button onclick="clearErrors()" class="btn outline small" style="font-size:9px;margin-left:4px">Clear</button></div>
+          <table id="dash-errors" style="font-size:10px"><tbody></tbody></table>
         </div>
-      </div>
-    </div>
-    <div class="section" id="dash-severity-section" style="display:none">
-      <div class="section-title" style="cursor:pointer" onclick="var s=document.getElementById('dash-severity-section');s.dataset.expanded=s.dataset.expanded==='1'?'0':'1';document.getElementById('sev-chart').style.display=s.dataset.expanded==='0'?'none':'';this.querySelector('span').textContent=s.dataset.expanded==='0'?'▶':'▼';">
-        <span>▼</span> Vulnerability Severity Distribution
-        <span style="font-size:11px;color:var(--muted);font-weight:400" id="sev-total"></span>
-      </div>
-      <div id="sev-chart"></div>
-    </div>
-    <div class="section">
-      <div class="section-title">Endpoint Status</div>
-      <table id="dash-endpoints"><tbody></tbody></table>
-    </div>
-    <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 24px;">
-      <div class="section">
-        <div class="section-title">Recent Discoveries</div>
-        <table id="dash-recent-subs"><tbody></tbody></table>
-      </div>
-      <div class="section">
-        <div class="section-title">Recent Changes <span style="font-size:10px;color:var(--muted)">(24h)</span></div>
-        <table id="dash-changes"><tbody></tbody></table>
-      </div>
-      <div class="section">
-        <div class="section-title">Recent Errors <button onclick="clearErrors()" class="btn outline small" style="margin-left:8px;font-size:10px">Clear</button></div>
-        <table id="dash-errors"><tbody></tbody></table>
+        <div class="section" style="margin:0">
+          <div class="section-title" style="font-size:12px">Recent Changes (24h)</div>
+          <table id="dash-changes" style="font-size:11px"><tbody></tbody></table>
+        </div>
       </div>
     </div>
     <div class="loading" id="dash-loading">Loading</div>
