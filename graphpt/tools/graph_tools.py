@@ -41,13 +41,24 @@ def _is_read_only(cypher: str) -> bool:
 
 def _exec_graph_query(arguments: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
     cypher = arguments.get("cypher", "").strip()
+    asset_id = str(arguments.get("asset_id") or "").strip()
     if not cypher:
         return {"error": "cypher is required", "success": False}
+    if not asset_id:
+        return {"error": "asset_id is required — all graph queries must be scoped to an asset. Include asset_id in your tool call.", "success": False}
     if not _is_read_only(cypher):
         return {"error": "Only read-only Cypher allowed (no MERGE/CREATE/DELETE/SET/REMOVE)", "success": False}
 
     params = arguments.get("params") or {}
     limit = min(int(arguments.get("limit", 100)), 500)
+
+    # Hard-enforce asset scoping: auto-prepend MATCH for the asset.
+    # The variable 'a' is pre-bound to the asset — agent must path through it.
+    asset_prefix = "MATCH (a:Asset {id: $graphpt_aid})"
+    cypher = cypher.lstrip()
+    if not cypher.upper().startswith("MATCH (A:ASSET"):
+        cypher = asset_prefix + "\n" + cypher
+    params["graphpt_aid"] = asset_id
 
     if "LIMIT" not in cypher.upper():
         cypher = cypher.rstrip(";").rstrip() + f" LIMIT {limit}"

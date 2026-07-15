@@ -34,33 +34,48 @@ HTTPEndpoint -[:MAY_BE_VULNERABLE_TO]-> Vulnerability
 - HTTPEndpoint.response_file 指向响应文件路径
 - 用 `Read` 工具读取 .http 文件查看完整请求/响应
 
+### 资产隔离规则（铁律）
+
+**每条查询必须从 Asset 出发沿关系路径下钻。** 图数据库里可能有多个资产的数据，全局 MATCH 会读到脏数据。唯一正确的模式：
+
+```
+Asset {id: $asset_id}
+  → [:HAS_DOMAIN] → Domain → [:PARENT_OF*] → Domain → [:RESOLVES_TO] → IP → [:HAS_PORT] → Port → [:EXPOSES] → HTTPEndpoint → 漏洞
+  → [:HAS_IP] → IP → [:HAS_PORT] → Port → [:EXPOSES] → HTTPEndpoint
+```
+
+**错误示例（绝对不要）：**
+```cypher
+MATCH (v:Vulnerability) WHERE v.host CONTAINS 'mlws' ...  // ❌ 跨资产
+MATCH (ep:HTTPEndpoint) WHERE ep.url CONTAINS 'pass' ...   // ❌ 没从 Asset 出发
+```
+
 ### 常用 Cypher 模板
 
 ```cypher
-// 资产概览：所有域名
+// 资产概览：所有域名（正确：从 Asset 出发）
 MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(d:Domain)
-RETURN d.value, d.is_root, d.level, d.created_at
+RETURN d.value, d.is_root, d.level
 
-// 未解析的域名（没有 RESOLVES_TO 关系）
-MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(d:Domain)
-WHERE NOT (d)-[:RESOLVES_TO]->()
-RETURN d.value
+// 所有 IP + 端口（沿完整路径）
+MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(ip:IP)
+OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
+RETURN DISTINCT ip.value, collect(p.number) AS ports
 
-// 某 IP 的全部端口和服务
-MATCH (ip:IP {value: $ip})-[:HAS_PORT]->(p:Port)
-RETURN p.number, p.service
+// 直接 IP（不走域名）
+MATCH (a:Asset {id: $asset_id})-[:HAS_IP]->(ip:IP)
+OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
+RETURN ip.value, collect(p.number) AS ports
 
-// 高危漏洞 + 入口端点
-MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)
-    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-    -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
-WHERE v.severity IN ['critical', 'high']
-RETURN ep.url, v.title, v.severity, v.type
-
-// 有响应文件的端点（可读完整 HTTP 响应）
-MATCH (ep:HTTPEndpoint)
-WHERE ep.response_file IS NOT NULL
-RETURN ep.url, ep.status_code, ep.content_type, ep.response_file
+// 所有 HTTP 端点（从 Asset 出发）
+MATCH (a:Asset {id: $asset_id})
+CALL {
+  MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep
+  UNION
+  MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep
+}
+RETURN DISTINCT ep.url, ep.status_code, ep.title, ep.tech
+ORDER BY ep.url
 ```
 """
 
@@ -90,6 +105,7 @@ GRAPH_AGENT_METHODOLOGY = """
 
 ### 工具使用原则
 
+- **资产隔离（最最重要！）** — 每条 Cypher 必须以 `MATCH (a:Asset {id: $asset_id})` 开头，沿关系路径下钻。**绝不** `MATCH (n:Vulnerability)` 全局查所有漏洞，因为图里可能混入了其他资产的数据。只能通过资产的关系链条访问数据：Asset→Domain→IP→Port→HTTPEndpoint→Vulnerability
 - **手工优先** — curl/Bash/browser 直接交互，不要上来就调扫描器
 - **精准执行** — 用 run_tool_on_node 对单个节点执行，不是 trigger_scan 全量扫描
 - **闭环验证** — 工具跑了要看结果，确认漏洞是否真实存在
