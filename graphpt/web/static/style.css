@@ -58,6 +58,9 @@
   .card .value.orange { color: var(--orange); }
   .card .value.red { color: var(--red); }
   .card .value.purple { color: var(--purple); }
+.card .value.crit { color: var(--red); }
+.card .value.warn { color: var(--orange); }
+.card .sub { font-size: 11px; color: var(--muted); margin-top: 4px; }
 
   /* Tables */
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -224,3 +227,21 @@
   #running-tasks-tbody tr:last-child td { border-bottom:none; }
   #sys-pressure-badge { animation:pulse 1.5s ease-in-out infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  @keyframes spin { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
+
+  /* Scan Config Modal */
+  .profile-card {
+    position: relative;
+    text-align: center;
+    transition: all 0.2s ease;
+  }
+  .profile-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,.1);
+  }
+  .profile-card.active {
+    box-shadow: 0 4px 16px rgba(60,90,120,.3);
+  }
+  #scan-config-wordlists tr:hover {
+    background: var(--bg);
+  }
