@@ -2107,16 +2107,14 @@ window.loadAgentSessions = loadAgentSessions;
 
 function startAgent() {
   const assetId = document.getElementById('agent-asset').value.trim();
-  if(!assetId){ toast('Enter an asset ID', false); return; }
-  const prompt = document.getElementById('agent-prompt').value.trim();
-  if(!prompt){ toast('Enter a task', false); return; }
+  if(!assetId){ toast('Select an asset first', false); return; }
   document.getElementById('agent-output').textContent = 'Starting agent...';
   document.getElementById('agent-tools').innerHTML = '';
   document.getElementById('agent-start-btn').style.display = 'none';
   document.getElementById('agent-stop-btn').style.display = '';
   document.getElementById('agent-status').textContent = 'Starting...';
   document.getElementById('agent-steer-btn').disabled = false;
-  fetch('/api/agent/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId, prompt:prompt})})
+  fetch('/api/agent/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId, prompt:' '})})
     .then(r=>r.json()).then(d=>{
       if(!d.ok){ toast(d.error||'failed', false); agentReset(); return; }
       _agentSessionId = d.session_id;
