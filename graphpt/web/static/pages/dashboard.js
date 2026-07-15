@@ -30,8 +30,6 @@ export async function loadDashboard() {
 
   try {
     // 并行加载各个面板
-    loadEndpoints();
-    loadRecentActivity();
     loadCountCards();
     loadScanCards();
     loadErrors();
@@ -45,40 +43,6 @@ export async function loadDashboard() {
   }
 
   document.getElementById('dash-loading').style.display = 'none';
-}
-
-/**
- * 加载端点列表
- */
-async function loadEndpoints() {
-  try {
-    const res = await fetch(aq(API + '/dashboard/endpoints?limit=15', currentAsset));
-    const json = await res.json();
-    const endpoints = json.data || [];
-    const rows = endpoints.map(e => {
-      const badge = e.status === 'success' ? 'ok' : e.status === 'error' ? 'err' : 'warn';
-      return `<tr><td><span class="badge ${badge}">${e.status || 'unknown'}</span></td><td>${esc(e.url || '')}</td><td>${e.status_code || '-'}</td></tr>`;
-    }).join('');
-    document.getElementById('dash-endpoints').innerHTML = rows || '<tr><td colspan="3" style="color:var(--muted)">No endpoints</td></tr>';
-  } catch (e) { /* ignore */ }
-}
-
-/**
- * 加载最近活动
- */
-async function loadRecentActivity() {
-  try {
-    const res = await fetch(aq(API + '/dashboard/recent?limit=10', currentAsset));
-    const json = await res.json();
-    const recent = json.data || {};
-
-    // 最近发现的子域名
-    const subRows = (recent.recent_subdomains || []).map(s =>
-      `<tr><td>${esc(s.subdomain || s.value)}</td><td style="color:var(--muted);font-size:11px">新发现</td><td>${fmtTime(s.ts || s.created_at)}</td></tr>`
-    ).join('');
-    document.getElementById('dash-recent-subs').innerHTML = subRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
-
-  } catch (e) { /* ignore */ }
 }
 
 /**
