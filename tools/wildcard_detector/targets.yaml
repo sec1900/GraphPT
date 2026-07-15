@@ -1,0 +1,11 @@
+selectors:
+  wildcard_detector:
+    desc: "泛解析检测 — 对所有根域名检测 Wildcard DNS"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      MATCH (a)-[:HAS_DOMAIN]->(d:Domain)
+      WHERE d.is_root = true
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = d.value }
+      RETURN d.value AS domain
+    mapping:
+      domain: "{domain}"

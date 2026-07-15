@@ -3,8 +3,8 @@ selectors:
     desc: "SQLi 检测 — 对所有带参数的 URL 自动测试注入"
     query: |
       MATCH (a:Asset {id: $asset_id})
-      CALL (a, a) {
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+      CALL {
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         RETURN ep
         UNION
         MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
@@ -14,7 +14,6 @@ selectors:
       WHERE (ep.url CONTAINS '?' OR ep.method IN ['POST', 'PUT', 'PATCH'])
         AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
       RETURN ep.url AS url, ep.method AS method
-      LIMIT 50
     mapping:
-      url: '{url}'
-      method: '{method}'
+      url: "{url}"
+      method: "{method}"

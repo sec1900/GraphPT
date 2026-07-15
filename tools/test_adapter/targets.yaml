@@ -1,0 +1,9 @@
+selectors:
+  test_adapter:
+    desc: "测试适配器 — 域名错误处理场景"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      MATCH (a)-[:HAS_DOMAIN]->(d:Domain)
+      RETURN d.value AS domain
+    mapping:
+      domain: "{domain}"

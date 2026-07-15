@@ -1,3 +1,4 @@
+bin: "python {tool_dir}/oob.py"
 desc: "OOB 带外交互验证 — 轮询 interactsh 回调并关联漏洞"
 command: "{bin} -json -poll-interval 3"
 use_on:

@@ -1,9 +1,9 @@
 selectors:
-  browser_probe:
-    desc: "浏览器探测 — 对首页/主要端点做 JS 渲染发现"
+  webpack_analyzer:
+    desc: "Webpack Bundle 分析 — 对所有 HTTPEndpoint 做 JS bundle 提取"
     query: |
       MATCH (a:Asset {id: $asset_id})
-      CALL {
+      CALL (a) {
         MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         RETURN ep
         UNION
@@ -11,8 +11,7 @@ selectors:
         RETURN ep
       }
       WITH DISTINCT ep
-      WHERE ep.status_code = 200
-        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+      WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
       RETURN ep.url AS url
     mapping:
       url: "{url}"

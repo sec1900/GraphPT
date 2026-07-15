@@ -1,0 +1,11 @@
+selectors:
+  interactsh:
+    desc: "需要 OOB 验证的漏洞实例"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      MATCH (v:Vulnerability)
+      WHERE v.type IN ['ssrf', 'xxe', 'rce', 'blind-sqli']
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = v.id }
+      RETURN v.id AS target_id, v.title AS title, v.type AS type
+    mapping:
+      target_id: "{target_id}"
