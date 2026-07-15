@@ -49,9 +49,9 @@
       <span style="font-size:11px;color:var(--muted)">Proxy:</span>
       <input type="number" id="mitm-port" value="8888" style="width:52px;font-size:11px;padding:2px 4px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text)">
       <button class="btn outline" onclick="toggleMitm()" id="btn-mitm-toggle" style="font-size:11px" title="Traffic intercept proxy">📷</button>
-      <button class="btn outline" onclick="showScanConfig()" style="font-size:11px">⚙️</button>
-      <button class="btn outline" onclick="showToolsValidation()" style="font-size:11px">🔧</button>
-      <button class="btn outline" onclick="generateReport('markdown')" style="font-size:11px">📄</button>
+      <button class="btn outline" onclick="showScanConfig()" style="font-size:11px" title="Scan Settings">⚙️ Settings</button>
+      <button class="btn outline" onclick="showToolsValidation()" style="font-size:11px" title="Tools Health">🔧 Tools</button>
+      <button class="btn outline" onclick="generateReport('markdown')" style="font-size:11px" title="Download Report">📄 Report</button>
       <span style="font-size:11px;color:var(--muted);margin-left:8px" id="dash-asset-name"></span>
     </div>
     <div id="mitm-status" style="display:none;margin-bottom:8px;padding:6px 12px;background:var(--surface);border:1px solid var(--accent);border-radius:4px;font-size:11px">
