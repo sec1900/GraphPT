@@ -2054,36 +2054,41 @@ let _agentSessionId = null;
 let _agentPoll = null;
 
 function loadAgent() {
-  const sel = document.getElementById('agent-asset-sel');
-  fetch('/api/assets').then(r=>r.json()).then(d=>{
-    sel.innerHTML = (d.data||[]).map(a=>`<option value="${a.id}">${a.name||a.id}</option>`).join('');
-  }).catch(()=>{});
-  refreshAgentSessions();
-}
-
-function refreshAgentSessions() {
-  fetch('/api/agent/status').then(r=>r.json()).then(d=>{
-    const box = document.getElementById('agent-sessions');
-    const sessions = d.sessions || {};
-    const keys = Object.keys(sessions);
-    if(!keys.length){ box.textContent='No sessions'; return; }
-    box.innerHTML = keys.map(k=>`<div style="margin-bottom:4px"><span class="badge ${sessions[k]==='done'?'ok':sessions[k]==='error'?'err':'warn'}">${sessions[k]}</span> ${k}</div>`).join('');
-  });
+  const input = document.getElementById('agent-asset');
+  if (!input) return;
+  // Set default from currentAsset if available
+  if (window.currentAsset) input.value = window.currentAsset;
 }
 
 function startAgent() {
-  const assetId = document.getElementById('agent-asset-sel').value;
-  if(!assetId){ toast('Select an asset','err'); return; }
+  const assetId = document.getElementById('agent-asset').value.trim();
+  if(!assetId){ toast('Enter an asset ID', false); return; }
   const prompt = document.getElementById('agent-prompt').value.trim();
+  if(!prompt){ toast('Enter a prompt', false); return; }
   document.getElementById('agent-output').textContent = 'Starting agent...';
+  document.getElementById('agent-tools').innerHTML = '';
+  document.getElementById('agent-start-btn').style.display = 'none';
+  document.getElementById('agent-stop-btn').style.display = '';
+  document.getElementById('agent-status').textContent = 'Starting...';
   fetch('/api/agent/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_id:assetId, prompt:prompt})})
     .then(r=>r.json()).then(d=>{
-      if(!d.ok){ toast(d.error||'failed','err'); return; }
+      if(!d.ok){ toast(d.error||'failed', false); agentReset(); return; }
       _agentSessionId = d.session_id;
-      document.getElementById('agent-status').innerHTML = `<span class="badge warn">running</span> ${d.session_id}`;
-      document.getElementById('agent-prompt').value = '';
+      document.getElementById('agent-status').textContent = 'Running';
       pollAgent();
     });
+}
+
+function agentStop() {
+  if (_agentPoll) { clearInterval(_agentPoll); _agentPoll = null; }
+  _agentSessionId = null;
+  agentReset();
+  document.getElementById('agent-status').textContent = 'Stopped';
+}
+
+function agentReset() {
+  document.getElementById('agent-start-btn').style.display = '';
+  document.getElementById('agent-stop-btn').style.display = 'none';
 }
 
 function sendAgentPrompt() {
@@ -2107,33 +2112,48 @@ function pollAgent() {
     if(!_agentSessionId) return;
     fetch(`/api/agent/status?session_id=${_agentSessionId}`).then(r=>r.json()).then(d=>{
       const out = document.getElementById('agent-output');
+      const toolsDiv = document.getElementById('agent-tools');
+
+      // Update tool calls log
+      if (toolsDiv && d.logs && d.logs.length) {
+        let html = '';
+        for (let i = Math.max(0, d.logs.length - 40); i < d.logs.length; i++) {
+          const l = d.logs[i];
+          if (l.includes('调用工具') || l.includes('tool')) {
+            html += '<div style="font-size:11px;padding:3px 0;border-bottom:1px solid var(--border)">' + esc(l.substring(0, 220)) + '</div>';
+          }
+        }
+        if (html) toolsDiv.innerHTML = html;
+      }
+
       if(d.status==='running'){
         let txt = '';
-        if(d.logs && d.logs.length) txt += d.logs.map(l=>'[status] '+l).join('\n')+'\n\n';
         if(d.output_buf) txt += d.output_buf;
         if(txt) out.textContent = txt;
         out.scrollTop = out.scrollHeight;
       } else if(d.status==='done'){
         clearInterval(_agentPoll);
-        document.getElementById('agent-status').innerHTML = `<span class="badge ok">done</span> ${_agentSessionId} (${d.tool_calls||0} tool calls)`;
-        // 保留完整日志 + 流式输出，最后附上报告分隔线
+        _agentPoll = null;
+        agentReset();
+        document.getElementById('agent-status').textContent = 'Done (' + (d.tool_calls||0) + ' tool calls)';
         let txt = '';
-        if(d.logs && d.logs.length) txt += d.logs.map(l=>'[status] '+l).join('\n')+'\n\n';
         if(d.output_buf) txt += d.output_buf + '\n\n';
-        txt += '══════════════ 最终报告 ══════════════\n\n';
+        txt += '=== FINAL REPORT ===\n\n';
         txt += d.result||'(no output)';
         out.textContent = txt;
         out.scrollTop = out.scrollHeight;
-        refreshAgentSessions();
       } else if(d.status==='error'){
         clearInterval(_agentPoll);
+        _agentPoll = null;
+        agentReset();
         document.getElementById('agent-status').innerHTML = `<span class="badge err">error</span> ${_agentSessionId}`;
         out.textContent = d.error||'Unknown error';
-        refreshAgentSessions();
       }
     });
-  }, 1500);
+  }, 2000);
 }
+window.agentStart = startAgent;
+window.agentStop = agentStop;
 
 // ============================================================
 // Tool Logs Viewer
@@ -2797,8 +2817,8 @@ window._rowActions = _rowActions;
 window.runToolOnNode = runToolOnNode;
 window.renderToolContextMenu = renderToolContextMenu;
 window.startAgent = startAgent;
+window.agentStop = agentStop;
 window.sendAgentPrompt = sendAgentPrompt;
-window.refreshAgentSessions = refreshAgentSessions;
 window.loadLogList = loadLogList;
 window.openLog = openLog;
 window.refreshLog = refreshLog;
@@ -3187,90 +3207,4 @@ window.showScanConfig = showScanConfig;
 window.selectProfile = selectProfile;
 window.saveScanConfig = saveScanConfig;
 window.closeScanConfig = closeScanConfig;
-
-// ============================================================
-// Agent Page
-// ============================================================
-
-let _agentSid = null;
-let _agentPoll = null;
-
-async function agentStart() {
-  const prompt = document.getElementById('agent-prompt').value.trim();
-  const asset = document.getElementById('agent-asset').value.trim();
-  if (!prompt) return toast('Enter a prompt first', false);
-  if (!asset) return toast('Enter an asset ID', false);
-
-  document.getElementById('agent-start-btn').style.display = 'none';
-  document.getElementById('agent-stop-btn').style.display = '';
-  document.getElementById('agent-status').textContent = 'Starting...';
-  document.getElementById('agent-output').textContent = '';
-  document.getElementById('agent-tools').innerHTML = '';
-
-  try {
-    const r = await fetch(API + '/agent/run', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({asset_id: asset, prompt})
-    });
-    const j = await r.json();
-    if (!j.ok) { toast(j.error || 'Failed', false); agentReset(); return; }
-    _agentSid = j.session_id;
-    document.getElementById('agent-status').textContent = 'Running';
-    _agentPoll = setInterval(agentPoll, 2000);
-  } catch(e) { toast(e.message, false); agentReset(); }
-}
-
-function agentStop() {
-  if (_agentPoll) { clearInterval(_agentPoll); _agentPoll = null; }
-  _agentSid = null;
-  agentReset();
-  document.getElementById('agent-status').textContent = 'Stopped';
-}
-
-function agentReset() {
-  document.getElementById('agent-start-btn').style.display = '';
-  document.getElementById('agent-stop-btn').style.display = 'none';
-}
-
-async function agentPoll() {
-  if (!_agentSid) return;
-  try {
-    const r = await fetch(API + '/agent/status?session_id=' + encodeURIComponent(_agentSid));
-    const j = await r.json();
-    const s = j.data || j;
-
-    // Update output
-    const out = s.output_buf || '';
-    if (out) document.getElementById('agent-output').textContent = out;
-
-    // Update tool calls
-    const logs = s.logs || [];
-    let toolHtml = '';
-    for (let i = Math.max(0, logs.length - 30); i < logs.length; i++) {
-      const l = logs[i];
-      if (l.includes('调用工具') || l.includes('tool') || l.includes('Tool')) {
-        toolHtml += '<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--border)">' + esc(l.substring(0, 200)) + '</div>';
-      }
-    }
-    if (toolHtml) document.getElementById('agent-tools').innerHTML = toolHtml;
-
-    // Check done
-    if (s.status === 'done') {
-      if (_agentPoll) { clearInterval(_agentPoll); _agentPoll = null; }
-      document.getElementById('agent-status').textContent = 'Done';
-      agentReset();
-      const result = s.result || '';
-      if (result) document.getElementById('agent-output').textContent += '\n\n=== RESULT ===\n' + result;
-    } else if (s.status === 'error') {
-      if (_agentPoll) { clearInterval(_agentPoll); _agentPoll = null; }
-      document.getElementById('agent-status').textContent = 'Error';
-      agentReset();
-      document.getElementById('agent-output').textContent += '\n\nERROR: ' + (s.result || '');
-    }
-  } catch(e) {}
-}
-
-window.agentStart = agentStart;
-window.agentStop = agentStop;
 
