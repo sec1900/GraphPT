@@ -316,10 +316,10 @@ async function loadSystemResources() {
       const toolMem = (d.tool_mem_total_mb || 0);
       const pctCls = (v) => v >= 90 ? 'crit' : v >= 75 ? 'warn' : '';
       const sysHtml = `
-        <div class="card sys-card"><div class="label">CPU</div><div class="value ${pctCls(cpu.percent || 0)}">${cpu.percent || 0}%</div><div class="sub"${cpu.cores || 0} cores</div></div>
-        <div class="card sys-card"><div class="label">Memory</div><div class="value ${pctCls(mem.percent || 0)}">${mem.percent || 0}%</div><div class="sub"${mem.used_gb != null ? mem.used_gb + ' / ' + mem.total_gb + ' GB' : ''}</div></div>
-        <div class="card sys-card"><div class="label">Disk</div><div class="value ${pctCls(disk.percent || 0)}">${disk.percent || 0}%</div><div class="sub"${disk.free_gb != null ? disk.free_gb + ' GB free' : ''}</div></div>
-        ${toolCount > 0 ? `<div class="card sys-card"><div class="label">Processes</div><div class="value warn">${toolCount}</div><div class="sub"${toolMem} MB</div></div>` : ''}
+        <div class="card sys-card"><div class="label">CPU</div><div class="value ${pctCls(cpu.percent || 0)}">${cpu.percent || 0}%</div><div class="sub">${cpu.cores || 0} cores</div></div>
+        <div class="card sys-card"><div class="label">Memory</div><div class="value ${pctCls(mem.percent || 0)}">${mem.percent || 0}%</div><div class="sub">${mem.used_gb != null ? mem.used_gb + ' / ' + mem.total_gb + ' GB' : ''}</div></div>
+        <div class="card sys-card"><div class="label">Disk</div><div class="value ${pctCls(disk.percent || 0)}">${disk.percent || 0}%</div><div class="sub">${disk.free_gb != null ? disk.free_gb + ' GB free' : ''}</div></div>
+        ${toolCount > 0 ? `<div class="card sys-card"><div class="label">Processes</div><div class="value warn">${toolCount}</div><div class="sub">${toolMem} MB</div></div>` : ''}
       `;
       sysCards.insertAdjacentHTML('beforeend', sysHtml);
     }
