@@ -2073,11 +2073,12 @@ function loadAgentSessions() {
       const badge = status === 'done' ? 'ok' : status === 'error' ? 'err' : status === 'orphaned' ? 'stopped' : 'warn';
       const canStop = status === 'running' || status === 'orphaned';
       const stopBtn = canStop
-        ? ' <button class="btn outline small" style="font-size:9px;padding:1px 4px;margin-left:4px" onclick="event.stopPropagation();agentStopSession(\'' + k + '\')">Stop</button>'
+        ? ' <button class="btn outline small" style="font-size:9px;padding:1px 4px;margin-left:2px" onclick="event.stopPropagation();agentStopSession(\'' + k + '\')">Stop</button>'
         : '';
+      const delBtn = ' <button class="btn outline small" style="font-size:9px;padding:1px 4px;margin-left:2px;color:var(--red)" onclick="event.stopPropagation();agentDeleteSession(\'' + k + '\')">Del</button>';
       return '<div style="padding:4px 0;border-bottom:1px solid var(--border);cursor:pointer;font-size:11px" onclick="loadAgentSession(\'' + k + '\')">'
         + '<span class="badge ' + badge + '">' + status + '</span> '
-        + k.substring(0, 12) + '...' + stopBtn + '</div>';
+        + k.substring(0, 12) + '...' + stopBtn + delBtn + '</div>';
     }).join('');
   });
 }
@@ -2091,6 +2092,16 @@ function agentStopSession(sid) {
     });
 }
 window.agentStopSession = agentStopSession;
+
+function agentDeleteSession(sid) {
+  if (!confirm('Delete session ' + sid.substring(0, 12) + ' and all its data?')) return;
+  fetch('/api/agent/session/' + encodeURIComponent(sid), {method:'DELETE'})
+    .then(r=>r.json()).then(d=>{
+      if (d.ok) { toast('Deleted'); loadAgentSessions(); }
+      else toast(d.error || 'Failed', false);
+    });
+}
+window.agentDeleteSession = agentDeleteSession;
 
 function loadAgentSession(sid) {
   fetch('/api/agent/status?session_id=' + encodeURIComponent(sid)).then(r=>r.json()).then(d=>{

@@ -4365,6 +4365,23 @@ async def api_agent_steer(req: _SteerRequest):
     return {"ok": True}
 
 
+@web_app.delete("/api/agent/session/{session_id}")
+async def api_agent_delete(session_id: str):
+    """删除 Agent 会话文件。"""
+    path = _agent_session_path(session_id)
+    jsonl = _agent_events_path(session_id)
+    deleted = 0
+    try:
+        if path.exists(): path.unlink(); deleted += 1
+        if jsonl.exists(): jsonl.unlink(); deleted += 1
+    except OSError as e:
+        raise HTTPException(500, str(e))
+    with _agent_lock:
+        _agent_sessions.pop(session_id, None)
+        _agent_stops.pop(session_id, None)
+    return {"ok": True, "deleted": session_id, "files": deleted}
+
+
 @web_app.post("/api/agent/stop")
 async def api_agent_stop(body: dict):
     """停止 Agent 会话（无论新旧，更新状态并设 stop 信号）。"""
