@@ -2054,19 +2054,6 @@ let _agentSessionId = null;
 let _agentPoll = null;
 
 function loadAgent() {
-  const sel = document.getElementById('agent-asset');
-  if (!sel) return;
-  sel.innerHTML = '<option value="">Select asset...</option>';
-  fetch('/api/assets').then(r=>r.json()).then(d=>{
-    (d.data||[]).forEach(a => {
-      const o = document.createElement('option');
-      o.value = a.id; o.textContent = a.name || a.id;
-      if (a.id === window.currentAsset) o.selected = true;
-      sel.appendChild(o);
-    });
-  }).catch(()=>{
-    sel.innerHTML = '<option value="mlws">mlws1900.cn</option>';
-  });
   loadAgentSessions();
 }
 
@@ -2120,8 +2107,8 @@ window.loadAgentSession = loadAgentSession;
 window.loadAgentSessions = loadAgentSessions;
 
 function startAgent() {
-  const assetId = document.getElementById('agent-asset').value.trim();
-  if(!assetId){ toast('Select an asset first', false); return; }
+  const assetId = window.currentAsset;
+  if(!assetId){ toast('Select an asset first (top bar)', false); return; }
   document.getElementById('agent-output').textContent = 'Starting agent...';
   document.getElementById('agent-tools').innerHTML = '';
   document.getElementById('agent-start-btn').style.display = 'none';
