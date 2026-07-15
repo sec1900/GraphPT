@@ -78,25 +78,6 @@ async function loadRecentActivity() {
     ).join('');
     document.getElementById('dash-recent-subs').innerHTML = subRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
 
-    // 最近变化
-    const changes = recent.recent_changes || [];
-    const changeLimit = 5;
-    const fieldNames = { 'status_code': '状态码', 'title': '标题', 'body_hash': '内容', 'ssl_cert_cn': '证书' };
-
-    let chRows = '';
-    changes.forEach((c, i) => {
-      const changed = (c.fields || []).map(f => fieldNames[f] || f).join(', ') || '属性更新';
-      const hidden = i >= changeLimit ? ' style="display:none" class="dash-fold-row"' : '';
-      chRows += `<tr${hidden}><td><span class="badge warn">更新</span> ${changed}</td><td>${esc(c.url || '')}</td><td>${fmtTime(c.changed_at)}</td></tr>`;
-    });
-
-    if (changes.length > changeLimit) {
-      chRows += `<tr><td colspan="3" style="text-align:center;padding:4px">
-        <button class="btn outline small" onclick="toggleDashFold(this, ${changes.length - changeLimit})" style="font-size:10px">Show ${changes.length - changeLimit} more</button>
-      </td></tr>`;
-    }
-
-    document.getElementById('dash-changes').innerHTML = chRows || '<tr><td colspan="3" style="color:var(--muted)">None</td></tr>';
   } catch (e) { /* ignore */ }
 }
 
