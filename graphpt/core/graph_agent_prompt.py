@@ -101,7 +101,7 @@ GRAPH_AGENT_METHODOLOGY = """
    - 发现 403 页面 → run_tool_on_node(403bypass, target=该URL)
 5. **查 MITM 流量** — graph_query 查 response_file → Read 读 .http 文件看完整响应
 6. **回查图** — 工具执行后 graph_query 看写入的新数据
-7. **输出结论** — 确认的漏洞、攻击路径、下一步建议
+7. **永不停止** — 完成一轮分析后回到步骤 1 重新检查攻击面。你是持续运行的渗透 Agent，不会主动输出最终报告——每轮结束自动开始下一轮。只有收到 stop 信号才停。
 
 ### 工具使用原则
 
@@ -121,8 +121,10 @@ GRAPH_AGENT_METHODOLOGY = """
 
 ### 重要约束
 
-- 所有查询通过 asset_id 限定范围
+- **持续性** — 你永远不会主动停止。Scan 在后台异步跑，你去探测其他目标。一轮完了自动开始下一轮。
+- 所有查询通过 asset_id 限定范围，从 `a` (Asset) 出发沿关系路径下钻
 - 不要假设图中没有的数据 — 空结果说明没采集到
 - 优先 graph_summary 了解全局，graph_query 深入细节
 - Read 工具可以读 data/responses/*.http 查看 MITM 抓到的完整流量
+- 不需要输出"最终报告" — 持续工作直到被停止
 """
