@@ -4144,6 +4144,38 @@ def _load_agent_session(session_id: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _cleanup_orphaned_sessions() -> int:
+    """启动时清理残留的 running 会话（后端重启导致 agent 线程已死）。"""
+    cleaned = 0
+    if not _AGENT_SESSION_DIR.exists():
+        return 0
+    for path in _AGENT_SESSION_DIR.glob("*.json"):
+        sid = path.stem
+        data = _load_agent_session(sid)
+        if data and str(data.get("status")) == "running":
+            _update_agent_session_on_disk(sid, {"status": "orphaned", "error": "Backend restarted — agent process lost"})
+            cleaned += 1
+    if cleaned:
+        _log.info("orphaned_agent_sessions_cleaned", extra={"count": cleaned})
+    return cleaned
+
+
+def _update_agent_session_on_disk(session_id: str, updates: dict) -> None:
+    """直接更新持久化的 session JSON 文件（不依赖 in-memory dict）。"""
+    data = _load_agent_session(session_id) or {}
+    data.update(updates)
+    try:
+        _AGENT_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        with open(_agent_session_path(session_id), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, default=str)
+    except OSError:
+        pass
+
+
+# 启动时清理孤儿会话
+_cleanup_orphaned_sessions()
+
+
 def _list_agent_session_statuses() -> dict[str, str]:
     statuses: dict[str, str] = {}
     if _AGENT_SESSION_DIR.exists():
@@ -4334,16 +4366,30 @@ async def api_agent_steer(req: _SteerRequest):
 
 @web_app.post("/api/agent/stop")
 async def api_agent_stop(body: dict):
-    """停止运行中的 Agent 会话。"""
+    """停止 Agent 会话（无论新旧，更新状态并设 stop 信号）。"""
     sid = (body.get("session_id") or "").strip()
     if not sid:
         raise HTTPException(400, "session_id required")
+
+    stopped = False
+    # 1. Try stop event (for sessions started after this backend instance)
     with _agent_lock:
         evt = _agent_stops.get(sid)
-    if evt:
-        evt.set()
+        if evt:
+            evt.set()
+            stopped = True
+
+    # 2. Also update in-memory + persisted status
+    _update_agent_session_on_disk(sid, {"status": "stopped", "error": "Stopped by user"})
+    with _agent_lock:
+        sess = _agent_sessions.get(sid)
+        if sess:
+            sess["status"] = "stopped"
+            stopped = True
+
+    if stopped:
         return {"ok": True, "stopped": sid}
-    return {"ok": False, "error": "session not running or already stopped"}
+    return {"ok": True, "stopped": sid, "note": "Session marked as stopped"}
 
 
 # ============================================================
