@@ -30,8 +30,7 @@ export async function loadDashboard() {
 
   try {
     // 并行加载各个面板
-    loadCountCards();
-    loadScanCards();
+    loadAllCards();
     loadErrors();
     loadSeverityChart();
 
@@ -46,67 +45,62 @@ export async function loadDashboard() {
 }
 
 /**
- * 加载统计卡片
+ * 一次性加载所有卡片（并行请求 → 统一渲染）
  */
-async function loadCountCards() {
-  try {
-    const res = await fetch(aq(API + '/dashboard/counts', currentAsset));
-    const json = await res.json();
-    const cnt = json.data || {};
-
-    const cards = [
-      { label: 'Domains', value: cnt.domains || 0, cls: 'accent' },
-      { label: 'IP Addresses', value: cnt.ips || 0, cls: 'green' },
-      { label: 'Open Ports', value: cnt.ports || 0, cls: 'orange' },
-      { label: 'HTTP Endpoints', value: cnt.http_endpoints || 0, cls: 'purple' },
-    ];
-
-    const countHtml = cards.map(c =>
-      `<div class="card"><div class="label">${c.label}</div><div class="value ${c.cls}">${c.value}</div></div>`
-    ).join('');
-
-    // 保留可能已存在的 Scan Progress 卡片
-    const existing = document.getElementById('dash-cards').innerHTML;
-    const scanIdx = existing.indexOf('Scan Progress');
-    const scanSuffix = scanIdx >= 0 ? existing.substring(scanIdx) : '';
-
-    document.getElementById('dash-cards').innerHTML = countHtml + scanSuffix;
-  } catch (e) { /* ignore */ }
-}
-
-/**
- * 加载扫描卡片
- */
-async function loadScanCards() {
+async function loadAllCards() {
   const cardsEl = document.getElementById('dash-cards');
   if (!cardsEl) return;
 
-  try {
-    const spRes = await fetchTimeout(aq(API + '/scan/progress?asset_id=' + currentAsset, currentAsset), null, 8000);
-    const sp = spRes ? await spRes.json() : {};
+  // 并行请求所有数据
+  const [cntRes, spRes, hRes, sysRes] = await Promise.allSettled([
+    fetch(aq(API + '/dashboard/counts', currentAsset)).then(r => r.json()),
+    fetchTimeout(aq(API + '/scan/progress?asset_id=' + currentAsset, currentAsset), null, 8000).then(r => r?.json()),
+    fetchTimeout(aq(API + '/scan/history?asset_id=' + currentAsset, currentAsset), null, 8000).then(r => r?.json()),
+    fetchTimeout(API + '/system/resources', null, 5000).then(r => r?.json()),
+  ]);
 
-    if (sp.ok && sp.data && sp.data.layers) {
-      let done = 0, total = 0;
-      sp.data.layers.forEach(l => {
-        l.tools.forEach(t => {
-          if (t.scans > 0) done++;
-          total++;
-        });
-      });
-      const overall = total > 0 ? Math.round(done / total * 100) : 0;
-      cardsEl.innerHTML += `<div class="card"><div class="label">Scan Progress</div><div class="value accent">${overall}%</div></div>`;
+  const cnt = cntRes.status === 'fulfilled' ? (cntRes.value.data || {}) : {};
+  const sp = spRes.status === 'fulfilled' ? (spRes.value || {}) : {};
+  const h = hRes.status === 'fulfilled' ? (hRes.value || {}) : {};
+  const sys = sysRes.status === 'fulfilled' ? (sysRes.value.data || {}) : {};
+
+  // 资产卡片
+  const cards = [
+    `<div class="card"><div class="label">Domains</div><div class="value accent">${cnt.domains || 0}</div></div>`,
+    `<div class="card"><div class="label">IP Addresses</div><div class="value green">${cnt.ips || 0}</div></div>`,
+    `<div class="card"><div class="label">Open Ports</div><div class="value orange">${cnt.ports || 0}</div></div>`,
+    `<div class="card"><div class="label">HTTP Endpoints</div><div class="value purple">${cnt.http_endpoints || 0}</div></div>`,
+  ];
+
+  // 扫描进度
+  if (sp.ok && sp.data && sp.data.layers) {
+    let done = 0, total = 0;
+    sp.data.layers.forEach(l => l.tools.forEach(t => { if (t.scans > 0) done++; total++; }));
+    cards.push(`<div class="card"><div class="label">Scan Progress</div><div class="value accent">${total > 0 ? Math.round(done / total * 100) : 0}%</div></div>`);
+  }
+
+  // 扫描历史
+  if (h.ok && h.data && h.data.last_scan) {
+    cards.push(`<div class="card"><div class="label">Last Scan</div><div class="value accent">${fmtTime(h.data.last_scan)}</div></div>`);
+    cards.push(`<div class="card"><div class="label">Total Scans</div><div class="value green">${h.data.total_scans}</div></div>`);
+  }
+
+  // 系统资源
+  if (sys.cpu) {
+    const pctCls = (v) => v >= 90 ? 'crit' : v >= 75 ? 'warn' : '';
+    const tools = sys.tool_processes || [];
+    cards.push(
+      `<div class="card sys-card"><div class="label">CPU</div><div class="value ${pctCls(sys.cpu.percent || 0)}">${sys.cpu.percent || 0}%</div><div class="sub">${sys.cpu.cores || 0} cores</div></div>`,
+      `<div class="card sys-card"><div class="label">Memory</div><div class="value ${pctCls(sys.memory?.percent || 0)}">${sys.memory?.percent || 0}%</div><div class="sub">${sys.memory?.used_gb != null ? sys.memory.used_gb + ' / ' + sys.memory.total_gb + ' GB' : ''}</div></div>`,
+      `<div class="card sys-card"><div class="label">Disk</div><div class="value ${pctCls(sys.disk?.percent || 0)}">${sys.disk?.percent || 0}%</div><div class="sub">${sys.disk?.free_gb != null ? sys.disk.free_gb + ' GB free' : ''}</div></div>`,
+    );
+    if (tools.length) {
+      const toolMem = sys.tool_mem_total_mb || 0;
+      cards.push(`<div class="card sys-card"><div class="label">Processes</div><div class="value warn">${tools.length}</div><div class="sub">${toolMem} MB</div></div>`);
     }
-  } catch (e) { /* ignore */ }
+  }
 
-  try {
-    const hRes = await fetchTimeout(aq(API + '/scan/history?asset_id=' + currentAsset, currentAsset), null, 8000);
-    const h = hRes ? await hRes.json() : {};
-
-    if (h.ok && h.data.last_scan) {
-      cardsEl.innerHTML += `<div class="card"><div class="label">Last Scan</div><div class="value accent">${fmtTime(h.data.last_scan)}</div></div>`;
-      cardsEl.innerHTML += `<div class="card"><div class="label">Total Scans</div><div class="value green">${h.data.total_scans}</div></div>`;
-    }
-  } catch (e) { /* ignore */ }
+  cardsEl.innerHTML = cards.join('');
 }
 
 /**
