@@ -186,14 +186,25 @@ async function loadErrors() {
     if (errors.length === 0) {
       errRows += '<tr><td colspan="4" style="color:var(--green);text-align:center">No errors</td></tr>';
     } else {
-      errors.forEach((e, i) => {
-        const hidden = i >= errLimit ? ' style="display:none" class="dash-fold-row"' : '';
-        errRows += `<tr${hidden}><td><span class="badge err">${esc(e.kind)}</span></td><td><b>${esc(e.tool)}</b></td><td style="font-size:11px;color:var(--muted)">${esc((e.message || '').substring(0, 120))}</td><td>${fmtTime(e.time)}</td></tr>`;
+      // Dedup identical errors: count occurrences, show latest time
+      const deduped = new Map();
+      errors.forEach(e => {
+        const key = e.tool + '|' + e.kind + '|' + (e.message || '').substring(0, 80);
+        const prev = deduped.get(key);
+        if (!prev || e.time > prev.time) deduped.set(key, { ...e, count: (prev ? prev.count + 1 : 1) });
+      });
+      let shown = 0;
+      deduped.forEach((e) => {
+        const hidden = shown >= errLimit ? ' style="display:none" class="dash-fold-row"' : '';
+        const suffix = e.count > 1 ? ` (x${e.count})` : '';
+        errRows += `<tr${hidden}><td><span class="badge err">${esc(e.kind)}</span></td><td><b>${esc(e.tool)}</b>${suffix}</td><td style="font-size:11px;color:var(--muted)">${esc((e.message || '').substring(0, 120))}</td><td>${fmtTime(e.time)}</td></tr>`;
+        shown++;
       });
 
-      if (errors.length > errLimit) {
+      const moreCount = deduped.size - errLimit;
+      if (moreCount > 0) {
         errRows += `<tr><td colspan="4" style="text-align:center;padding:4px">
-          <button class="btn outline small" onclick="toggleDashFold(this, ${errors.length - errLimit})" style="font-size:10px">Show ${errors.length - errLimit} more</button>
+          <button class="btn outline small" onclick="toggleDashFold(this, ${moreCount})" style="font-size:10px">Show ${moreCount} more</button>
         </td></tr>`;
       }
     }
