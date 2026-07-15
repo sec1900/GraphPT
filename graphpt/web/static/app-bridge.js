@@ -41,6 +41,7 @@ window.addEventListener('asset-changed', (e) => {
   else if (activePage.id === 'page-assets') window.renderAssetsPage();
   else if (activePage.id === 'page-vulns') window.loadVulnerabilities();
   else if (activePage.id === 'page-pipelines') window.loadPipelines();
+  else if (activePage.id === 'page-graph') window.loadGraph();
 });
 
 // 导出核心函数
