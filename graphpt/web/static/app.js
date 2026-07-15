@@ -6,6 +6,38 @@ function aq(url) { const sep = url.includes('?') ? '&' : '?'; return url + sep +
 let currentAsset = 'default';
 let assetList = [];
 
+// ============================================================
+// 轮询优化：Page Visibility + 请求防抖
+// ============================================================
+let _pageVisible = !document.hidden;
+let _pendingRequests = new Set();  // 跟踪进行中的请求，防止堆叠
+
+document.addEventListener('visibilitychange', () => {
+  _pageVisible = !document.hidden;
+  if (_pageVisible) {
+    // 页面重新可见时立即刷新一次
+    if (_autoRefresh) loadDashboard();
+  }
+});
+
+// 防抖包装器：如果同一 key 的请求正在进行中，跳过
+function _makeDebouncedFetch(key) {
+  return async function(url, options) {
+    if (_pendingRequests.has(key)) return null;  // 上一个请求未完成，跳过
+    _pendingRequests.add(key);
+    try {
+      const response = await fetch(url, options);
+      return response;
+    } finally {
+      _pendingRequests.delete(key);
+    }
+  };
+}
+
+const _fetchSystemResources = _makeDebouncedFetch('sys-res');
+const _fetchRunningTasks = _makeDebouncedFetch('running-tasks');
+const _fetchScanStatus = _makeDebouncedFetch('scan-status');
+
 async function loadAssets() {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -235,7 +267,7 @@ async function loadDashboard() {
   document.getElementById('dash-loading').style.display = 'block';
   var dashCards = document.getElementById('dash-cards');
   // 先展示骨架（避免白屏等待），数据到后再替换
-  if (dashCards) dashCards.innerHTML = '<div class="card"><div class="label">Root Domains</div><div class="value accent">—</div></div><div class="card"><div class="label">Subdomains</div><div class="value accent">—</div></div><div class="card"><div class="label">IP Addresses</div><div class="value green">—</div></div><div class="card"><div class="label">Open Ports</div><div class="value orange">—</div></div><div class="card"><div class="label">HTTP Endpoints</div><div class="value purple">—</div></div>';
+  if (dashCards) dashCards.innerHTML = '<div class="card"><div class="label">Domains</div><div class="value accent">—</div></div><div class="card"><div class="label">IP Addresses</div><div class="value green">—</div></div><div class="card"><div class="label">Open Ports</div><div class="value orange">—</div></div><div class="card"><div class="label">HTTP Endpoints</div><div class="value purple">—</div></div>';
   var assetName = (assetList.find(function(a){return a.id===currentAsset;}) || {}).name || currentAsset;
   document.getElementById('dash-asset-name').textContent = assetName;
 
@@ -290,18 +322,50 @@ async function loadDashboard() {
 
 async function _loadCountCardsAsync() {
   try {
-    var r = await fetch(aq(API + '/dashboard/counts'));
+    var r = await fetch(aq(API + '/assets/' + currentAsset));
     var j = await r.json();
-    var cnt = (j.data || {});
+    var data = (j.data || {});
+    var cnt = {
+      root_domains: data.root_count || 0,
+      subdomains: data.sub_count || 0,
+      ips: data.ip_count || 0,
+      ports: data.port_count || 0,
+      http_endpoints: data.endpoint_count || 0,
+    };
+    var newCnt = {
+      subdomains: data.new_sub_count || 0,
+      ips: data.new_ip_count || 0,
+      ports: data.new_port_count || 0,
+      endpoints: data.new_endpoint_count || 0,
+      vulns: data.new_vuln_count || 0,
+    };
     var cards = [
-      {label:'Root Domains', value: cnt.root_domains||0, cls:'accent'},
-      {label:'Subdomains', value: cnt.subdomains||0, cls:'accent'},
-      {label:'IP Addresses', value: cnt.ips||0, cls:'green'},
-      {label:'Open Ports', value: cnt.ports||0, cls:'orange'},
-      {label:'HTTP Endpoints', value: cnt.http_endpoints||0, cls:'purple'},
+      {label:'Domains', value: cnt.domains, cls:'accent'},
+      {label:'IP Addresses', value: cnt.ips, cls:'green'},
+      {label:'Open Ports', value: cnt.ports, cls:'orange'},
+      {label:'HTTP Endpoints', value: cnt.http_endpoints, cls:'purple'},
     ];
+
+    // 如果有新增资产，添加新增统计卡片
+    var totalNew = newCnt.domains + newCnt.ips + newCnt.ports + newCnt.endpoints + newCnt.vulns;
+    if (totalNew > 0) {
+      cards.push({
+        label:'🆕 New This Scan',
+        value: totalNew + ' new',
+        cls:'red',
+        subtitle: [
+          newCnt.domains > 0 ? newCnt.domains + ' dom' : '',
+          newCnt.ips > 0 ? newCnt.ips + ' ip' : '',
+          newCnt.ports > 0 ? newCnt.ports + ' port' : '',
+          newCnt.endpoints > 0 ? newCnt.endpoints + ' ep' : '',
+          newCnt.vulns > 0 ? newCnt.vulns + ' vuln' : '',
+        ].filter(Boolean).join(', ')
+      });
+    }
+
     var countHtml = cards.map(function(c){
-      return '<div class="card"><div class="label">' + c.label + '</div><div class="value ' + c.cls + '">' + c.value + '</div></div>';
+      var subtitleHtml = c.subtitle ? '<div style="font-size:10px;color:var(--muted);margin-top:4px">' + c.subtitle + '</div>' : '';
+      return '<div class="card"><div class="label">' + c.label + '</div><div class="value ' + c.cls + '">' + c.value + '</div>' + subtitleHtml + '</div>';
     }).join('');
     // ★ 边缘情况：scan API 先于 count API 返回时，已有 Scan Progress/Last Scan/Total Scans 卡片，需保留
     var existing = document.getElementById('dash-cards').innerHTML;
@@ -397,8 +461,10 @@ function _toggleTaskDetail(assetId) {
 }
 
 async function _loadRunningTasks() {
+  if (!_pageVisible) return;  // 页面不可见时跳过
   try {
-    var r = await fetch(API + '/scan/running');
+    var r = await _fetchRunningTasks(API + '/scan/running');
+    if (!r) return;  // 防抖跳过
     var j = await r.json();
     if (!j.ok) return;
     var tasks = j.data.tasks || [];
@@ -483,8 +549,10 @@ function _stopSysResPoll() {
 }
 
 async function _loadSystemResources() {
+  return;  // 系统资源已由 pages/dashboard.js 渲染为卡片
   try {
-    var r = await fetch(API + '/system/resources');
+    var r = await _fetchSystemResources(API + '/system/resources');
+    if (!r) return;  // 防抖跳过
     var j = await r.json();
     if (!j.ok || !j.data) return;
     var d = j.data;
@@ -546,6 +614,18 @@ async function _loadSystemResources() {
       }).join('');
     } else {
       toolSection.style.display = 'none';
+    }
+
+    // ── Temp File Cleanup Stats ──
+    var tempStats = d.temp_cleanup || {};
+    var tempSection = document.getElementById('sys-temp-cleanup');
+    if (tempStats.tracked_count !== undefined) {
+      tempSection.style.display = '';
+      document.getElementById('temp-tracked').textContent = tempStats.tracked_count || 0;
+      document.getElementById('temp-memory').textContent = tempStats.memory_kb || 0;
+      document.getElementById('temp-next').textContent = tempStats.next_cleanup_in || '—';
+    } else {
+      tempSection.style.display = 'none';
     }
   } catch(e) { /* ignore */ }
 }
@@ -918,10 +998,10 @@ function exToggle(nodeId) {
         flatChildren = node._children.filter(c => c.type !== '_load_more');
       }
 
-      if (data.node.type === 'RootDomain') {
+      if (data.node.type === 'Domain') {
         for (const sub of (data.children || [])) {
           sub._depth = depth + 1;
-          sub._leaf = true;  // Subdomain doesn't have its own API — IP children shown inline
+          sub._leaf = true;  // Child Domain doesn't have its own API — IP children shown inline
           flatChildren.push(sub);
           if (sub.ips) {
             for (const ip of sub.ips) {
@@ -1064,8 +1144,8 @@ function renderRow(r) {
   const depth = r._depth || 0;
   const indent = depth * 20;
   const isExpanded = r._expanded;
-  const isLeaf = r._leaf !== false || r.type === 'DirEntry' || r.type === 'File' || r.type === 'ApiEndpoint' || r.type === 'Subdomain' || r.type === '_load_more';
-  const hasChildren = !isLeaf && (r.type === 'root_domain' || r.type === 'standalone_ip' || r.type === 'IP' || r.type === 'Endpoint' || r.type === 'Subdomain');
+  const isLeaf = r._leaf !== false || r.type === 'DirEntry' || r.type === 'File' || r.type === 'ApiEndpoint' || r.type === 'Domain' || r.type === '_load_more';
+  const hasChildren = !isLeaf && (r.type === 'root_domain' || r.type === 'standalone_ip' || r.type === 'IP' || r.type === 'Endpoint' || r.type === 'Domain');
   if (r.type === '_load_more') {
     return `<tr class="ex-row" style="cursor:pointer" onclick="event.stopPropagation();loadMoreChildren('${esc(r.nodeId)}')">
       <td></td>
@@ -1082,7 +1162,7 @@ function renderRow(r) {
   }
 
   const type = r.type || '';
-  const icon = type === 'root_domain' ? String.fromCodePoint(0x1F4C1) : type === 'standalone_ip' ? String.fromCodePoint(0x1F517) : type === 'Subdomain' ? String.fromCodePoint(0x1F4C4) : type === 'IP' ? String.fromCodePoint(0x1F517) : type === 'Port' ? String.fromCodePoint(0x1F50C) : type === 'Endpoint' ? String.fromCodePoint(0x1F310) : type === 'DirEntry' ? String.fromCodePoint(0x1F4C2) : type === 'File' ? String.fromCodePoint(0x1F4C4) : type === 'ApiEndpoint' ? String.fromCodePoint(0x1F4E1) : type === 'ScanRun' ? String.fromCodePoint(0x2705) : String.fromCodePoint(0x2022);
+  const icon = type === 'root_domain' ? String.fromCodePoint(0x1F4C1) : type === 'standalone_ip' ? String.fromCodePoint(0x1F517) : type === 'Domain' ? String.fromCodePoint(0x1F4C4) : type === 'IP' ? String.fromCodePoint(0x1F517) : type === 'Port' ? String.fromCodePoint(0x1F50C) : type === 'Endpoint' ? String.fromCodePoint(0x1F310) : type === 'DirEntry' ? String.fromCodePoint(0x1F4C2) : type === 'File' ? String.fromCodePoint(0x1F4C4) : type === 'ApiEndpoint' ? String.fromCodePoint(0x1F4E1) : type === 'ScanRun' ? String.fromCodePoint(0x2705) : String.fromCodePoint(0x2022);
 
   let nameHtml = '';
   if (type === 'Endpoint' && r.url) {
@@ -1113,7 +1193,7 @@ function renderRow(r) {
     detail = parts.join(', ');
   } else if (type === 'standalone_ip') {
     if (r.port_count) detail = `${r.port_count} ports`;
-  } else if (type === 'Subdomain') {
+  } else if (type === 'Domain') {
     if (r.ips && r.ips.length) {
       detail = `<span style="color:var(--accent)">→</span> ` + r.ips.map(ip => `<span style="color:var(--green)">${esc(ip.value)}</span>`).join(', ');
     }
@@ -1254,8 +1334,8 @@ function normalizedNodeType(node) {
   if (!node) return '';
   var t = node.type || '';
   var MAP = {
-    'root_domain': 'RootDomain', 'domain': 'RootDomain',
-    'subdomain': 'Subdomain', 'Subdomain': 'Subdomain',
+    'root_domain': 'Domain', 'domain': 'Domain',
+    'subdomain': 'Domain', 'Domain': 'Domain',
     'standalone_ip': 'IP', 'ip': 'IP', 'IP': 'IP',
     'port': 'Port', 'Port': 'Port',
     'endpoint': 'Endpoint', 'Endpoint': 'Endpoint',
@@ -1999,7 +2079,7 @@ const TUT_STEPS = [
       <p>Add the domains, IPs, URLs, or subdomains you want to recon.</p>
       <div style="background:var(--bg);border-radius:6px;padding:10px;margin:8px 0;font-size:12px;line-height:1.8">
         <div>1. Go to <b>Targets</b> tab</div>
-        <div>2. Select type (Domain / IP / URL / Subdomain)</div>
+        <div>2. Select type (Domain / IP / URL)</div>
         <div>3. Enter value → click <b>Add</b></div>
         <div>4. Go to <b>Tasks</b> tab to manually trigger scans</div>
         <div style="color:var(--muted);margin-top:4px">Example: <code>example.com</code> or <code>192.168.1.0/24</code></div>
@@ -2012,12 +2092,12 @@ const TUT_STEPS = [
     html: `
       <p>Browse the full asset hierarchy with sources and relationships visible at every level.</p>
       <div style="background:var(--bg);border-radius:6px;padding:10px;margin:8px 0;font-size:12px;line-height:1.8">
-        <div>📁 <b>RootDomain</b> — click to expand → subdomains with resolved IPs</div>
+        <div>📁 <b>Domain</b> — click to expand → subdomains with resolved IPs</div>
         <div>🔗 <b>IP</b> — click to expand → open ports with HTTP endpoints</div>
         <div>Each node shows <b>sources</b> (which tool discovered it), timestamps, and relationships</div>
         <div style="color:var(--muted);margin-top:4px">Multi-source consensus = higher confidence. Breadcrumb navigation at the top.</div>
       </div>
-      <p style="color:var(--muted);font-size:11px">Data is stored in Neo4j with provenance tracking — drill down through Asset → Domain → Subdomain → IP → Port → Endpoint.</p>
+      <p style="color:var(--muted);font-size:11px">Data is stored in Neo4j with provenance tracking — drill down through Asset → Domain → IP → Port → Endpoint.</p>
     `,
   },
   {
@@ -2255,10 +2335,10 @@ let _graphNetwork = null;
 let _graphRawData = null;
 
 // Graph config — loaded from /api/catalog, hardcoded as fallback
-let _graphColors = {Asset:'#58a6ff',Subdomain:'#a371f7',IP:'#d2991d',Port:'#f85149',HTTPEndpoint:'#f0883e',Vulnerability:'#da3633',Secret:'#d29922',File:'#8b949e',Unknown:'#6e7681'};
-let _graphShapes = {Asset:'diamond',Subdomain:'dot',IP:'square',Port:'triangle',HTTPEndpoint:'star',Vulnerability:'triangleDown',Unknown:'dot'};
-let _graphLevels = {Asset:0,RootDomain:1,Subdomain:2,IP:3,Port:4,Service:4,HTTPEndpoint:5,File:6,Vulnerability:6,Unknown:7};
-let _graphTypeNames = {Asset:'Asset',RootDomain:'域名',Subdomain:'子域名',IP:'IP',Port:'端口',HTTPEndpoint:'端点',Vulnerability:'漏洞',File:'文件',Unknown:'?'};
+let _graphColors = {Asset:'#58a6ff',Domain:'#a371f7',IP:'#d2991d',Port:'#f85149',HTTPEndpoint:'#f0883e',Vulnerability:'#da3633',Secret:'#d29922',File:'#8b949e',Unknown:'#6e7681'};
+let _graphShapes = {Asset:'diamond',Domain:'dot',IP:'square',Port:'triangle',HTTPEndpoint:'star',Vulnerability:'triangleDown',Unknown:'dot'};
+let _graphLevels = {Asset:0,Domain:1,IP:3,Port:4,Service:4,HTTPEndpoint:5,File:6,Vulnerability:6,Unknown:7};
+let _graphTypeNames = {Asset:'Asset',Domain:'域名',IP:'IP',Port:'端口',HTTPEndpoint:'端点',Vulnerability:'漏洞',File:'文件',Unknown:'?'};
 let _graphHiddenTypes = new Set(['Service']);
 let _graphConfigLoaded = false;
 
@@ -2603,6 +2683,7 @@ async function loadLogContent() {
 // If a log file is already selected → reload its content.
 // Otherwise → check for active tools, preferring the first running tool's tail.
 function refreshLog() {
+  if (!_pageVisible) return;  // 页面不可见时跳过
   if (_logsFile) { loadLogContent(); return; }
   // Check for active tools
   fetch('/api/logs/active').then(r => r.json()).then(d => {
@@ -2941,15 +3022,15 @@ async function doSearch() {
     if (!d.ok) return;
     const data = d.data;
     let html = '';
-    if (data.subdomains.length) {
-      html += '<div style="color:var(--accent);font-size:11px;margin-bottom:4px">Subdomains ('+data.subdomains.length+')</div>';
-      data.subdomains.slice(0,5).forEach(s => html += '<div style="font-size:12px;padding:2px 0;cursor:pointer" onclick="document.getElementById(\'global-search\').value=\''+esc(s.value)+'\';document.getElementById(\'search-results\').style.display=\'none\'">'+esc(s.value)+'</div>');
+    if (data.domains && data.domains.length) {
+      html += '<div style="color:var(--accent);font-size:11px;margin-bottom:4px">Domains ('+data.domains.length+')</div>';
+      data.domains.slice(0,5).forEach(s => html += '<div style="font-size:12px;padding:2px 0;cursor:pointer" onclick="document.getElementById(\'global-search\').value=\''+esc(s.value)+'\';document.getElementById(\'search-results\').style.display=\'none\'">'+esc(s.value)+'</div>');
     }
-    if (data.ips.length) {
+    if (data.ips && data.ips.length) {
       html += '<div style="color:var(--green);font-size:11px;margin:8px 0 4px">IPs ('+data.ips.length+')</div>';
       data.ips.slice(0,5).forEach(s => html += '<div style="font-size:12px;padding:2px 0">'+esc(s.value)+'</div>');
     }
-    if (data.endpoints.length) {
+    if (data.endpoints && data.endpoints.length) {
       html += '<div style="color:var(--purple);font-size:11px;margin:8px 0 4px">Endpoints ('+data.endpoints.length+')</div>';
       data.endpoints.slice(0,5).forEach(s => html += '<div style="font-size:12px;padding:2px 0;cursor:pointer" onclick="showNodeDetail(\''+esc(s.url)+'\')">['+s.sc+'] '+esc(s.url).substring(0,80)+'</div>');
     }
@@ -3073,7 +3154,7 @@ async function showNodeDetail(url) {
 setTimeout(function() {
   loadHealth();
   var dc = document.getElementById('dash-cards');
-  if (dc) dc.innerHTML = '<div class="card"><div class="label">Root Domains</div><div class="value accent">—</div></div><div class="card"><div class="label">Subdomains</div><div class="value accent">—</div></div><div class="card"><div class="label">IP Addresses</div><div class="value green">—</div></div><div class="card"><div class="label">Open Ports</div><div class="value orange">—</div></div><div class="card"><div class="label">HTTP Endpoints</div><div class="value purple">—</div></div>';
+  if (dc) dc.innerHTML = '<div class="card"><div class="label">Domains</div><div class="value accent">—</div></div><div class="card"><div class="label">IP Addresses</div><div class="value green">—</div></div><div class="card"><div class="label">Open Ports</div><div class="value orange">—</div></div><div class="card"><div class="label">HTTP Endpoints</div><div class="value purple">—</div></div>';
   // 主路径：直接加载 Dashboard 数据（不经过 loadAssets）
   loadDashboard();
   // 后台加载资产列表 + 工具注册表（填充下拉框和右键菜单）
@@ -3095,3 +3176,227 @@ if (!localStorage.getItem('graphpt_tutorial_done')) { tutOpen(); }
   btn.onclick = tutOpen;
   hdr.appendChild(btn);
 })();
+
+// ============================================================
+// Report Generation
+// ============================================================
+
+async function generateReport(format = 'markdown') {
+  const asset = currentAsset();
+  const btn = event?.target;
+  if (btn) btn.disabled = true;
+
+  try {
+    const url = `/api/report/generate?asset_id=${asset}&format=${format}`;
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      throw new Error(`Failed to generate report: ${response.statusText}`);
+    }
+
+    // 下载文件
+    const blob = await response.blob();
+    const filename = format === 'markdown'
+      ? `pentest-report-${asset}.md`
+      : `pentest-report-${asset}.json`;
+
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+
+    toast(`Report generated: ${filename}`, 'success');
+  } catch (err) {
+    console.error('Generate report error:', err);
+    toast(`Failed to generate report: ${err.message}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+window.generateReport = generateReport;
+
+// ============================================================
+// Scan Configuration
+// ============================================================
+let _scanConfigData = null;
+
+async function showScanConfig() {
+  try {
+    const res = await fetch(aq(`${API}/scan/config`));
+    const json = await res.json();
+    if (!json.ok) {
+      toast('Failed to load scan configuration', 'error');
+      return;
+    }
+
+    _scanConfigData = json.data;
+
+    // 设置资产名称
+    document.getElementById('scan-config-asset-name').textContent = _scanConfigData.asset_id;
+
+    // 渲染 profile 卡片
+    renderProfileCards(_scanConfigData);
+
+    // 渲染字典列表
+    renderWordlistsTable(_scanConfigData);
+
+    // 填充扫描策略
+    const strategy = _scanConfigData.config?.scan_strategy || {};
+    document.getElementById('scan-config-threads').value = strategy.max_threads || 50;
+    document.getElementById('scan-config-timeout').value = strategy.timeout || 30;
+    document.getElementById('scan-config-force-rescan').checked = strategy.force_rescan || false;
+
+    // 显示模态框
+    document.getElementById('scan-config-overlay').style.display = 'flex';
+  } catch (err) {
+    console.error('Load scan config error:', err);
+    toast('Failed to load scan configuration', 'error');
+  }
+}
+
+function renderProfileCards(data) {
+  const container = document.getElementById('scan-config-profiles');
+  const currentProfile = data.current_profile || 'standard';
+  const profiles = data.available_profiles || {};
+
+  const profileInfo = {
+    quick: { icon: '⚡', color: '#3C5A78', time: '~5 min' },
+    standard: { icon: '🎯', color: '#2E4760', time: '~30 min' },
+    deep: { icon: '🔍', color: '#1E3A50', time: '~2 hours' }
+  };
+
+  container.innerHTML = Object.keys(profiles).map(name => {
+    const profile = profiles[name];
+    const info = profileInfo[name] || { icon: '📋', color: '#666', time: '' };
+    const isActive = name === currentProfile;
+
+    return `
+      <div class="profile-card ${isActive ? 'active' : ''}"
+           onclick="selectProfile('${name}')"
+           data-profile="${name}"
+           style="cursor:pointer;padding:12px;border:2px solid ${isActive ? info.color : 'var(--border)'};background:${isActive ? info.color + '10' : 'var(--bg)'};border-radius:6px;transition:all .2s">
+        <div style="font-size:24px;margin-bottom:4px">${info.icon}</div>
+        <div style="font-weight:600;font-size:13px;margin-bottom:2px;text-transform:capitalize">${name}</div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:6px">${profile.desc || ''}</div>
+        <div style="font-size:10px;color:${isActive ? info.color : 'var(--muted)'};font-weight:600">${info.time}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function selectProfile(profileName) {
+  // 更新视觉选中状态
+  document.querySelectorAll('.profile-card').forEach(card => {
+    if (card.dataset.profile === profileName) {
+      card.classList.add('active');
+      const color = card.style.borderColor;
+      card.style.borderColor = color.includes('#') ? color : '#3C5A78';
+      card.style.background = (color.includes('#') ? color : '#3C5A78') + '10';
+    } else {
+      card.classList.remove('active');
+      card.style.borderColor = 'var(--border)';
+      card.style.background = 'var(--bg)';
+    }
+  });
+
+  // 更新数据
+  if (_scanConfigData && _scanConfigData.config) {
+    if (!_scanConfigData.config.scan_strategy) {
+      _scanConfigData.config.scan_strategy = {};
+    }
+    _scanConfigData.config.scan_strategy.profile = profileName;
+  }
+
+  // 重新获取配置以更新字典列表
+  fetch(aq(`${API}/scan/config`))
+    .then(res => res.json())
+    .then(json => {
+      if (json.ok) {
+        // 只更新字典部分，保持其他表单数据
+        renderWordlistsTable(json.data);
+      }
+    });
+}
+
+function renderWordlistsTable(data) {
+  const tbody = document.getElementById('scan-config-wordlists');
+  const wordlists = data.wordlists || {};
+
+  const typeLabels = {
+    dns_subdomains: 'DNS Subdomains',
+    web_dirs: 'Web Directories',
+    web_files: 'Web Files',
+    passwords: 'Passwords',
+    usernames: 'Usernames'
+  };
+
+  tbody.innerHTML = Object.keys(typeLabels).map(key => {
+    const wl = wordlists[key] || {};
+    const lines = wl.lines || 0;
+    const sizeKb = wl.size_kb || 0;
+    const path = wl.path || 'N/A';
+    const filename = path.split('/').pop();
+
+    return `
+      <tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:8px;color:var(--muted)">${typeLabels[key]}</td>
+        <td style="padding:8px;font-family:monospace;font-size:11px" title="${path}">${filename}</td>
+        <td style="padding:8px;text-align:right;color:var(--muted)">${lines.toLocaleString()}</td>
+        <td style="padding:8px;text-align:right;color:var(--muted)">${sizeKb.toFixed(1)} KB</td>
+      </tr>
+    `;
+  }).join('');
+}
+
+async function saveScanConfig() {
+  if (!_scanConfigData) return;
+
+  try {
+    // 收集表单数据
+    const profile = _scanConfigData.config?.scan_strategy?.profile || 'standard';
+    const threads = parseInt(document.getElementById('scan-config-threads').value);
+    const timeout = parseInt(document.getElementById('scan-config-timeout').value);
+    const forceRescan = document.getElementById('scan-config-force-rescan').checked;
+
+    const payload = {
+      asset_id: _scanConfigData.asset_id,
+      profile: profile,
+      scan_strategy: {
+        max_threads: threads,
+        timeout: timeout,
+        force_rescan: forceRescan
+      }
+    };
+
+    const res = await fetch(aq(`${API}/scan/config`), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    const json = await res.json();
+    if (json.ok) {
+      toast('Scan configuration saved successfully', 'success');
+      closeScanConfig();
+    } else {
+      toast('Failed to save scan configuration', 'error');
+    }
+  } catch (err) {
+    console.error('Save scan config error:', err);
+    toast('Failed to save scan configuration', 'error');
+  }
+}
+
+function closeScanConfig() {
+  document.getElementById('scan-config-overlay').style.display = 'none';
+  _scanConfigData = null;
+}
+
+window.showScanConfig = showScanConfig;
+window.selectProfile = selectProfile;
+window.saveScanConfig = saveScanConfig;
+window.closeScanConfig = closeScanConfig;
