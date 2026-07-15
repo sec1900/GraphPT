@@ -30,6 +30,7 @@
   <button data-page="reports">Reports</button>
   <button data-page="logs">Logs</button>
   <button data-page="graph">Graph</button>
+  <button data-page="agent">Agent</button>
   <span class="spacer"></span>
   <button data-page="config" class="icon-btn" title="Settings">&#9881;</button>
 </nav>
@@ -42,13 +43,22 @@
     <div class="toolbar">
       <button class="btn" onclick="startFullScan()" id="btn-start-scan" style="background:var(--green)">Start Full Scan</button>
       <button class="btn outline" onclick="abortScan()" id="btn-abort-scan" style="display:none;margin-left:4px;background:var(--red);color:#fff">Abort</button>
-      <label style="margin-left:12px;font-size:11px;color:var(--muted);cursor:pointer">
-        <input type="checkbox" id="dash-auto-refresh" onchange="toggleAutoDashboard()"> Auto (30s)
+      <label style="margin-left:12px;font-size:11px;color:var(--muted);cursor:pointer" title="Ignore ScanRun records and rescan all targets">
+        <input type="checkbox" id="force-rescan-check"> Force Rescan
       </label>
+      <button class="btn outline" onclick="toggleAutoDashboard()" id="btn-auto-refresh" style="margin-left:12px;font-size:11px" title="Toggle auto-refresh dashboard data every 30 seconds">
+        <span id="auto-refresh-icon">⟳</span> Auto Refresh
+      </button>
       <span class="spacer"></span>
-      <input type="number" id="mitm-port" value="8888" min="1024" max="65535" style="width:60px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:11px;padding:2px 4px;margin-left:4px" title="Proxy listen port">
-      <button class="btn outline" onclick="toggleMitm()" id="btn-mitm-toggle" style="font-size:11px" title="Start/Stop traffic intercept proxy">&#128247; Intercept</button>
-      <span style="font-size:11px;color:var(--muted)" id="dash-asset-name"></span>
+      <button class="btn outline" onclick="showScanConfig()" style="font-size:11px;margin-right:8px" title="Configure scan profiles and wordlists">⚙️ Scan Settings</button>
+      <button class="btn outline" onclick="showToolsValidation()" style="font-size:11px;margin-right:8px" title="Check all tools configuration">🔧 Tools Health</button>
+      <button class="btn outline" onclick="generateReport('markdown')" style="font-size:11px" title="Generate Markdown report">&#128196; Report</button>
+      <span style="font-size:11px;color:var(--muted);margin-left:auto" id="dash-asset-name"></span>
+    </div>
+    <div class="toolbar" style="margin-top:8px;padding:8px 0;border-top:1px solid var(--border)">
+      <span style="font-size:11px;color:var(--muted);margin-right:8px">Proxy Intercept:</span>
+      <input type="number" id="mitm-port" value="8888" min="1024" max="65535" style="width:60px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:11px;padding:2px 4px" title="Proxy listen port">
+      <button class="btn outline" onclick="toggleMitm()" id="btn-mitm-toggle" style="font-size:11px;margin-left:4px" title="Start/Stop traffic intercept proxy">&#128247; Start Intercept</button>
     </div>
     <div id="mitm-status" style="display:none;margin:0 0 16px 0;padding:10px 16px;background:var(--surface);border:1px solid var(--accent);border-radius:6px">
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
@@ -63,6 +73,7 @@
       <div style="font-size:12px;color:var(--accent);margin-bottom:6px">Scan running...</div>
       <div id="scan-verif-warning" style="display:none;margin:0 0 8px 0;padding:8px 12px;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;font-size:12px;color:#856404">
         ⚠ <b>Verification needed:</b> <span id="scan-verif-tool"></span> requires browser verification.
+        <div id="scan-verif-trigger" style="display:none;margin-top:4px;font-family:monospace;font-size:11px;color:#997404;background:#fff8e1;padding:3px 6px;border-radius:3px;word-break:break-all"></div>
         <span style="font-size:10px;color:#997404;margin-left:4px" id="scan-verif-waiting"></span>
       </div>
       <div id="scan-progress-layers" style="font-size:11px;color:var(--muted)"></div>
@@ -105,6 +116,13 @@
         <table style="font-size:11px"><thead><tr>
           <th>Tool</th><th>PID</th><th>Memory</th><th>CPU</th><th>Elapsed</th>
         </tr></thead><tbody id="sys-tool-tbody"></tbody></table>
+      </div>
+      <div id="sys-temp-cleanup" style="display:none;margin-top:12px;font-size:11px;color:var(--muted)">
+        <div style="display:flex;gap:16px">
+          <span>Temp Files: <strong id="temp-tracked">0</strong> tracked</span>
+          <span>Memory: <strong id="temp-memory">0</strong> KB</span>
+          <span>Next cleanup: <strong id="temp-next">—</strong> ops</span>
+        </div>
       </div>
     </div>
     <div class="section" id="dash-severity-section" style="display:none">
@@ -318,6 +336,38 @@
     </div>
     <div class="loading" id="graph-loading">Loading graph...</div>
   </div>
+
+  <!-- ==================== Agent ==================== -->
+  <div id="page-agent" class="page">
+    <div class="toolbar">
+      <span style="font-weight:600">Pentest Agent</span>
+      <span class="spacer"></span>
+      <button class="btn small" onclick="agentStart()" id="agent-start-btn">Start</button>
+      <button class="btn outline small" onclick="agentStop()" id="agent-stop-btn" style="display:none">Stop</button>
+      <span id="agent-status" style="font-size:12px;color:var(--muted);margin-left:8px">Idle</span>
+    </div>
+    <div style="display:flex;gap:12px;margin-bottom:12px">
+      <div style="flex:1">
+        <label style="font-size:11px;color:var(--muted)">Prompt</label>
+        <textarea id="agent-prompt" rows="3" style="width:100%;font-size:13px" placeholder="e.g. Analyze mlws1900.cn. Start with graph_summary, then manually probe each interesting endpoint."></textarea>
+      </div>
+      <div style="width:200px">
+        <label style="font-size:11px;color:var(--muted)">Asset</label>
+        <input type="text" id="agent-asset" value="mlws" style="width:100%" placeholder="asset_id">
+      </div>
+    </div>
+    <div style="display:flex;gap:12px;height:calc(100vh - 280px)">
+      <div style="flex:1;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;overflow-y:auto">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Agent Output</div>
+        <pre id="agent-output" style="font-size:12px;white-space:pre-wrap;word-break:break-word;margin:0;max-height:none"></pre>
+      </div>
+      <div style="width:320px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;overflow-y:auto">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Tool Calls</div>
+        <div id="agent-tools"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="ctx-menu" class="ctx-menu" style="display:none"></div>
 </main>
 
@@ -436,8 +486,69 @@
   </div>
 </div>
 
+<!-- Scan Settings Modal -->
+<div class="modal-overlay" id="scan-config-overlay" style="display:none">
+  <div class="modal" style="max-width:700px;max-height:85vh;overflow-y:auto">
+    <h3>Scan Configuration</h3>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:16px">Configure wordlist profiles and scan strategy for <strong id="scan-config-asset-name">default</strong></p>
 
-<script src="/static/app.js?v=20260621f"></script>
+    <!-- Profile Selection -->
+    <div style="margin-bottom:20px">
+      <label style="display:block;font-weight:600;margin-bottom:8px;font-size:13px">Scan Profile</label>
+      <div id="scan-config-profiles" style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
+        <!-- Profile cards will be inserted here -->
+      </div>
+    </div>
+
+    <!-- Wordlists Overview -->
+    <div style="margin-bottom:20px">
+      <label style="display:block;font-weight:600;margin-bottom:8px;font-size:13px">Wordlists Configuration</label>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px">
+        <table style="width:100%;font-size:12px">
+          <thead>
+            <tr style="border-bottom:1px solid var(--border)">
+              <th style="text-align:left;padding:6px;color:var(--muted);font-weight:600">Type</th>
+              <th style="text-align:left;padding:6px;color:var(--muted);font-weight:600">Wordlist</th>
+              <th style="text-align:right;padding:6px;color:var(--muted);font-weight:600">Lines</th>
+              <th style="text-align:right;padding:6px;color:var(--muted);font-weight:600">Size</th>
+            </tr>
+          </thead>
+          <tbody id="scan-config-wordlists">
+            <!-- Wordlist rows will be inserted here -->
+          </tbody>
+        </table>
+      </div>
+      <p style="font-size:11px;color:var(--muted);margin-top:8px">💡 Switch profiles to use different wordlist sizes. Custom wordlist selection coming soon.</p>
+    </div>
+
+    <!-- Scan Strategy -->
+    <div style="margin-bottom:20px">
+      <label style="display:block;font-weight:600;margin-bottom:8px;font-size:13px">Scan Strategy</label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div>
+          <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:4px">Max Threads</label>
+          <input type="number" id="scan-config-threads" min="1" max="200" value="50" style="width:100%;padding:6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:4px">Timeout (seconds)</label>
+          <input type="number" id="scan-config-timeout" min="5" max="300" value="30" style="width:100%;padding:6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">
+        </div>
+      </div>
+      <label style="display:block;margin-top:12px;font-size:12px;cursor:pointer">
+        <input type="checkbox" id="scan-config-force-rescan" style="margin-right:6px">
+        Force rescan all targets (ignore scan history)
+      </label>
+    </div>
+
+    <div class="actions">
+      <button class="btn outline" onclick="closeScanConfig()">Cancel</button>
+      <button class="btn" onclick="saveScanConfig()">Save Changes</button>
+    </div>
+  </div>
+</div>
+
+
+<script type="module" src="/static/app-bridge.js?v=20260623"></script>
 
 
 </body>

@@ -2870,6 +2870,7 @@ document.querySelectorAll('nav button[data-page]').forEach(btn => {
       case 'logs': window.loadLogs(); break;
       case 'config': window.loadConfig(); break;
       case 'graph': window.loadGraph(); break;
+      case 'agent': break;  // Agent page is self-contained
     }
   });
 });
@@ -3186,4 +3187,90 @@ window.showScanConfig = showScanConfig;
 window.selectProfile = selectProfile;
 window.saveScanConfig = saveScanConfig;
 window.closeScanConfig = closeScanConfig;
+
+// ============================================================
+// Agent Page
+// ============================================================
+
+let _agentSid = null;
+let _agentPoll = null;
+
+async function agentStart() {
+  const prompt = document.getElementById('agent-prompt').value.trim();
+  const asset = document.getElementById('agent-asset').value.trim();
+  if (!prompt) return toast('Enter a prompt first', false);
+  if (!asset) return toast('Enter an asset ID', false);
+
+  document.getElementById('agent-start-btn').style.display = 'none';
+  document.getElementById('agent-stop-btn').style.display = '';
+  document.getElementById('agent-status').textContent = 'Starting...';
+  document.getElementById('agent-output').textContent = '';
+  document.getElementById('agent-tools').innerHTML = '';
+
+  try {
+    const r = await fetch(API + '/agent/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({asset_id: asset, prompt})
+    });
+    const j = await r.json();
+    if (!j.ok) { toast(j.error || 'Failed', false); agentReset(); return; }
+    _agentSid = j.session_id;
+    document.getElementById('agent-status').textContent = 'Running';
+    _agentPoll = setInterval(agentPoll, 2000);
+  } catch(e) { toast(e.message, false); agentReset(); }
+}
+
+function agentStop() {
+  if (_agentPoll) { clearInterval(_agentPoll); _agentPoll = null; }
+  _agentSid = null;
+  agentReset();
+  document.getElementById('agent-status').textContent = 'Stopped';
+}
+
+function agentReset() {
+  document.getElementById('agent-start-btn').style.display = '';
+  document.getElementById('agent-stop-btn').style.display = 'none';
+}
+
+async function agentPoll() {
+  if (!_agentSid) return;
+  try {
+    const r = await fetch(API + '/agent/status?session_id=' + encodeURIComponent(_agentSid));
+    const j = await r.json();
+    const s = j.data || j;
+
+    // Update output
+    const out = s.output_buf || '';
+    if (out) document.getElementById('agent-output').textContent = out;
+
+    // Update tool calls
+    const logs = s.logs || [];
+    let toolHtml = '';
+    for (let i = Math.max(0, logs.length - 30); i < logs.length; i++) {
+      const l = logs[i];
+      if (l.includes('调用工具') || l.includes('tool') || l.includes('Tool')) {
+        toolHtml += '<div style="font-size:11px;padding:4px 0;border-bottom:1px solid var(--border)">' + esc(l.substring(0, 200)) + '</div>';
+      }
+    }
+    if (toolHtml) document.getElementById('agent-tools').innerHTML = toolHtml;
+
+    // Check done
+    if (s.status === 'done') {
+      if (_agentPoll) { clearInterval(_agentPoll); _agentPoll = null; }
+      document.getElementById('agent-status').textContent = 'Done';
+      agentReset();
+      const result = s.result || '';
+      if (result) document.getElementById('agent-output').textContent += '\n\n=== RESULT ===\n' + result;
+    } else if (s.status === 'error') {
+      if (_agentPoll) { clearInterval(_agentPoll); _agentPoll = null; }
+      document.getElementById('agent-status').textContent = 'Error';
+      agentReset();
+      document.getElementById('agent-output').textContent += '\n\nERROR: ' + (s.result || '');
+    }
+  } catch(e) {}
+}
+
+window.agentStart = agentStart;
+window.agentStop = agentStop;
 
