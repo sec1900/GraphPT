@@ -223,7 +223,7 @@
   <div id="page-config" class="page">
     <div class="sub-tabs" id="cfg-tabs">
       <button class="active" onclick="switchCfgTab('tools')">Tools</button>
-      <button onclick="switchCfgTab('agent-prompt')">Agent Prompt</button>
+      <button onclick="switchCfgTab('agent-prompt')">System Prompt</button>
     </div>
 
     <!-- Tab: Tools -->
@@ -348,7 +348,7 @@
     </div>
     <div style="display:flex;gap:12px;margin-bottom:12px">
       <div style="flex:1">
-        <label style="font-size:11px;color:var(--muted)">Prompt</label>
+        <label style="font-size:11px;color:var(--muted)">Task</label>
         <textarea id="agent-prompt" rows="3" style="width:100%;font-size:13px">Analyze this asset thoroughly. Start with graph_summary to understand the attack surface. Use Bash/curl to manually probe interesting endpoints. Use graph_query to dig deeper into findings. For speculative scanning needs, use trigger_scan — it runs async so you can continue analyzing while it works. Identify vulnerabilities, prioritize by severity, and output a clear report.</textarea>
       </div>
       <div style="width:200px">
