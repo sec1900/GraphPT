@@ -349,11 +349,11 @@
     <div style="display:flex;gap:12px;margin-bottom:12px">
       <div style="flex:1">
         <label style="font-size:11px;color:var(--muted)">Prompt</label>
-        <textarea id="agent-prompt" rows="3" style="width:100%;font-size:13px" placeholder="e.g. Analyze mlws1900.cn. Start with graph_summary, then manually probe each interesting endpoint."></textarea>
+        <textarea id="agent-prompt" rows="3" style="width:100%;font-size:13px">Analyze this asset thoroughly. Start with graph_summary to understand the attack surface. Use Bash/curl to manually probe interesting endpoints. Use graph_query to dig deeper into findings. For speculative scanning needs, use trigger_scan — it runs async so you can continue analyzing while it works. Identify vulnerabilities, prioritize by severity, and output a clear report.</textarea>
       </div>
       <div style="width:200px">
         <label style="font-size:11px;color:var(--muted)">Asset</label>
-        <input type="text" id="agent-asset" value="mlws" style="width:100%" placeholder="asset_id">
+        <select id="agent-asset" style="width:100%"><option value="">Loading...</option></select>
       </div>
     </div>
     <div style="display:flex;gap:12px;height:calc(100vh - 280px)">

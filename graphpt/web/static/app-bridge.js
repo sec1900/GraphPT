@@ -2054,10 +2054,19 @@ let _agentSessionId = null;
 let _agentPoll = null;
 
 function loadAgent() {
-  const input = document.getElementById('agent-asset');
-  if (!input) return;
-  // Set default from currentAsset if available
-  if (window.currentAsset) input.value = window.currentAsset;
+  const sel = document.getElementById('agent-asset');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">Select asset...</option>';
+  fetch('/api/assets').then(r=>r.json()).then(d=>{
+    (d.data||[]).forEach(a => {
+      const o = document.createElement('option');
+      o.value = a.id; o.textContent = a.name || a.id;
+      if (a.id === window.currentAsset) o.selected = true;
+      sel.appendChild(o);
+    });
+  }).catch(()=>{
+    sel.innerHTML = '<option value="mlws">mlws1900.cn</option>';
+  });
 }
 
 function startAgent() {
@@ -2890,7 +2899,7 @@ document.querySelectorAll('nav button[data-page]').forEach(btn => {
       case 'logs': window.loadLogs(); break;
       case 'config': window.loadConfig(); break;
       case 'graph': window.loadGraph(); break;
-      case 'agent': break;  // Agent page is self-contained
+      case 'agent': loadAgent(); break;
     }
   });
 });
