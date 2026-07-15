@@ -12,36 +12,16 @@ import { fetchSystemResources, fetchRunningTasks } from '../core/api.js';
  * 加载 Dashboard
  */
 export async function loadDashboard() {
-  document.getElementById('dash-loading').style.display = 'block';
-  const dashCards = document.getElementById('dash-cards');
-
-  // 先展示骨架（避免白屏）
-  if (dashCards) {
-    dashCards.innerHTML = `
-      <div class="card"><div class="label">Domains</div><div class="value accent">—</div></div>
-      <div class="card"><div class="label">IP Addresses</div><div class="value green">—</div></div>
-      <div class="card"><div class="label">Open Ports</div><div class="value orange">—</div></div>
-      <div class="card"><div class="label">HTTP Endpoints</div><div class="value purple">—</div></div>
-    `;
-  }
-
   const assetName = (assetList.find(a => a.id === currentAsset) || {}).name || currentAsset;
-  document.getElementById('dash-asset-name').textContent = assetName;
+  const nameEl = document.getElementById('dash-asset-name');
+  if (nameEl) nameEl.textContent = assetName;
 
-  try {
-    // 并行加载各个面板
-    loadAllCards();
-    loadErrors();
-    loadSeverityChart();
-
-    // 开始轮询
-    startSystemResourcesPolling();
-    startRunningTasksPolling();
-  } catch (e) {
-    toast(e.message, false);
-  }
-
-  document.getElementById('dash-loading').style.display = 'none';
+  // 一次加载所有数据，不展示骨架
+  await loadAllCards();
+  loadErrors();
+  loadSeverityChart();
+  startSystemResourcesPolling();
+  startRunningTasksPolling();
 }
 
 /**
@@ -90,13 +70,12 @@ async function loadAllCards() {
     const pctCls = (v) => v >= 90 ? 'crit' : v >= 75 ? 'warn' : '';
     const tools = sys.tool_processes || [];
     cards.push(
-      `<div class="card sys-card"><div class="label">CPU</div><div class="value ${pctCls(sys.cpu.percent || 0)}">${sys.cpu.percent || 0}%</div><div class="sub">${sys.cpu.cores || 0} cores</div></div>`,
-      `<div class="card sys-card"><div class="label">Memory</div><div class="value ${pctCls(sys.memory?.percent || 0)}">${sys.memory?.percent || 0}%</div><div class="sub">${sys.memory?.used_gb != null ? sys.memory.used_gb + ' / ' + sys.memory.total_gb + ' GB' : ''}</div></div>`,
-      `<div class="card sys-card"><div class="label">Disk</div><div class="value ${pctCls(sys.disk?.percent || 0)}">${sys.disk?.percent || 0}%</div><div class="sub">${sys.disk?.free_gb != null ? sys.disk.free_gb + ' GB free' : ''}</div></div>`,
+      `<div class="card sys-card"><div class="label">CPU</div><div class="value ${pctCls(sys.cpu.percent || 0)}" id="sys-cpu-val">${sys.cpu.percent || 0}%</div><div class="sub" id="sys-cpu-sub">${sys.cpu.cores || 0} cores</div></div>`,
+      `<div class="card sys-card"><div class="label">Memory</div><div class="value ${pctCls(sys.memory?.percent || 0)}" id="sys-mem-val">${sys.memory?.percent || 0}%</div><div class="sub" id="sys-mem-sub">${sys.memory?.used_gb != null ? sys.memory.used_gb + ' / ' + sys.memory.total_gb + ' GB' : ''}</div></div>`,
+      `<div class="card sys-card"><div class="label">Disk</div><div class="value ${pctCls(sys.disk?.percent || 0)}" id="sys-disk-val">${sys.disk?.percent || 0}%</div><div class="sub" id="sys-disk-sub">${sys.disk?.free_gb != null ? sys.disk.free_gb + ' GB free' : ''}</div></div>`,
     );
-    if (tools.length) {
-      const toolMem = sys.tool_mem_total_mb || 0;
-      cards.push(`<div class="card sys-card"><div class="label">Processes</div><div class="value warn">${tools.length}</div><div class="sub">${toolMem} MB</div></div>`);
+    const toolMem = sys.tool_mem_total_mb || 0;
+    cards.push(`<div class="card sys-card" id="sys-proc-card" style="display:${tools.length ? '' : 'none'}"><div class="label">Processes</div><div class="value warn" id="sys-proc-val">${tools.length}</div><div class="sub" id="sys-proc-sub">${toolMem} MB</div></div>`);
     }
   }
 
@@ -237,19 +216,29 @@ async function loadSystemResources() {
     // Render system resources as cards
     const sysCards = document.getElementById('dash-cards');
     if (sysCards) {
-      // Remove previous sys cards to prevent duplicates
-      sysCards.querySelectorAll('.sys-card').forEach(el => el.remove());
+      // Update sys card values in-place (no DOM remove/reinsert — no flicker)
+      const pctCls = (v) => v >= 90 ? 'crit' : v >= 75 ? 'warn' : '';
       const tools = d.tool_processes || [];
       const toolCount = tools.length;
-      const toolMem = (d.tool_mem_total_mb || 0);
-      const pctCls = (v) => v >= 90 ? 'crit' : v >= 75 ? 'warn' : '';
-      const sysHtml = `
-        <div class="card sys-card"><div class="label">CPU</div><div class="value ${pctCls(cpu.percent || 0)}">${cpu.percent || 0}%</div><div class="sub">${cpu.cores || 0} cores</div></div>
-        <div class="card sys-card"><div class="label">Memory</div><div class="value ${pctCls(mem.percent || 0)}">${mem.percent || 0}%</div><div class="sub">${mem.used_gb != null ? mem.used_gb + ' / ' + mem.total_gb + ' GB' : ''}</div></div>
-        <div class="card sys-card"><div class="label">Disk</div><div class="value ${pctCls(disk.percent || 0)}">${disk.percent || 0}%</div><div class="sub">${disk.free_gb != null ? disk.free_gb + ' GB free' : ''}</div></div>
-        ${toolCount > 0 ? `<div class="card sys-card"><div class="label">Processes</div><div class="value warn">${toolCount}</div><div class="sub">${toolMem} MB</div></div>` : ''}
-      `;
-      sysCards.insertAdjacentHTML('beforeend', sysHtml);
+      const sysData = {
+        'sys-cpu-val': { v: (cpu.percent || 0) + '%', cls: pctCls(cpu.percent || 0) },
+        'sys-cpu-sub': { v: (cpu.cores || 0) + ' cores' },
+        'sys-mem-val': { v: (mem.percent || 0) + '%', cls: pctCls(mem.percent || 0) },
+        'sys-mem-sub': { v: mem.used_gb != null ? mem.used_gb + ' / ' + mem.total_gb + ' GB' : '' },
+        'sys-disk-val': { v: (disk.percent || 0) + '%', cls: pctCls(disk.percent || 0) },
+        'sys-disk-sub': { v: disk.free_gb != null ? disk.free_gb + ' GB free' : '' },
+        'sys-proc-val': { v: toolCount || '', cls: 'warn' },
+        'sys-proc-sub': { v: toolCount > 0 ? (d.tool_mem_total_mb || 0) + ' MB' : '' },
+      };
+      Object.entries(sysData).forEach(([id, data]) => {
+        const el = document.getElementById(id);
+        if (el) {
+          if (data.v !== undefined) el.textContent = data.v;
+          if (data.cls) { el.className = el.className.replace(/\b(crit|warn|accent|green|orange|red|purple)\b/g, '').trim(); el.classList.add(data.cls); }
+        }
+      });
+      const procCard = document.getElementById('sys-proc-card');
+      if (procCard) procCard.style.display = toolCount > 0 ? '' : 'none';
     }
 
     // Tool process table (if tools running)
