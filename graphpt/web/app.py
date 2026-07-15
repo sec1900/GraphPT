@@ -4082,6 +4082,7 @@ class _AgentRequest(BaseModel):
     prompt: str = ""
 
 _agent_sessions: dict[str, dict] = {}
+_agent_stops: dict[str, threading.Event] = {}
 _agent_lock = threading.Lock()
 
 
@@ -4251,8 +4252,12 @@ def _create_agent_session(session_id: str, *, asset_id: str) -> dict:
 async def api_agent_run(req: _AgentRequest):
     """启动单阶段 Graph Agent。"""
     from graphpt.core.graph_agent import run_graph_agent
+    import threading as _thr
 
     session_id = _new_agent_session_id()
+    stop_evt = _thr.Event()
+    with _agent_lock:
+        _agent_stops[session_id] = stop_evt
 
     def _run():
         def _on_status(msg):
@@ -4272,6 +4277,7 @@ async def api_agent_run(req: _AgentRequest):
                 on_status=_on_status,
                 on_token=_on_token,
                 steering_provider=_steering,
+                stop_event=stop_evt,
             )
             _update_agent_session(session_id, {
                 "status": "done",
@@ -4285,6 +4291,9 @@ async def api_agent_run(req: _AgentRequest):
                 "error": str(e),
                 "finished_at": _agent_now(),
             }, event={"type": "error", "error": str(e)})
+        finally:
+            with _agent_lock:
+                _agent_stops.pop(session_id, None)
 
     _create_agent_session(session_id, asset_id=req.asset_id)
 
@@ -4321,6 +4330,20 @@ async def api_agent_steer(req: _SteerRequest):
         return {"ok": False, "error": "session is not running"}
     _queue_agent_steering(req.session_id, req.message)
     return {"ok": True}
+
+
+@web_app.post("/api/agent/stop")
+async def api_agent_stop(body: dict):
+    """停止运行中的 Agent 会话。"""
+    sid = (body.get("session_id") or "").strip()
+    if not sid:
+        raise HTTPException(400, "session_id required")
+    with _agent_lock:
+        evt = _agent_stops.get(sid)
+    if evt:
+        evt.set()
+        return {"ok": True, "stopped": sid}
+    return {"ok": False, "error": "session not running or already stopped"}
 
 
 # ============================================================

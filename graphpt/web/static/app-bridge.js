@@ -2080,12 +2080,25 @@ function loadAgentSessions() {
     box.innerHTML = keys.map(k => {
       const status = sessions[k];
       const badge = status === 'done' ? 'ok' : status === 'error' ? 'err' : 'warn';
+      const stopBtn = status === 'running'
+        ? ' <button class="btn outline small" style="font-size:9px;padding:1px 4px;margin-left:4px" onclick="event.stopPropagation();agentStopSession(\'' + k + '\')">Stop</button>'
+        : '';
       return '<div style="padding:4px 0;border-bottom:1px solid var(--border);cursor:pointer;font-size:11px" onclick="loadAgentSession(\'' + k + '\')">'
         + '<span class="badge ' + badge + '">' + status + '</span> '
-        + k.substring(0, 12) + '...</div>';
+        + k.substring(0, 12) + '...' + stopBtn + '</div>';
     }).join('');
   });
 }
+
+function agentStopSession(sid) {
+  if (!confirm('Stop agent session ' + sid.substring(0, 12) + '?')) return;
+  fetch('/api/agent/stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({session_id: sid})})
+    .then(r=>r.json()).then(d=>{
+      if (d.ok) { toast('Stopped'); loadAgentSessions(); }
+      else toast(d.error || 'Failed', false);
+    });
+}
+window.agentStopSession = agentStopSession;
 
 function loadAgentSession(sid) {
   fetch('/api/agent/status?session_id=' + encodeURIComponent(sid)).then(r=>r.json()).then(d=>{
