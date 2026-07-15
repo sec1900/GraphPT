@@ -63,19 +63,15 @@
       <div id="running-tasks-detail"><table style="width:100%"><thead><tr><th>Tool</th><th>Progress</th><th>Elapsed</th><th></th></tr></thead><tbody id="running-tasks-tbody"></tbody></table></div>
     </div>
     <div class="card-grid" id="dash-cards" style="margin-bottom:8px"></div>
+    <div class="card-grid" id="dash-sys-cards" style="margin-bottom:8px"></div>
+    <div style="display:none" id="sys-resources">
+      <span id="sys-cpu-pct"></span><span id="sys-cpu-cores"></span>
+      <span id="sys-mem-pct"></span><span id="sys-mem-detail"></span>
+      <span id="sys-disk-pct"></span><span id="sys-disk-detail"></span>
+      <span id="sys-tool-count"></span><span id="sys-pressure-badge"></span><span id="sys-temp-cleanup"></span>
+    </div>
     <div style="display:grid;grid-template-columns:1fr 300px;gap:12px">
       <div style="display:flex;flex-direction:column;gap:8px">
-        <div id="sys-resources" style="display:none;font-size:11px">
-          <span style="font-weight:600;margin-right:12px">Sys</span>
-          CPU <span id="sys-cpu-pct">—</span>% <span id="sys-cpu-cores" style="color:var(--muted)"></span>
-          <span style="margin:0 8px">|</span>
-          MEM <span id="sys-mem-pct">—</span>% <span id="sys-mem-detail" style="color:var(--muted)"></span>
-          <span style="margin:0 8px">|</span>
-          DISK <span id="sys-disk-pct">—</span>% <span id="sys-disk-detail" style="color:var(--muted)"></span>
-          <span id="sys-tool-count" style="margin-left:12px;color:var(--muted)"></span>
-          <span id="sys-pressure-badge" style="display:none;color:var(--red);margin-left:8px">⚠ Memory</span>
-          <span id="sys-temp-cleanup" style="display:none;color:var(--muted);margin-left:8px"></span>
-        </div>
         <div id="sys-tool-procs" style="display:none;font-size:11px;max-height:120px;overflow-y:auto">
           <table style="width:100%"><thead><tr><th>Tool</th><th>PID</th><th>Mem</th><th>CPU</th><th>Time</th></tr></thead><tbody id="sys-tool-tbody"></tbody></table>
         </div>

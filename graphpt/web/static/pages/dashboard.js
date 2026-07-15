@@ -294,54 +294,41 @@ async function loadSystemResources() {
 
     // Disk
     const disk = d.disk || {};
-    const diskEl = document.getElementById('sys-disk-pct'); if (diskEl) diskEl.textContent = disk.percent || 0;
-    const diskBar = document.getElementById('sys-disk-bar'); if (diskBar) { diskBar.style.width = (disk.percent || 0) + '%'; diskBar.className = 'res-bar-fill disk-fill' + (disk.percent >= 90 ? ' warn' : ''); }
-    const diskD = document.getElementById('sys-disk-detail'); if (diskD) diskD.textContent = (disk.free_gb != null ? disk.free_gb + ' GB free (' + (disk.path || '') + ')' : '');
 
-    // Memory Pressure
-    const pressEl = document.getElementById('sys-pressure-badge');
-    if (pressEl) pressEl.style.display = d.memory_pressure ? '' : 'none';
+    // Render system resources as cards
+    const sysCards = document.getElementById('dash-sys-cards');
+    if (sysCards) {
+      const tools = d.tool_processes || [];
+      const toolCount = tools.length;
+      const toolMem = (d.tool_mem_total_mb || 0);
+      const pctCls = (v) => v >= 90 ? 'crit' : v >= 75 ? 'warn' : '';
+      sysCards.innerHTML = `
+        <div class="card"><div class="label">CPU</div><div class="value ${pctCls(cpu.percent || 0)}">${cpu.percent || 0}%</div><div class="sub" style="font-size:10px;color:var(--muted)">${cpu.cores || 0} cores</div></div>
+        <div class="card"><div class="label">Memory</div><div class="value ${pctCls(mem.percent || 0)}">${mem.percent || 0}%</div><div class="sub" style="font-size:10px;color:var(--muted)">${mem.used_gb != null ? mem.used_gb + ' / ' + mem.total_gb + ' GB' : ''}</div></div>
+        <div class="card"><div class="label">Disk</div><div class="value ${pctCls(disk.percent || 0)}">${disk.percent || 0}%</div><div class="sub" style="font-size:10px;color:var(--muted)">${disk.free_gb != null ? disk.free_gb + ' GB free' : ''}</div></div>
+        ${toolCount > 0 ? `<div class="card"><div class="label">Processes</div><div class="value warn">${toolCount}</div><div class="sub" style="font-size:10px;color:var(--muted)">${toolMem} MB</div></div>` : ''}
+      `;
+    }
 
-    // Tool Processes
+    // Tool process table (if tools running)
     const tools = d.tool_processes || [];
     const toolSection = document.getElementById('sys-tool-procs');
     if (tools.length > 0 && toolSection) {
       toolSection.style.display = '';
-      const tcEl = document.getElementById('sys-tool-count'); if (tcEl) tcEl.textContent =
-        '(' + tools.length + ' proc, ' + (d.tool_mem_total_mb || 0) + ' MB total)';
-
-      document.getElementById('sys-tool-tbody').innerHTML = tools.map(t => {
+      const toolBody = document.getElementById('sys-tool-tbody');
+      if (toolBody) toolBody.innerHTML = tools.map(t => {
         const memCls = t.mem_mb > 2000 ? 'style="color:var(--red);font-weight:600"' :
           t.mem_mb > 1000 ? 'style="color:var(--orange);font-weight:600"' : '';
         const cpuCls = t.cpu_percent > 80 ? 'style="color:var(--red);font-weight:600"' : '';
         const elapsed = t.elapsed_s > 3600 ? Math.floor(t.elapsed_s / 3600) + 'h' + Math.floor(t.elapsed_s % 3600 / 60) + 'm'
           : t.elapsed_s > 60 ? Math.floor(t.elapsed_s / 60) + 'm' + Math.round(t.elapsed_s % 60) + 's'
             : t.elapsed_s + 's';
-
-        return `<tr>
-          <td><span class="badge warn">${esc(t.tool)}</span></td>
-          <td style="color:var(--muted)">${t.pid}</td>
-          <td ${memCls}>${t.mem_mb} MB</td>
-          <td ${cpuCls}>${t.cpu_percent}%</td>
-          <td style="color:var(--muted)">${elapsed}</td>
-        </tr>`;
+        return `<tr><td><span class="badge warn">${esc(t.tool)}</span></td><td style="color:var(--muted)">${t.pid}</td><td ${memCls}>${t.mem_mb} MB</td><td ${cpuCls}>${t.cpu_percent}%</td><td style="color:var(--muted)">${elapsed}</td></tr>`;
       }).join('');
-    } else {
+    } else if (toolSection) {
       toolSection.style.display = 'none';
     }
-
-    // Temp File Cleanup
-    const tempStats = d.temp_cleanup || {};
-    const tempSection = document.getElementById('sys-temp-cleanup');
-    if (tempSection && tempStats.tracked_count !== undefined) {
-      tempSection.style.display = '';
-      const ttEl = document.getElementById('temp-tracked'); if (ttEl) ttEl.textContent = tempStats.tracked_count || 0;
-      const tmEl = document.getElementById('temp-memory'); if (tmEl) tmEl.textContent = tempStats.memory_kb || 0;
-      const tnEl = document.getElementById('temp-next'); if (tnEl) tnEl.textContent = tempStats.next_cleanup_in || '—';
-    } else if (tempSection) {
-      tempSection.style.display = 'none';
-    }
-  } catch (e) { /* ignore */ }
+} catch (e) { /* ignore */ }
 }
 
 /**
