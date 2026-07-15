@@ -1,6 +1,6 @@
 bin: "python {tool_dir}/oob.py"
 desc: "OOB 带外交互验证 — 轮询 interactsh 回调并关联漏洞"
-command: "{bin} -json -poll-interval 3"
+command: "{bin} -json -poll-interval 3 -timeout 120"
 use_on:
   Vulnerability:
     desc: "对 SSRF/XXE/RCE/盲SQLi 漏洞做 OOB 回调验证"

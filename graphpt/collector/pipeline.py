@@ -28,8 +28,82 @@ from graphpt.common.asset_identity import normalize_host_port, normalize_url
 from graphpt.collector.adapter import ADAPTER_MAP
 from graphpt.collector.neo4j_client import get_graph_writer
 
+# 导入 cleanup 模块（模块化重构）
+from graphpt.collector.cleanup import (
+    register_temp_cleanup as _register_temp_cleanup,
+    cleanup_stale_paths as _cleanup_stale_paths,
+    get_temp_cleanup_stats,
+    unlink_temp as _unlink_temp,
+    cleanup_all_temps as _cleanup_all_temps,
+    cleanup_old_logs,
+)
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 PIPELINES_PATH = Path(__file__).resolve().parent / "pipelines.yaml"
+
+
+def _kill_proc_safely(proc: subprocess.Popen, timeout: int = 5) -> None:
+    """安全终止进程：kill + wait，避免僵尸进程。
+
+    Args:
+        proc: 要终止的进程对象
+        timeout: 等待进程退出的超时时间（秒），默认 5s
+    """
+    if proc.poll() is not None:
+        return  # 进程已退出，无需处理
+    try:
+        proc.kill()
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Windows 上某些进程可能卡住，超时后放弃等待
+        pass
+    except Exception:
+        pass
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def clear_new_flags(asset_id: str) -> int:
+    """清空指定资产下所有节点的 is_new 标记。
+
+    每次扫描开始前调用，将上次扫描的"新增"标记清空，
+    本次扫描中 ON CREATE 的节点会重新标记为 is_new = true。
+
+    Args:
+        asset_id: 资产ID
+
+    Returns:
+        清除的节点数量
+    """
+    from graphpt.collector.neo4j_client import get_graph_writer
+    from graphpt.common.log import get_logger
+
+    logger = get_logger(__name__)
+    writer = get_graph_writer()
+
+    try:
+        with writer._driver.session() as session:
+            # 清空该资产下所有关联节点的 is_new 标记
+            result = session.run(
+                """
+                MATCH (a:Asset {id: $asset_id})-[*1..3]->(n)
+                WHERE n.is_new = true
+                SET n.is_new = false
+                RETURN count(n) as cleared_count
+                """,
+                asset_id=asset_id
+            )
+            record = result.single()
+            cleared = record["cleared_count"] if record else 0
+            if cleared > 0:
+                logger.info(f"Cleared {cleared} is_new flags before scan for asset {asset_id}")
+            return cleared
+    except Exception as e:
+        logger.warning(f"Failed to clear is_new flags: {e}")
+        return 0
 
 
 def _now_iso() -> str:
@@ -169,29 +243,6 @@ def _split_command(command: str) -> list[str]:
 
 
 _BATCH_PLACEHOLDERS = ("{targets_file}", "{domains_file}", "{urls_file}", "{ips_file}")
-
-
-import atexit as _atexit
-_temp_files_cleanup: set[str] = set()
-
-def _register_temp_cleanup(path: str) -> None:
-    _temp_files_cleanup.add(path)
-
-def _unlink_temp(path: str) -> None:
-    """删除临时文件并同步清理 _temp_files_cleanup（防 set 内存泄漏）。"""
-    try:
-        os.unlink(path)
-    except OSError:
-        pass
-    _temp_files_cleanup.discard(path)
-
-def _cleanup_all_temps() -> None:
-    for p in list(_temp_files_cleanup):
-        try: os.unlink(p)
-        except OSError: pass
-    _temp_files_cleanup.clear()
-
-_atexit.register(_cleanup_all_temps)
 
 
 def _set_active_marker(tool: str, asset_id: str) -> None:
@@ -464,10 +515,14 @@ class PipelineExecutor:
         asset_id: str = "default",
         params: dict[str, str] | None = None,
         target_overrides: dict[str, list[dict[str, Any]]] | None = None,
+        ctx: dict[str, Any] | None = None,
     ) -> None:
         self.stages: list[dict[str, Any]] = pipeline_def.get("stages", [])
         self.asset_id = asset_id
         self.ctx: dict[str, Any] = dict(params or {})
+        # 合并传入的 ctx（例如 force_rescan）
+        if ctx:
+            self.ctx.update(ctx)
         self.target_overrides: dict[str, list[dict[str, Any]]] = {
             str(tool): [dict(target) for target in targets if isinstance(target, dict)]
             for tool, targets in (target_overrides or {}).items()
@@ -505,6 +560,10 @@ class PipelineExecutor:
     def execute(self) -> dict[str, Any]:
         import logging as _logging
         _log_exec = _logging.getLogger("graphpt.pipeline")
+
+        # 第一步：清空上次扫描的新增标记
+        clear_new_flags(self.asset_id)
+
         validation = self._tool_validation_result()
         if validation:
             return validation
@@ -521,6 +580,13 @@ class PipelineExecutor:
                 break
             if result.get("status") == "partial":
                 final_status = "partial"
+
+        # 扫描完成后自动清理旧日志（每小时最多一次）
+        try:
+            cleanup_old_logs(force=False)
+        except Exception:
+            pass
+
         return {"status": final_status, "stages": stage_results}
 
     def preview(self) -> dict[str, Any]:
@@ -660,12 +726,23 @@ class PipelineExecutor:
         if not query:
             return [{}]  # 无配置 → 跑一次，不迭代
 
-        # 自动注入 asset_id 到 WHERE NOT EXISTS，防止跨资产 ScanRun 误过滤
-        query = re.sub(
-            r"WHERE NOT EXISTS \{\s*MATCH \(sr:ScanRun\) WHERE ",
-            "WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.asset_id = $asset_id AND ",
-            query,
-        )
+        # 强制重扫模式：移除 ScanRun 检查，忽略已扫描记录
+        force_rescan = self.ctx.get("force_rescan", False)
+        if force_rescan:
+            # 移除整个 WHERE NOT EXISTS { MATCH (sr:ScanRun) ... } 子句
+            query = re.sub(
+                r"\s*AND NOT EXISTS \{\s*MATCH \(sr:ScanRun\)[^}]*\}",
+                "",
+                query,
+                flags=re.IGNORECASE
+            )
+        else:
+            # 自动注入 asset_id 到 WHERE NOT EXISTS，防止跨资产 ScanRun 误过滤
+            query = re.sub(
+                r"WHERE NOT EXISTS \{\s*MATCH \(sr:ScanRun\) WHERE ",
+                "WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.asset_id = $asset_id AND ",
+                query,
+            )
 
         try:
             from graphpt.collector.neo4j_client import get_graph_writer
@@ -975,26 +1052,6 @@ class PipelineExecutor:
                 continue
             cmd = _split_command(cmd_str)
 
-            # OOB 自动注入：nuclei/httpx 等工具自动追加 -interactsh-url
-            _oob_used = False
-            # nuclei 不自动注入 OOB——大量 HTTP 模板不需要，且会阻塞退出等回调
-            if base in ("httpx", "httpx:port", "httpx:subdomain", "ffuf"):
-                try:
-                    from graphpt.collector.oob_service import get_oob_service
-                    _oob = get_oob_service()
-                    if not _oob.is_running:
-                        _oob_domain = _oob.start()
-                        if _oob_domain:
-                            cmd.append("-interactsh-url")
-                            cmd.append(_oob_domain)
-                            _oob_used = True
-                    elif _oob.domain:
-                        cmd.append("-interactsh-url")
-                        cmd.append(_oob.domain)
-                        _oob_used = True
-                except Exception:
-                    pass
-
             # 工具输出写日志(流式,浏览器实时可见), 同时收齐供 adapter 解析
             import hashlib, time as _time
             _tool_log = _PROJECT_ROOT / "data" / "logs" / base
@@ -1016,7 +1073,7 @@ class PipelineExecutor:
             # 人工验证检测 — 爬虫工具（enscan 等）触发反爬后需用户打开浏览器验证
             _VERIFICATION_GRACE = int(os.getenv("GRAPHPT_VERIFICATION_GRACE", "600"))
             _VERIFICATION_PATTERNS = [
-                rb'(?i)AQC',                          # enscan 反爬验证码
+                rb'(?i)(?<![a-z])AQC(?![a-z])',     # enscan 反爬验证码（避免匹配 baidu.comaqc 等）
                 rb'(?i)captcha',                      # 通用验证码
                 rb'(?i)verif(?:y|ication)',           # 验证请求
                 rb'(?i)human.*(?:verif|check)',       # 人工验证
@@ -1026,21 +1083,43 @@ class PipelineExecutor:
             # 中文验证提示（需 Unicode 匹配，单独处理）
             _VERIFICATION_RE_CN = re.compile(r'(?i)(?:请.*(?:验证|认证)|(?:验证|认证).*(?:浏览器|人工))')
             _verif_first_seen: float = 0.0
+            _verif_trigger_text: str = ""   # 触发验证的输出片段，前端横幅展示
+            _verif_clear_streak: int = 0    # 连续正常输出计数，需 N 次才清除验证标记
+            _VERIF_CLEAR_NEED = 5           # 需要连续 5 次正常/新内容输出才认为验证已通过
             _verif_last_line: bytes = b""
 
-            def _is_verification_output(chunk: bytes) -> bool:
-                """检测输出中是否包含人工验证/反爬提示。"""
+            _ANSI_RE = re.compile(rb'\x1b\[[0-9;]*m')  # 清理 ANSI 颜色码
+            def _safe_decode_slice(data: bytes, start: int, end: int) -> str:
+                """安全截取并解码字节切片，对齐 UTF-8 边界。"""
+                # 向前/后调整到合法 UTF-8 边界
+                while start > 0 and (data[start] & 0xC0) == 0x80:
+                    start -= 1
+                while end < len(data) and (data[end] & 0xC0) == 0x80:
+                    end += 1
+                _slice = data[start:min(end, len(data))]
+                _slice = _ANSI_RE.sub(b'', _slice)
+                return _slice.decode("utf-8", errors="replace").replace("\n", " ").replace("\r", " ").strip()
+            def _is_verification_output(chunk: bytes):
+                """检测输出中是否包含人工验证/反爬提示。
+                返回 (is_match: bool, trigger_text: str)。"""
                 for _pat in _VERIFICATION_PATTERNS:
-                    if re.search(_pat, chunk):
-                        return True
+                    _m = re.search(_pat, chunk)
+                    if _m:
+                        # 安全解码 + 去除 ANSI 码 + 截断到 120 字符
+                        _t = _safe_decode_slice(chunk, max(0, _m.start()-60), _m.end()+80)
+                        if len(_t) > 120:
+                            _t = _t[:120].rsplit(" ", 1)[0]
+                        return True, _t
                 # 中文模式需先解码
                 try:
                     _text = chunk.decode("utf-8", errors="replace")
-                    if _VERIFICATION_RE_CN.search(_text):
-                        return True
+                    _m = _VERIFICATION_RE_CN.search(_text)
+                    if _m:
+                        _ctx = _text[max(0, _m.start()-10):_m.end()+30].replace("\n", " ").strip()[:120]
+                        return True, _ctx
                 except Exception:
                     pass
-                return False
+                return False, ""
 
             # 重复输出检测 — 区分"新信息"和"旧信息重放"（重试循环/spinner/相同错误）
             _recent_line_hashes: set[int] = set()
@@ -1138,7 +1217,7 @@ class PipelineExecutor:
 
                         # 绝对时间上限
                         if _MAX_TOOL_TIME > 0 and _elapsed > _MAX_TOOL_TIME:
-                            proc.kill(); proc.wait()
+                            _kill_proc_safely(proc)
                             raise RuntimeError(
                                 f"tool max time: {_elapsed:.0f}s > {_MAX_TOOL_TIME}s "
                                 f"(log={_log_file})"
@@ -1153,7 +1232,7 @@ class PipelineExecutor:
                                     break
                                 _pmem = _pp.memory_info().rss // (1024 * 1024)
                                 if _pmem > _MAX_TOOL_MEM_MB:
-                                    proc.kill(); proc.wait()
+                                    _kill_proc_safely(proc)
                                     raise RuntimeError(
                                         f"tool memory limit: {_pmem}MB > {_MAX_TOOL_MEM_MB}MB "
                                         f"(log={_log_file})"
@@ -1180,7 +1259,7 @@ class PipelineExecutor:
                             except Exception:
                                 pass  # psutil 不可用时回退到纯 stdout 判断
                             if _really_idle:
-                                proc.kill(); proc.wait()
+                                _kill_proc_safely(proc)
                                 raise RuntimeError(
                                     f"tool idle: no output for {_stale:.0f}s > {_stale_limit}s, "
                                     f"CPU idle (chunks={len(_chunks)}, log={_log_file})"
@@ -1204,16 +1283,19 @@ class PipelineExecutor:
                                     _lf.write(_chunk)
                                     _lf.flush()
                                     # 活性判定：验证提示 + 重复输出均不计入有效活性
-                                    if _is_verification_output(_chunk):
+                                    _verif_match, _verif_text = _is_verification_output(_chunk)
+                                    if _verif_match:
                                         # 人工验证检测（Layer 3）：首次给宽限期，后续不重置
                                         if not _verif_first_seen:
                                             _verif_first_seen = _time.time()
+                                            _verif_trigger_text = _verif_text
                                             _last_output = _time.time()  # 首次给宽限期
                                             import logging as _logging
                                             _logging.getLogger("graphpt.pipeline").warning(
-                                                "tool_needs_verification tool=%s pid=%d asset=%s — "
-                                                "user must open browser to complete captcha/verification",
-                                                base, proc.pid, self.asset_id)
+                                                "tool_needs_verification tool=%s pid=%d asset=%s "
+                                                "trigger=%s — user must open browser to complete captcha/verification",
+                                                base, proc.pid, self.asset_id, _verif_text)
+                                        _verif_clear_streak = 0  # 再次出现验证→重置清除计数
                                         # 后续相同验证提示不重置 _last_output
                                     elif not _has_new_content(_chunk) and _DUPE_STREAK > _DUPE_LIMIT:
                                         # 重复输出检测（Layer 2）：连续 N 次纯重复 → 重试循环
@@ -1221,7 +1303,12 @@ class PipelineExecutor:
                                         pass
                                     else:
                                         _last_output = _time.time()
-                                        _verif_first_seen = 0.0  # 正常输出→清除验证跟踪
+                                        # 正常输出需连续 N 次才清除验证标记，防止交替输出反复重置宽限期
+                                        _verif_clear_streak += 1
+                                        if _verif_clear_streak >= _VERIF_CLEAR_NEED:
+                                            _verif_first_seen = 0.0
+                                            _verif_trigger_text = ""
+                                            _verif_clear_streak = 0
                                     _did_read = True
                         except Exception:
                             pass
@@ -1239,6 +1326,18 @@ class PipelineExecutor:
                                     "needs_verification": _verif_first_seen > 0,
                                     "verification_since_s": int(_time.time() - _verif_first_seen) if _verif_first_seen else 0,
                                 }
+                                # P8: 独立验证告警字典 — 不被并行工具覆盖，前端用此字段显示验证横幅
+                                var = st.setdefault("verification_alerts", {})
+                                if _verif_first_seen > 0:
+                                    var[tool] = {
+                                        "tool": tool, "pid": proc.pid,
+                                        "verification_since_s": int(_time.time() - _verif_first_seen),
+                                        "trigger_text": _verif_trigger_text,
+                                    }
+                                elif tool in var:
+                                    del var[tool]  # 正常输出→清除验证告警
+                                    if not var:
+                                        st.pop("verification_alerts", None)
                         except Exception: pass
 
                         # 巡检间隔
@@ -1256,7 +1355,7 @@ class PipelineExecutor:
                             from graphpt.common.redis_client import get_redis
                             _r = get_redis(socket_connect_timeout=1)
                             if _r.ping() and _r.exists(f"scan:abort:{self.asset_id}"):
-                                proc.kill(); proc.wait()
+                                _kill_proc_safely(proc)
                                 raise RuntimeError("scan aborted by user")
                         except RuntimeError: raise
                         except Exception: pass
@@ -1333,11 +1432,7 @@ class PipelineExecutor:
                         pass
                 _cleanup_iteration_file()
                 _stdin.close() if _stdin else None
-                try:
-                    proc.kill()
-                    proc.wait(timeout=5)
-                except Exception:
-                    pass
+                _kill_proc_safely(proc)
                 # 用户中止不标记已扫描，下次恢复
                 if "abort" in str(exc).lower():
                     mark_needed = False
@@ -1404,35 +1499,21 @@ class PipelineExecutor:
                         "kind": "adapter_error",
                         "message": str(exc),
                         "command": cmd,
+                        "log_file": str(_log_file),  # 记录日志路径供后续重解析
                     })
+                    # Adapter 失败但工具执行了 → 标记已扫描，避免重跑工具
+                    # 修复 adapter 后可通过 /api/reparse-errors 手动重解析日志
+                    try:
+                        if batch_ph is not None:
+                            batch_target_labels = [str(label) for label in tgt.get("__batch_labels__", []) if label]
+                            self._mark_scanned_batch(tool, batch_target_labels, findings_count=0)
+                        else:
+                            target_label = _target_label(tgt)
+                            self._mark_scanned(tool, target_label, findings_count=0)
+                    except Exception:
+                        pass  # 标记失败不致命
                     _cleanup_iteration_file()
                     continue
-
-            # 收集 OOB 回调（nuclei 等工具跑完后 poll interactsh）
-            if _oob_used:
-                try:
-                    from graphpt.collector.oob_service import get_oob_service
-                    _oob_svc = get_oob_service()
-                    _callbacks = _oob_svc.poll(timeout_s=10)
-                    for _cb in _callbacks:
-                        findings.append({
-                            "type": "oob_callback",
-                            "protocol": _cb.get("protocol", ""),
-                            "unique_id": _cb.get("unique_id", ""),
-                            "full_id": _cb.get("full_id", ""),
-                            "remote_address": _cb.get("remote_address", ""),
-                            "raw_request": _cb.get("raw_request", "")[:3000],
-                            "timestamp": _cb.get("timestamp", ""),
-                            "source": "interactsh",
-                            "asset_id": self.asset_id,
-                        })
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        _oob_svc.stop()
-                    except Exception:
-                        pass
 
             if proc.returncode != 0 and not findings:
                 _cleanup_iteration_file()
@@ -1529,12 +1610,18 @@ class PipelineExecutor:
                              tg=str(_e.get("target", ""))[:200], n=_now)
             except Exception:
                 pass
-        # P7: 工具执行结束后清除 tool_health + active marker，防止前端看到僵尸进程信息
+        # P7: 工具执行结束后清除 tool_health + verification_alerts + active marker
         try:
             from graphpt.collector.scheduler import _SCAN_STATE, _SCAN_STATE_LOCK
             with _SCAN_STATE_LOCK:
                 st = _SCAN_STATE.get(self.asset_id, {})
                 st.pop("tool_health", None)
+                # 清理本工具的验证告警条目（如果不清理会残留成僵尸告警）
+                var = st.get("verification_alerts", {})
+                if isinstance(var, dict):
+                    var.pop(tool, None)
+                    if not var:
+                        st.pop("verification_alerts", None)
         except Exception:
             pass
         _clear_active_marker(tool, self.asset_id)
@@ -1549,6 +1636,14 @@ class PipelineExecutor:
         """用指定上下文替换模板，Dry Run 避免污染真实执行上下文。"""
         def _replacer(m: re.Match) -> str:
             key = m.group(1)
+
+            # 处理 {wordlist:xxx} 格式占位符
+            if key.startswith("wordlist:"):
+                from graphpt.collector.scan_config import resolve_wordlist_placeholder
+                asset_id = ctx.get("asset_id", "default")
+                return resolve_wordlist_placeholder(asset_id, key)
+
+            # 普通占位符
             val = ctx.get(key)
             if val is None:
                 return m.group(0)
@@ -1556,7 +1651,8 @@ class PipelineExecutor:
                 return ",".join(str(v) for v in val)
             return str(val)
 
-        return re.sub(r"\{(\w+)\}", _replacer, template)
+        # 修改正则以匹配 {word} 或 {word:subkey}
+        return re.sub(r"\{([\w:]+)\}", _replacer, template)
 
     @staticmethod
     def _apply_target_to_ctx(ctx: dict[str, Any], target: dict[str, Any]) -> None:
@@ -1691,3 +1787,4 @@ def _save_run_state(name, asset_id, ctx, stage_results, failed_at):
             )
     except Exception:
         pass
+

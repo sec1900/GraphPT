@@ -1,5 +1,5 @@
 desc: "Interactsh OOB 交互客户端 — 生成 Payload URL 并轮询回调"
-command: "{bin} -json -poll-interval 5"
+command: "{bin} -json -poll-interval 5 -timeout 120"
 use_on:
   Vulnerability:
     desc: "对 SSRF/XXE/RCE 漏洞生成 OOB payload 并检测回调"
