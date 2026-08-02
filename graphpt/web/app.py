@@ -3716,11 +3716,32 @@ def _cache_flush() -> None:
     _cache_store.clear()
 
 
+# _count_targets 结果缓存（15s TTL — 33 个工具每 5s 全跑 targets query 太重）
+_COUNT_TARGETS_CACHE: dict[str, tuple[float, int]] = {}
+
+
+def _count_targets_cached(asset_id: str, tool: str) -> int:
+    key = f"{asset_id}:{tool}"
+    now = time.time()
+    hit = _COUNT_TARGETS_CACHE.get(key)
+    if hit and now - hit[0] < 15:
+        return hit[1]
+    try:
+        from graphpt.collector.scheduler import _count_targets
+        n = _count_targets(tool, asset_id)
+    except Exception:
+        n = 0
+    _COUNT_TARGETS_CACHE[key] = (now, n)
+    return n
+
+
 @web_app.get("/api/scan/progress")
 async def scan_progress(asset_id: str = "default"):
-    """全量扫描进度：仅 ScanRun 计数 + 活跃标记（不含 NODE_CATALOG count）。
+    """全量扫描进度：本轮 ScanRun 计数（分子）+ 未扫目标（分母）→ 层/总百分比。
 
-    节点计数由 /api/dashboard/counts 独立提供并缓存。
+    - runs: 本轮（按 _SCAN_STATE.started_at 过滤）各工具已扫目标数
+    - remaining: _count_targets 未扫目标数（缓存 15s）
+    - 层汇总 + 总体 → 前端并行层进度条 + 总进度条
     """
     cache_key = f"sp:{asset_id}"
     cached = _cached(cache_key, ttl=5)  # 扫描中只缓存 5s，让进度更新更及时
@@ -3796,22 +3817,52 @@ async def scan_progress(asset_id: str = "default"):
             pass
 
         # 按 dependency layer 组织
+        # 分母：未扫目标（缓存）+ 层/总进度汇总
         layers = []
+        overall_scans = overall_remaining = 0
         for spec in _DEPENDENCY_LAYERS:
             tools = []
+            l_scans = l_remaining = 0
             for t in spec["tools"]:
+                scans = runs.get(t, 0)
+                remaining = _count_targets_cached(asset_id, t)
+                l_scans += scans
+                l_remaining += remaining
                 tools.append({
                     "tool": t,
-                    "scans": runs.get(t, 0),
+                    "scans": scans,
+                    "remaining": remaining,
+                    "total": scans + remaining,
                     "active": t in active_tools or _base_tool_str(t) in active_tools,
                 })
-            layers.append({"layer": spec["layer"], "node": spec["node"], "tools": tools})
+            overall_scans += l_scans
+            overall_remaining += l_remaining
+            l_total = l_scans + l_remaining
+            layers.append({
+                "layer": spec["layer"], "node": spec["node"], "tools": tools,
+                "scans": l_scans, "remaining": l_remaining, "total": l_total,
+                "pct": round(l_scans / l_total * 100, 1) if l_total > 0 else 0,
+            })
 
+        overall_total = overall_scans + overall_remaining
+        # 总进度用层加权（按每层工具数），避免单层大目标数（如 gobuster 字典条目）
+        # 扭曲整体百分比；scanned/total_estimate 保留原始目标数供展示
+        total_weight = sum(len(spec["tools"]) for spec in _DEPENDENCY_LAYERS)
+        weighted_pct = sum(
+            l["pct"] * len(spec["tools"])
+            for l, spec in zip(layers, _DEPENDENCY_LAYERS)
+        ) / total_weight if total_weight > 0 else 0
         result = {"ok": True, "data": {
             "layers": layers,
             "active_tools": active_tools,
             "scan_running": len(active_tools) > 0 or bool(scan_progress.get("current_tool")),
             "scan_progress": scan_progress,
+            "cumulative": {
+                "scanned": overall_scans,
+                "remaining": overall_remaining,
+                "total_estimate": overall_total,
+                "pct": round(weighted_pct, 1),
+            },
         }}
         _cache_set(cache_key, result)
         return result

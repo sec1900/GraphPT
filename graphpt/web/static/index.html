@@ -57,7 +57,14 @@
     <div id="mitm-status" style="display:none;margin-bottom:8px;padding:6px 12px;background:var(--surface);border:1px solid var(--accent);border-radius:4px;font-size:11px">
       📷 Listening on :8888 | Asset: <strong id="mitm-asset-label">-</strong> | <a href="/api/mitm/cert">CA Cert</a> | <span id="mitm-stats"></span>
     </div>
-    <div id="scan-progress-bar" style="display:none;margin-bottom:8px;padding:6px 12px;background:var(--surface);border:1px solid var(--border);border-radius:4px;font-size:11px"></div>
+    <div id="scan-progress-bar" style="display:none;margin-bottom:8px;padding:6px 12px;background:var(--surface);border:1px solid var(--border);border-radius:4px;font-size:11px">
+      <div id="scan-progress-summary" style="margin-bottom:4px">&nbsp;</div>
+      <div style="background:var(--bg);border-radius:3px;height:16px;overflow:hidden;margin-bottom:6px;position:relative">
+        <div id="scan-progress-fill" style="height:100%;width:0%;background:var(--accent);transition:width .5s;display:flex;align-items:center;justify-content:center;font-size:10px;color:#fff"></div>
+      </div>
+      <div id="scan-progress-layers" style="font-size:11px"></div>
+      <div id="scan-verif-warning" style="display:none;margin-top:4px;color:var(--orange)">⚠ <span id="scan-verif-tool"></span> <span id="scan-verif-trigger"></span> <span id="scan-verif-waiting"></span></div>
+    </div>
     <div id="running-tasks-panel" style="display:none;margin-bottom:8px;font-size:11px">
       <span onclick="var d=document.getElementById('running-tasks-detail');d.style.display=d.style.display==='none'?'':'none'" style="cursor:pointer;font-weight:600">▼ Running Tasks <span id="running-tasks-count"></span></span>
       <div id="running-tasks-detail"><table style="width:100%"><thead><tr><th>Tool</th><th>Progress</th><th>Elapsed</th><th></th></tr></thead><tbody id="running-tasks-tbody"></tbody></table></div>
@@ -517,7 +524,7 @@
 </div>
 
 
-<script type="module" src="/static/app-bridge.js?v=20260715d"></script>
+<script type="module" src="/static/app-bridge.js?v=20260802f"></script>
 
 
 </body>

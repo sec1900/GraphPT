@@ -2388,15 +2388,15 @@ async function refreshScanProgress() {
     if (!d.ok) return false;
     const data = d.data;
 
-    // -- cumulative progress (from scan/state) --
+    // -- cumulative progress (from scan/progress — 本轮扫描的已扫/未扫目标) --
     try {
-      const sr = await fetch('/api/scan/state?asset_id=' + currentAsset);
-      const sd = await sr.json();
-      const cum = (sd.ok && sd.data.cumulative) ? sd.data.cumulative : null;
-      const rd = (sd.ok && sd.data.round) ? sd.data.round : null;
-      let topHtml = (rd ? 'Round ' + rd : '') +
-        (cum ? ' &middot; ' + cum.scanned + '/' + cum.total_estimate + ' targets (' +
-         (cum.total_estimate > 0 ? Math.round(cum.scanned / cum.total_estimate * 100) : 0) + '%)' : '');
+      const cum = data.cumulative || null;
+      const sp = data.scan_progress || {};
+      let topHtml = (sp.current_layer != null ? 'L' + sp.current_layer + ' ' + (sp.current_tool || '') : '');
+      if (cum) {
+        const pct = cum.total_estimate > 0 ? Math.round(cum.scanned / cum.total_estimate * 100) : 0;
+        topHtml = (topHtml ? topHtml + ' &middot; ' : '') + cum.scanned + '/' + cum.total_estimate + ' targets (' + pct + '%)';
+      }
       document.getElementById('scan-progress-summary').innerHTML = topHtml || '&nbsp;';
       // progress bar
       if (cum && cum.total_estimate > 0) {
@@ -2406,40 +2406,26 @@ async function refreshScanProgress() {
       }
     } catch(e) {}
 
-    // 将层分为"已完成"和"进行中/未开始"两组
-    var doneLayers = [], activeLayers = [];
+    // 每层独立进度条（并行层各自推进，互不等待）
+    var html = '';
     for (var li = 0; li < data.layers.length; li++) {
       var l = data.layers[li];
-      var allDone = l.tools.every(function(t){ return t.scans > 0 && !t.active; });
-      var allPending = l.tools.every(function(t){ return t.scans === 0 && !t.active; });
-      if (allDone) doneLayers.push(l);
-      else activeLayers.push({layer: l, pending: allPending});
-    }
-    // 已完成层：紧凑摘要
-    var html = '';
-    if (doneLayers.length > 0) {
-      var doneNames = doneLayers.map(function(l){ return 'L' + l.layer + ' ' + l.node; }).join(', ');
-      // 统计各工具扫描数
-      var doneToolCounts = [];
-      doneLayers.forEach(function(l){ l.tools.forEach(function(t){ if (t.scans > 0) doneToolCounts.push(t.tool + ':' + t.scans); }); });
-      html += '<div style="margin:2px 0;cursor:pointer;color:var(--muted)" id="dash-done-summary" onclick="var el=document.getElementById(\'dash-done-detail\');var show=el.style.display===\'none\';el.style.display=show?\'\':\'none\';this.querySelector(\'span\').textContent=show?\'▲\':\'▶\';"><span style="font-size:10px">▶</span> ✓ ' + doneLayers.length + ' layers done: ' + esc(doneNames.substring(0, 80)) + (doneNames.length>80?'…':'') + '</div>';
-      html += '<div id="dash-done-detail" style="display:none;margin-left:16px;font-size:11px;color:var(--muted)">';
-      doneLayers.forEach(function(l){
-        var tools = l.tools.map(function(t){ return t.tool + ':' + t.scans + ' ✓'; }).join(' | ');
-        html += '<div style="margin:1px 0">L' + l.layer + ' [' + l.node + '] ' + tools + '</div>';
-      });
-      html += '</div>';
-    }
-    // 进行中/待运行层：展开显示
-    for (var ai = 0; ai < activeLayers.length; ai++) {
-      var al = activeLayers[ai];
-      var l = al.layer;
-      var cls = al.pending ? 'color:var(--muted)' : '';
-      var tools = l.tools.map(function(t){
-        var mark = t.active ? ' <span style="color:var(--green)">●</span>' : (t.scans > 0 ? ' ✓' : ' ○');
-        return '<span style="' + cls + '">' + t.tool + ':' + (t.scans||0) + mark + '</span>';
-      }).join(' | ');
-      html += '<div style="margin:2px 0">L' + l.layer + ' [' + l.node + '] ' + tools + '</div>';
+      var pct = l.pct || 0;
+      var actives = l.tools.filter(function(t){ return t.active; }).map(function(t){ return t.tool; });
+      var status = actives.length > 0
+        ? ' <span style="color:var(--green)">● ' + esc(actives.join(', ')) + '</span>'
+        : (pct >= 100 ? ' <span style="color:var(--green)">✓ done</span>' : '');
+      var barColor = pct >= 100 ? 'var(--green)' : (actives.length > 0 ? 'var(--accent)' : 'var(--muted)');
+      var dim = (pct === 0 && actives.length === 0) ? 'opacity:0.5' : '';
+      html += '<div style="margin:3px 0;' + dim + '">' +
+        '<div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:1px">' +
+          '<span>L' + l.layer + ' ' + esc(l.node) + status + '</span>' +
+          '<span style="color:var(--muted)">' + (l.scans||0) + '/' + (l.total||0) + ' (' + Math.round(pct) + '%)</span>' +
+        '</div>' +
+        '<div style="background:var(--bg);border-radius:2px;height:6px;overflow:hidden">' +
+          '<div style="width:' + Math.min(100, pct) + '%;height:100%;background:' + barColor + ';transition:width .5s"></div>' +
+        '</div>' +
+      '</div>';
     }
     document.getElementById('scan-progress-layers').innerHTML = html;
 
