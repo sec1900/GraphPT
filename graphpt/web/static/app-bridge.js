@@ -65,6 +65,13 @@ window.createAsset = createAsset;
 window.deleteAsset = deleteAssetModule;
 window.clearErrors = clearErrors;
 
+// index.html 新建资产弹窗 oninput 引用（旧 app.js 函数，这里补齐兼容层）
+window.syncAssetId = function (val) {
+  const idEl = document.getElementById('modal-asset-id');
+  if (!idEl || idEl.dataset.manual) return;
+  idEl.value = (val || '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+};
+
 // 导出 Dashboard 函数
 window.loadDashboard = Dashboard.loadDashboard;
 

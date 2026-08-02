@@ -3535,13 +3535,15 @@ async def generate_report(asset_id: str = "default", format: str = "markdown"):
             END, affected_count DESC
         """, aid=asset_id)
 
-        # 查资产名用作报告标题
+        # 查资产名用作报告标题（兼容 HAS_DOMAIN 旧 schema + HAS_ROOT 新 schema）
         asset_rows = _neo4j_query(
-            "MATCH (a:Asset {id: $aid})-[:HAS_DOMAIN]->(d:Domain) "
-            "RETURN d.value AS domain ORDER BY d.value LIMIT 1",
+            "MATCH (a:Asset {id: $aid}) "
+            "OPTIONAL MATCH (a)-[:HAS_DOMAIN]->(d:Domain) "
+            "OPTIONAL MATCH (a)-[:HAS_ROOT]->(rd:RootDomain) "
+            "RETURN coalesce(d.value, rd.value) AS domain ORDER BY domain LIMIT 1",
             aid=asset_id,
         )
-        target_name = asset_rows[0]["root"] if asset_rows else asset_id
+        target_name = asset_rows[0]["domain"] if asset_rows else asset_id
 
         rg = ReportGenerator()
         rg.set_meta(

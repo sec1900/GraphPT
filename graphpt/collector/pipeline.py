@@ -1703,6 +1703,11 @@ class PipelineExecutor:
                     val = _os.environ.get("GRAPHPT_NUCLEI_SEVERITY", "").strip()
                 return f"-severity {val}" if val else ""
 
+            # 指纹/POC 定向占位符：{tech}/{poc} 缺失时输出空串（盲扫兜底，
+            # 而非保留占位符报 unresolved）。targets.yaml transform 命中才有值。
+            if key in ("tech", "poc") and ctx.get(key) is None:
+                return ""
+
             # 普通占位符
             val = ctx.get(key)
             if val is None:

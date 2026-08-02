@@ -6,10 +6,13 @@ export const API = '/api';
 
 /**
  * 附加 asset_id 参数
+ * 兼容旧式调用 aq(url)（默认取全局 currentAsset，无则 'default'）
+ * 和新式调用 aq(url, assetId)
  */
 export function aq(url, assetId) {
+  const id = assetId === undefined ? (window.currentAsset || 'default') : assetId;
   const sep = url.includes('?') ? '&' : '?';
-  return url + sep + 'asset_id=' + encodeURIComponent(assetId);
+  return url + sep + 'asset_id=' + encodeURIComponent(id);
 }
 
 /**

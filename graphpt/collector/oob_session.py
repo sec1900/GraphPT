@@ -105,17 +105,31 @@ def _session_key(asset_id: str) -> str:
 
 
 def _read_registration(proc: subprocess.Popen, timeout_s: float = 30.0) -> tuple[str, str]:
-    """读 interactsh-client stdout 首条注册记录 → (domain, token)。"""
-    deadline = time.time() + timeout_s
-    while time.time() < deadline and proc.poll() is None:
-        line = proc.stdout.readline()
-        if not line:
-            if proc.poll() is not None:
-                break
-            time.sleep(0.5)
-            continue
+    """读 interactsh-client stdout 首条注册记录 → (domain, token)。
+
+    ⚠ 不能直接阻塞 readline()：客户端连不上 OOB 服务器时不输出任何内容，
+    阻塞读会使超时失效（while 条件永远轮不到），run_full_scan 永久挂起。
+    改为 daemon 线程读 + join(timeout)，超时后调用方负责 terminate。
+    """
+    lines: list[str] = []
+
+    def _reader() -> None:
         try:
-            data = json.loads(line.strip())
+            for line in proc.stdout:
+                lines.append(line.strip())
+                if len(lines) >= 100:
+                    break
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if not lines:
+        return "", ""
+    for line in lines:
+        try:
+            data = json.loads(line)
         except json.JSONDecodeError:
             continue
         if data.get("domain"):
