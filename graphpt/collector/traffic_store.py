@@ -257,6 +257,28 @@ def redact_traffic(record: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def query_traffic_for_endpoint(base_path: str, *, limit: int = 50) -> list[dict[str, Any]]:
+    """按路径级端点聚合其全部变体流量（信号层入口）。
+
+    路径级身份重构后，端点节点是路径级（去 query），其变体请求
+    （?id=1/?id=2）的完整 req/resp 在 traffic_store — 此函数按
+    URL 前缀（转义 LIKE 元字符）聚合同一路径的全部变体流量。
+    """
+    _init_db()
+    escaped = (str(base_path).replace("\\", "\\\\")
+               .replace("%", "\\%").replace("_", "\\_"))
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM traffic WHERE url LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT ?",
+            (f"{escaped}%", limit),
+        ).fetchall()
+        cols = [d[0] for d in conn.execute("SELECT * FROM traffic LIMIT 0").description]
+        return [dict(zip(cols, r)) for r in rows]
+    finally:
+        conn.close()
+
+
 def traffic_stats(asset_id: str = "") -> dict[str, int]:
     """流量总量统计（供前端/巡检使用）。"""
     _init_db()

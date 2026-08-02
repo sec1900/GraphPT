@@ -849,13 +849,21 @@ class PipelineExecutor:
                 for label in batch:
                     label = label or "default"
                     rid = f"scan:target:{hashlib.md5(f'{tool}:{label}'.encode()).hexdigest()[:16]}"
-                    rows.append({"rid": rid, "label": label})
+                    # target_key = 路径级去重键（消除 url 翻转重扫抖动；
+                    # 选择器按 sr.target_key = ep.base_path 去重）
+                    try:
+                        from graphpt.common.asset_identity import normalize_path
+                        target_key = normalize_path(label) or label
+                    except Exception:
+                        target_key = label
+                    rows.append({"rid": rid, "label": label, "target_key": target_key})
                 with w._driver.session() as s:
                     s.run(
                         """
                         UNWIND $rows AS row
                         MERGE (sr:ScanRun {id: row.rid})
                         SET sr.tool = $tool, sr.target = row.label,
+                            sr.target_key = row.target_key,
                             sr.asset_id = $asset_id,
                             sr.findings_count = $fc, sr.last_run_at = $now,
                             sr.finished_at = $now,

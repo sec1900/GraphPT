@@ -423,14 +423,18 @@ def main() -> int:
             sig.setdefault("method", method)
             sig["_traffic"] = rec  # 内部字段：供 AI 判断读取，输出前删除
             outputs.append(sig)
-        # 越权信号（多记录对比）：按资源路径聚合（忽略 query 参数值），
-        # 同路径多条流量中资源参数值变化 → 响应差异 → 越权特征
+        # 越权信号（多记录对比）：按路径级端点聚合全部变体流量
+        # （路径级身份重构后的正式入口 — query 变体在同一 base_path 下）
         try:
-            from urllib.parse import urlsplit
-            base_url = urlsplit(url)._replace(query="").geturl()
-        except ValueError:
-            base_url = url
-        traffic_by_path = _load_traffic(base_url) if base_url != url else traffic
+            from graphpt.common.asset_identity import normalize_path
+            base_path = normalize_path(url)
+        except Exception:
+            base_path = ""
+        if base_path and base_path != url:
+            from graphpt.collector.traffic_store import query_traffic_for_endpoint
+            traffic_by_path = query_traffic_for_endpoint(base_path, limit=20)
+        else:
+            traffic_by_path = traffic
         if len(traffic_by_path) >= 2:
             for sig in _idor_diff_signals(url, traffic_by_path):
                 sig.setdefault("url", url)
