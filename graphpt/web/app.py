@@ -2264,10 +2264,11 @@ async def list_vulnerabilities(
     per_page: int = 50,
     severity: str = "",
     q: str = "",
+    status: str = "",
 ):
-    """分页浏览漏洞结果。当前来源主要是 nuclei 写入的 Vulnerability 节点。30s 缓存。"""
+    """分页浏览漏洞结果。status 过滤: candidate / verified / confirmed / dismissed。"""
     # 搜索时跳过缓存（搜索词多变）
-    if not q.strip():
+    if not q.strip() and not status.strip():
         cache_key = f"vulns:{asset_id}:{severity}:{page}:{per_page}"
         cached = _cached(cache_key, ttl=30)
         if cached:
@@ -2278,6 +2279,7 @@ async def list_vulnerabilities(
         offset = (page - 1) * per_page
         severity_filter = severity.strip().lower()
         q_filter = q.strip().lower()
+        status_filter = status.strip().lower()
 
         base_match = """
             MATCH (a:Asset {id: $aid})
@@ -2306,6 +2308,7 @@ async def list_vulnerabilities(
             }
             WITH DISTINCT v, ep
             WHERE ($severity_filter = '' OR toLower(coalesce(v.severity, '')) = $severity_filter)
+              AND ($status_filter = '' OR toLower(coalesce(v.status, 'candidate')) = $status_filter)
               AND (
                 $q_filter = ''
                 OR toLower(coalesce(v.title, '')) CONTAINS $q_filter
@@ -2331,7 +2334,9 @@ async def list_vulnerabilities(
                    v.severity AS severity, v.detail AS detail,
                    v.evidence AS evidence, v.created_at AS created_at,
                    v.last_seen_at AS last_seen_at, coalesce(v.sources, []) AS sources,
-                   ep.id AS endpoint_id, ep.url AS url, ep.status_code AS status_code,
+                   coalesce(v.status, 'candidate') AS status,
+                   ep.id AS endpoint_id, coalesce(ep.url, v.url) AS url,
+                   ep.status_code AS status_code,
                    ep.title AS endpoint_title
             ORDER BY severity_rank ASC, coalesce(v.last_seen_at, v.created_at) DESC
             SKIP $offset LIMIT $limit
@@ -2339,6 +2344,7 @@ async def list_vulnerabilities(
             aid=asset_id,
             severity_filter=severity_filter,
             q_filter=q_filter,
+            status_filter=status_filter,
             offset=offset,
             limit=per_page,
         )
@@ -2351,6 +2357,7 @@ async def list_vulnerabilities(
             aid=asset_id,
             severity_filter=severity_filter,
             q_filter=q_filter,
+            status_filter=status_filter,
         )
         total = total_rows[0]["c"] if total_rows else 0
 
@@ -2367,6 +2374,7 @@ async def list_vulnerabilities(
                     "created_at": r["created_at"],
                     "last_seen_at": r["last_seen_at"],
                     "sources": r["sources"] or [],
+                    "status": r["status"],
                     "endpoint_id": r["endpoint_id"],
                     "url": r["url"],
                     "status_code": r["status_code"],
@@ -2378,9 +2386,55 @@ async def list_vulnerabilities(
             "page": page,
             "per_page": per_page,
         }
-        if not q.strip():
+        if not q.strip() and not status.strip():
             _cache_set(cache_key, result)
         return result
+    except Exception as exc:
+        return _json_error(exc)
+
+
+@web_app.post("/api/vulnerabilities/{vuln_id}/confirm")
+async def confirm_vulnerability(vuln_id: str):
+    """人工确认漏洞：candidate/verified → confirmed（验证闭环的最终闸门）。
+
+    detail 追加确认记录（带时间戳），审计可追踪。
+    """
+    from datetime import datetime, timezone
+    try:
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with _neo4j().session() as session:
+            session.run(
+                """
+                MATCH (v:Vulnerability {id: $vid})
+                SET v.status = 'confirmed', v.confirmed_at = $now,
+                    v.detail = coalesce(v.detail, '') + '\n\n[人工确认] ' + $now
+                """,
+                vid=vuln_id, now=now,
+            )
+        # 失效列表缓存
+        _cache_flush()
+        return {"ok": True, "id": vuln_id, "status": "confirmed", "confirmed_at": now}
+    except Exception as exc:
+        return _json_error(exc)
+
+
+@web_app.post("/api/vulnerabilities/{vuln_id}/dismiss")
+async def dismiss_vulnerability(vuln_id: str):
+    """人工驳回：candidate/verified → dismissed（误报标记）。"""
+    from datetime import datetime, timezone
+    try:
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with _neo4j().session() as session:
+            session.run(
+                """
+                MATCH (v:Vulnerability {id: $vid})
+                SET v.status = 'dismissed', v.dismissed_at = $now,
+                    v.detail = coalesce(v.detail, '') + '\n\n[人工驳回] ' + $now
+                """,
+                vid=vuln_id, now=now,
+            )
+        _cache_flush()
+        return {"ok": True, "id": vuln_id, "status": "dismissed"}
     except Exception as exc:
         return _json_error(exc)
 
@@ -3616,6 +3670,11 @@ def _cache_set(key: str, value: dict) -> None:
     stale = [k for k, v in _cache_store.items() if (now - v[0]) > _CACHE_TTL * 3]
     for k in stale:
         _cache_store.pop(k, None)
+
+
+def _cache_flush() -> None:
+    """清空全部 API 缓存（状态变更后调用，避免读到旧数据）。"""
+    _cache_store.clear()
 
 
 @web_app.get("/api/scan/progress")

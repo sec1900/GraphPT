@@ -1,0 +1,23 @@
+selectors:
+  verify_replay:
+    desc: "候选漏洞验证 — 取挂载 candidate 漏洞的端点"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a, a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+        WHERE coalesce(v.status, 'candidate') = 'candidate'
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+        WHERE coalesce(v.status, 'candidate') = 'candidate'
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+        WHERE coalesce(v.status, 'candidate') = 'candidate'
+        RETURN ep
+      }
+      WITH DISTINCT ep
+      WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+      RETURN ep.url AS url
+    mapping:
+      url: "{urls_file}"
