@@ -6,14 +6,17 @@ selectors:
       CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         WHERE ep.category IN ['api', 'login', 'upload', 'cms']
+           OR coalesce(ep.internal, false) = true
         RETURN ep
         UNION
         MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         WHERE ep.category IN ['api', 'login', 'upload', 'cms']
+           OR coalesce(ep.internal, false) = true
         RETURN ep
         UNION
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
         WHERE ep.category IN ['api', 'login', 'upload', 'cms']
+           OR coalesce(ep.internal, false) = true
         RETURN ep
       }
       WITH DISTINCT ep

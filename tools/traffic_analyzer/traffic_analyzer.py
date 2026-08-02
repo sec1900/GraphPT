@@ -181,6 +181,23 @@ def _signal_records(url: str, method: str, req_body: str, resp_body: str,
     req_l = (req_body or "").lower()[:20000]
     haystack = resp_l + "\n" + headers_text.lower() + "\n" + req_l
 
+    # 内网可达性信号：URL host 是私网地址（10.x/192.168.x/169.254.x/
+    # 内网域名）→ 目标暴露可触达的内网端点 — SSRF/横向渗透的入口情报。
+    # 原则：内网可达性是攻击面不是噪音（渗透测试视角）。
+    try:
+        from urllib.parse import urlsplit as _us
+        from graphpt.common.asset_identity import is_private_host
+        if is_private_host(_us(url).hostname or ""):
+            signals.append({
+                "signal_type": "internal_reachability",
+                "vuln_type": "info-leak",
+                "title": "目标暴露内网可达端点（SSRF/横向渗透入口情报）",
+                "confidence": 0.8,
+                "evidence": f"internal_url={url}",
+            })
+    except Exception:
+        pass
+
     # 敏感路径
     for pat in _SENSITIVE_PATH_PATTERNS:
         if re.search(pat, url_l):
