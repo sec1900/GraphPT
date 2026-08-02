@@ -404,6 +404,25 @@ def _transform_join_tech(tech: Any) -> str:
 _register_transform("join_tech", _transform_join_tech)
 
 
+def _transform_join_params_body(params: Any) -> str:
+    """params_body 名字列表 → sqlmap --data 表单串（空值参数）。
+
+    ["file", "user"] → "file=&user="（sqlmap 对空值参数 fuzz）。
+    清洗双引号/空白 — 值进命令字符串，含 " 会破坏 _split_command 参数解析。
+    """
+    def _clean(p: str) -> str:
+        return p.replace('"', "%22").replace("\n", " ").replace("\r", " ").strip()
+
+    if isinstance(params, list):
+        return "&".join(f"{_clean(str(p))}=" for p in params if str(p).strip())
+    if isinstance(params, str):
+        return "&".join(f"{_clean(p)}=" for p in params.split(",") if p.strip())
+    return ""
+
+
+_register_transform("join_params_body", _transform_join_params_body)
+
+
 def _transform_nuclei_tags(tech: Any) -> str:
     """指纹驱动：端点 tech[] 切词匹配 nuclei tag。
 
@@ -520,6 +539,9 @@ class PipelineExecutor:
         self.stages: list[dict[str, Any]] = pipeline_def.get("stages", [])
         self.asset_id = asset_id
         self.ctx: dict[str, Any] = dict(params or {})
+        # 命令模板解析需要按资产取配置（wordlist/auth）— 强制资产 ID，
+        # 不可被调用方 params 覆盖（params 里的 asset_id 不可信，防跨资产配置泄漏）
+        self.ctx["asset_id"] = asset_id
         # 合并传入的 ctx（例如 force_rescan）
         if ctx:
             self.ctx.update(ctx)
@@ -729,9 +751,16 @@ class PipelineExecutor:
         # 强制重扫模式：移除 ScanRun 检查，忽略已扫描记录
         force_rescan = self.ctx.get("force_rescan", False)
         if force_rescan:
-            # 移除整个 WHERE NOT EXISTS { MATCH (sr:ScanRun) ... } 子句
+            # 兼容两种 NOT EXISTS 写法：AND 前缀（nuclei 等）与 WHERE 前缀
+            # （httpx/sqlmap/crt/traffic_analyzer/verify_replay 等）
             query = re.sub(
-                r"\s*AND NOT EXISTS \{\s*MATCH \(sr:ScanRun\)[^}]*\}",
+                r"\s*AND\s+NOT EXISTS \{\s*MATCH \(sr:ScanRun\)[^}]*\}",
+                "",
+                query,
+                flags=re.IGNORECASE
+            )
+            query = re.sub(
+                r"\s*WHERE\s+NOT EXISTS \{\s*MATCH \(sr:ScanRun\)[^}]*\}",
                 "",
                 query,
                 flags=re.IGNORECASE
@@ -1642,6 +1671,28 @@ class PipelineExecutor:
                 from graphpt.collector.scan_config import resolve_wordlist_placeholder
                 asset_id = ctx.get("asset_id", "default")
                 return resolve_wordlist_placeholder(asset_id, key)
+
+            # 认证态扫描：{auth_headers} → 资产级认证配置的 -H 参数串
+            # （未启用/无值 → 空串，命令留空与无认证行为一致）
+            if key == "auth_headers":
+                from graphpt.collector.scan_config import get_scan_config
+                asset_id = ctx.get("asset_id", "default")
+                return get_scan_config(asset_id).auth_headers_string()
+
+            # sqlmap POST body 参数：{data} → ctx 有 data 时输出 --data "xxx"，
+            # 无 data（GET query 模式）→ 空串
+            if key == "data":
+                val = ctx.get("data", "")
+                return f'--data "{val}"' if val else ""
+
+            # nuclei severity 分级：{severity} → ctx 优先（按资产传参），
+            # env GRAPHPT_NUCLEI_SEVERITY 兜底（默认空 = 全量不回归）
+            if key == "severity":
+                val = str(ctx.get("severity", "") or "").strip()
+                if not val:
+                    import os as _os
+                    val = _os.environ.get("GRAPHPT_NUCLEI_SEVERITY", "").strip()
+                return f"-severity {val}" if val else ""
 
             # 普通占位符
             val = ctx.get(key)

@@ -7,7 +7,10 @@ from typing import Any
 
 
 class SubfinderAdapter(BaseAdapter):
-    """subfinder 输出适配器 — 支持纯文本和 JSON (-oJ) 两种格式。"""
+    """subfinder 输出适配器 — 支持纯文本和 JSON (-oJ) 两种格式。
+
+    输出统一的 Domain 节点（替代 Subdomain）。
+    """
 
     tool_name = "subfinder"
 
@@ -15,7 +18,6 @@ class SubfinderAdapter(BaseAdapter):
         import json as _json
 
         text = raw_output.decode("utf-8", errors="replace") if isinstance(raw_output, bytes) else raw_output
-        root_domain = ctx.get("root_domain", "")
         asset_id = ctx.get("asset_id", "")
         findings: list[dict[str, Any]] = []
 
@@ -31,9 +33,8 @@ class SubfinderAdapter(BaseAdapter):
                     if not host:
                         continue
                     findings.append({
-                        "type": "subdomain",
+                        "type": "domain",
                         "value": host,
-                        "root_domain": root_domain or ".".join(host.split(".")[-2:]),
                         "source": obj.get("source", "subfinder"),
                         "asset_id": asset_id,
                     })
@@ -42,9 +43,8 @@ class SubfinderAdapter(BaseAdapter):
                     pass
             # 纯文本格式：一行一个子域名
             findings.append({
-                "type": "subdomain",
+                "type": "domain",
                 "value": line,
-                "root_domain": root_domain or ".".join(line.split(".")[-2:]),
                 "source": "subfinder",
                 "asset_id": asset_id,
             })

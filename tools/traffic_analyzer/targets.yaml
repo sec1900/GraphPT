@@ -1,0 +1,23 @@
+selectors:
+  traffic_analyzer:
+    desc: "流量信号分析 — 取高价值类别（api/login/upload/cms）端点，信号来自 traffic_store 成对流量"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a, a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category IN ['api', 'login', 'upload', 'cms']
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category IN ['api', 'login', 'upload', 'cms']
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category IN ['api', 'login', 'upload', 'cms']
+        RETURN ep
+      }
+      WITH DISTINCT ep
+      WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+      RETURN ep.url AS url
+    mapping:
+      url: "{urls_file}"

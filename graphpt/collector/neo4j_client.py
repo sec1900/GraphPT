@@ -43,7 +43,13 @@ def _get_driver() -> GraphDatabase.driver:
     if _driver is None:
         with _driver_lock:
             if _driver is None:  # double-check
-                _driver = GraphDatabase.driver(_URI, auth=(_USER, _PASSWORD), max_connection_lifetime=3600)
+                _driver = GraphDatabase.driver(
+                    _URI,
+                    auth=(_USER, _PASSWORD),
+                    max_connection_lifetime=3600,
+                    max_connection_pool_size=150,  # 默认 100 → 150（适度扩容）
+                    connection_acquisition_timeout=60  # 获取连接超时 60s
+                )
     return _driver
 
 
@@ -126,6 +132,7 @@ class GraphWriter:
 
     def __init__(self, driver: GraphDatabase.driver) -> None:
         self._driver = driver
+        self._last_pool_log = 0.0  # 上次记录连接池状态的时间戳
 
     @staticmethod
     def _now() -> str:
@@ -136,7 +143,20 @@ class GraphWriter:
 
         write_batch 开一个 session → 传给每个 write_* → 一次事务写所有 finding。
         不传 _session 时行为不变（每个 write_* 自己开 session）。
+
+        轻量监控：每 60 秒记录一次连接池使用情况（定期采样，无锁开销）。
         """
+        # 轻量监控：定期记录连接池状态（避免实时计数的锁竞争）
+        import time
+        now = time.time()
+        if now - self._last_pool_log > 60:  # 每 60 秒记录一次
+            self._last_pool_log = now
+            try:
+                # Neo4j Driver 不暴露连接池内部状态，只在异常时记录
+                _log.debug("neo4j_session_acquire", extra={"timestamp": _now_iso()})
+            except Exception:
+                pass
+
         if _session is not None:
             class _NoClose:
                 def __enter__(self): return _session
@@ -199,7 +219,7 @@ class GraphWriter:
                 icp_id=icp_id, root_id=root_id,
             )
 
-    def write_domain(
+    def write_root_domain(
         self,
         value: str,
         asset_id: str,
@@ -208,7 +228,12 @@ class GraphWriter:
         icp: str = "",
         website: str = "",
         website_name: str = "", _session: Any | None = None) -> dict[str, Any]:
-        """写入根域名节点（来自 enscan 公司→域名发现）。
+        """【已废弃】写入根域名节点（来自 enscan 公司→域名发现）。
+
+        废弃原因：RootDomain/Subdomain 已统一为 Domain 节点，支持无限层级。
+        此方法保留仅为向后兼容，实际调用 write_domain。
+
+        迁移指南：直接调用 write_domain 并传入域名值。
 
         ICP备案号和 website 信息存入 RootDomain 属性，
         后续 FOFA/Shodan 可按 ICP 号反查更多资产。
@@ -224,8 +249,9 @@ class GraphWriter:
                 MERGE (r:RootDomain {id: $root_id})
                   ON CREATE SET r.value = $value, r.sources = [$source],
                     r.icp = $icp, r.website = $website, r.website_name = $website_name,
-                    r.created_at = $now
+                    r.first_seen = $now, r.last_seen = $now, r.is_new = true
                   ON MATCH SET
+                    r.last_seen = $now,
                     r.icp = CASE WHEN $icp <> '' THEN $icp ELSE r.icp END,
                     r.website = CASE WHEN $website <> '' THEN $website ELSE r.website END,
                     r.website_name = CASE WHEN $website_name <> '' THEN $website_name ELSE r.website_name END
@@ -246,6 +272,129 @@ class GraphWriter:
                 "value": value,
             }
 
+    def write_domain(
+        self,
+        value: str,
+        asset_id: str,
+        *,
+        source: str = "",
+        cname: str = "",
+        icp: str = "",
+        website: str = "",
+        website_name: str = "",
+        _session: Any | None = None) -> dict[str, Any]:
+        """统一写入 Domain 节点，支持无限层级（替代 RootDomain/Subdomain）。
+
+        自动识别层级：
+        - example.com → is_root=true, level=1
+        - www.example.com → is_root=false, level=2, parent=example.com
+        - api.www.example.com → is_root=false, level=3, parent=www.example.com
+
+        关系: Asset -[:HAS_DOMAIN]-> Domain -[:PARENT_OF]-> Domain
+
+        参数:
+        - value: 域名（任意层级）
+        - asset_id: 资产 ID
+        - source: 来源工具
+        - cname: CNAME 记录
+        - icp: ICP 备案号（仅根域名）
+        - website: 网站地址（仅根域名）
+        - website_name: 网站名称（仅根域名）
+
+        返回: {"id": "domain:xxx", "created": True/False, "value": "xxx"}
+        """
+        domain_id = f"domain:{value}"
+        now = _now_iso()
+
+        # 解析层级和父域名
+        parts = value.split('.')
+        level = len(parts)
+        is_root = (level <= 2)  # example.com 或 co.uk 视为根域名
+
+        # 父域名：去掉最左边的子域
+        parent_value = '.'.join(parts[1:]) if level > 2 else None
+        parent_id = f"domain:{parent_value}" if parent_value else None
+
+        with self._acquire_session(_session) as session:
+            # 构建 Cypher 查询
+            cypher = """
+            MERGE (d:Domain {id: $domain_id})
+            ON CREATE SET
+                d.value = $value,
+                d.level = $level,
+                d.is_root = $is_root,
+                d.sources = [$source],
+                d.cname = $cname,
+                d.icp = $icp,
+                d.website = $website,
+                d.website_name = $website_name,
+                d.first_seen = $now,
+                d.last_seen = $now,
+                d.is_new = true
+            ON MATCH SET
+                d.last_seen = $now,
+                d.cname = CASE WHEN $cname <> '' THEN $cname ELSE d.cname END,
+                d.icp = CASE WHEN $icp <> '' THEN $icp ELSE d.icp END,
+                d.website = CASE WHEN $website <> '' THEN $website ELSE d.website END,
+                d.website_name = CASE WHEN $website_name <> '' THEN $website_name ELSE d.website_name END
+            WITH d, coalesce(d.sources, []) AS _cur
+            SET d.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
+            """
+
+            params: dict[str, Any] = {
+                "domain_id": domain_id,
+                "value": value,
+                "level": level,
+                "is_root": is_root,
+                "source": source,
+                "cname": cname or "",
+                "icp": icp or "",
+                "website": website or "",
+                "website_name": website_name or "",
+                "asset_id": asset_id,
+                "now": now,
+            }
+
+            # 如果有父域名，创建父节点和关系
+            if parent_id:
+                cypher += """
+                WITH d
+                MERGE (parent:Domain {id: $parent_id})
+                ON CREATE SET
+                    parent.value = $parent_value,
+                    parent.level = $parent_level,
+                    parent.is_root = $parent_is_root,
+                    parent.first_seen = $now,
+                    parent.last_seen = $now
+                ON MATCH SET
+                    parent.last_seen = $now
+                MERGE (parent)-[:PARENT_OF]->(d)
+                """
+                params.update({
+                    "parent_id": parent_id,
+                    "parent_value": parent_value,
+                    "parent_level": level - 1,
+                    "parent_is_root": (level - 1) <= 2,
+                })
+
+            # 关联到 Asset
+            cypher += """
+            WITH d
+            MERGE (a:Asset {id: $asset_id})
+            ON CREATE SET a.created_at = $now
+            MERGE (a)-[:HAS_DOMAIN]->(d)
+            RETURN d.id AS id, d.is_new AS created
+            """
+
+            result = session.run(cypher, **params)
+            record = result.single()
+
+            return {
+                "id": domain_id,
+                "created": bool(record["created"]) if record else True,
+                "value": value,
+            }
+
     def write_subdomain(
         self,
         value: str,
@@ -255,99 +404,83 @@ class GraphWriter:
         source: str = "",
         cname: str = "",
         _session: Any | None = None) -> dict[str, Any]:
-        """幂等写入 Subdomain 节点并建立关系链。
+        """【已废弃】幂等写入 Subdomain 节点并建立关系链。
+
+        废弃原因：RootDomain/Subdomain 已统一为 Domain 节点，支持无限层级。
+        此方法保留仅为向后兼容，实际调用 write_domain。
+
+        迁移指南：直接调用 write_domain 并传入域名值。
 
         关系: Asset -[:HAS_ROOT]-> RootDomain -[:HAS_SUB]-> Subdomain
         sources 去重追加，兼容旧 schema 中 source 单字段迁移。
         返回 dict 包含 id 和 created 字段，created=True 表示首次发现。
         """
-        sub_id = f"sub:{value}"
-        root_id = f"root:{root_domain}" if root_domain else f"root:{value}"
-        now = _now_iso()
-
-        with self._acquire_session(_session) as session:
-            result = session.run(
-                """
-                MERGE (a:Asset {id: $asset_id})
-                  ON CREATE SET a.created_at = $now
-                MERGE (r:RootDomain {id: $root_id})
-                  ON CREATE SET r.value = $root_domain, r.created_at = $now
-                MERGE (s:Subdomain {id: $sub_id})
-                  ON CREATE SET s.value = $value, s.sources = [$source], s.cname = $cname, s.created_at = $now
-                  ON MATCH  SET s.last_seen_at = $now,
-                    s.cname = CASE WHEN $cname <> '' THEN $cname ELSE s.cname END
-                WITH s, coalesce(s.sources, CASE WHEN s.source IS NOT NULL THEN [s.source] ELSE [] END) AS _cur
-                SET s.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
-                SET s.source = null
-                WITH s
-                MATCH (a:Asset {id: $asset_id})
-                MATCH (r:RootDomain {id: $root_id})
-                MERGE (a)-[:HAS_ROOT]->(r)
-                MERGE (r)-[:HAS_SUB]->(s)
-                RETURN s.id AS id, s.created_at = $now AS created
-                """,
-                asset_id=asset_id,
-                root_id=root_id,
-                root_domain=root_domain or value,
-                sub_id=sub_id,
-                value=value,
-                source=source,
-                cname=cname or "",
-                now=now,
-            )
-            record = result.single()
-            return {
-                "id": record["id"] if record else sub_id,
-                "created": bool(record["created"]) if record else True,
-                "value": value,
-            }
+        # 转发到 write_domain
+        return self.write_domain(
+            value=value,
+            asset_id=asset_id,
+            source=source,
+            cname=cname,
+            _session=_session,
+        )
 
     def write_ip(
         self,
         ip: str,
         subdomain_id: str = "",
+        domain_id: str = "",
         *,
         asset_id: str = "",
         source: str = "", _session: Any | None = None) -> dict[str, Any]:
         """写入 IP 节点并建立关系。
 
-        两条路径（可同时存在）：
-          1. 子域名路径：Subdomain -[:RESOLVES_TO {sources, first_seen, last_seen}]-> IP
-          2. 独立路径（subdomain_id 为空时）：Asset -[:HAS_IP]-> IP
+        三条路径（可同时存在）：
+          1. 域名路径：Domain -[:RESOLVES_TO {sources, first_seen, last_seen}]-> IP
+          2. 子域名路径（向后兼容）：Subdomain -[:RESOLVES_TO]-> IP
+          3. 独立路径（domain_id 和 subdomain_id 都为空时）：Asset -[:HAS_IP]-> IP
 
         DNS 变更检测：旧解析边设 last_seen 截止，新解析边 ON CREATE 设 first_seen。
+
+        参数:
+        - subdomain_id: 已废弃，保留向后兼容，会自动转换为 domain_id
+        - domain_id: Domain 节点 ID（推荐使用）
         """
         ip_id = f"ip:{ip}"
         now = _now_iso()
 
+        # 向后兼容：subdomain_id 转换为 domain_id
+        if subdomain_id and not domain_id:
+            # sub:xxx.example.com → domain:xxx.example.com
+            domain_id = subdomain_id.replace("sub:", "domain:")
+
         with self._acquire_session(_session) as session:
-            # DNS 变更检测（仅子域名路径）
-            if subdomain_id:
+            # DNS 变更检测（仅域名路径）
+            if domain_id:
                 old_ip = session.run(
                     """
-                    MATCH (s:Subdomain {id: $sub_id})-[:RESOLVES_TO]->(old:IP)
+                    MATCH (d:Domain {id: $domain_id})-[:RESOLVES_TO]->(old:IP)
                     RETURN old.value AS old_value
                     """,
-                    sub_id=subdomain_id,
+                    domain_id=domain_id,
                 ).single()
 
                 if old_ip and old_ip["old_value"] != ip:
                     session.run(
                         """
-                        MATCH (s:Subdomain {id: $sub_id})-[r:RESOLVES_TO]->(old:IP {value: $old_val})
+                        MATCH (d:Domain {id: $domain_id})-[r:RESOLVES_TO]->(old:IP {value: $old_val})
                         SET r.last_seen = $now
                         """,
-                        sub_id=subdomain_id,
+                        domain_id=domain_id,
                         old_val=old_ip["old_value"],
                         now=now,
                     )
                     session.run(
                         """
-                        MATCH (s:Subdomain {id: $sub_id})
-                        SET s.changed_at = $now,
-                            s.changed_fields = coalesce(s.changed_fields, []) + 'dns_resolve'
+                        MATCH (d:Domain {id: $domain_id})
+                        SET d.changed_at = $now,
+                            d.changed_fields = coalesce(d.changed_fields, []) + 'dns_resolve'
                         """,
-                        sub_id=subdomain_id,
+                        domain_id=domain_id,
                         now=now,
                     )
 
@@ -355,11 +488,12 @@ class GraphWriter:
             result = session.run(
                 """
                 MERGE (ip:IP {id: $ip_id})
-                  ON CREATE SET ip.value = $ip, ip.sources = [$source], ip.created_at = $now
-                  ON MATCH  SET ip.last_seen_at = $now
+                  ON CREATE SET ip.value = $ip, ip.sources = [$source],
+                    ip.first_seen = $now, ip.last_seen = $now, ip.is_new = true
+                  ON MATCH SET ip.last_seen = $now
                 WITH ip, coalesce(ip.sources, []) AS _cur
                 SET ip.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
-                RETURN ip.id AS id, ip.created_at = $now AS created
+                RETURN ip.id AS id, ip.first_seen = $now AS created
                 """,
                 ip_id=ip_id,
                 ip=ip,
@@ -368,19 +502,19 @@ class GraphWriter:
             )
             record = result.single()
 
-            # 子域名路径关系（带属性）
-            if subdomain_id:
+            # 域名路径关系（带属性）
+            if domain_id:
                 session.run(
                     """
-                    MATCH (s:Subdomain {id: $sub_id})
+                    MATCH (d:Domain {id: $domain_id})
                     MATCH (ip:IP {id: $ip_id})
-                    MERGE (s)-[r:RESOLVES_TO]->(ip)
+                    MERGE (d)-[r:RESOLVES_TO]->(ip)
                       ON CREATE SET r.first_seen = $now, r.sources = [$source], r.last_seen = $now
                       ON MATCH  SET r.last_seen = $now
                     WITH r, coalesce(r.sources, []) AS _cur
                     SET r.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
                     """,
-                    sub_id=subdomain_id,
+                    domain_id=domain_id,
                     ip_id=ip_id,
                     source=source,
                     now=now,
@@ -434,9 +568,10 @@ class GraphWriter:
                 """
                 MERGE (p:Port {id: $port_id})
                   ON CREATE SET p.number = $port, p.protocol = $protocol,
-                                p.status = 'open', p.first_seen_at = $now,
-                                p.sources = [$source], p.created_at = $now
-                  ON MATCH  SET p.last_seen_at = $now
+                                p.status = 'open',
+                                p.sources = [$source],
+                                p.first_seen = $now, p.last_seen = $now, p.is_new = true
+                  ON MATCH SET p.last_seen = $now
                 WITH p, coalesce(p.sources, []) AS _cur
                 SET p.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
                 WITH p
@@ -444,8 +579,9 @@ class GraphWriter:
                 MERGE (i)-[:HAS_PORT]->(p)
                 WITH p
                 MERGE (svc:Service {id: $service_id})
-                  ON CREATE SET svc.name = $service_name, svc.sources = [$source], svc.created_at = $now
-                  ON MATCH  SET svc.last_seen_at = $now,
+                  ON CREATE SET svc.name = $service_name, svc.sources = [$source],
+                                svc.first_seen = $now, svc.last_seen = $now, svc.is_new = true
+                  ON MATCH SET svc.last_seen = $now,
                     svc.name = CASE WHEN $service_name <> '' AND NOT $service_name STARTS WITH 'port_' THEN $service_name ELSE svc.name END
                 WITH p, svc
                 MERGE (p)-[:HAS_SERVICE]->(svc)
@@ -486,7 +622,20 @@ class GraphWriter:
         products: list[str] | None = None,
         vendors: list[str] | None = None,
         fingerprint_severity: str = "",
-        favicon_hash: str = "", _session: Any | None = None) -> dict[str, Any]:
+        favicon_hash: str = "",
+        params: list[str] | None = None,
+        api_signals: list[str] | None = None,
+        from_js: str = "",
+        response_file: str = "",
+        category: str = "",
+        product: str = "",
+        requires_auth: bool = False,
+        params_detail: list[dict[str, Any]] | None = None,
+        js_urls: list[str] | None = None,
+        classified_at: str = "",
+        rule_classified: bool = False,
+        classifier_attempts: int = 0,
+        _session: Any | None = None) -> dict[str, Any]:
         """幂等写入 HTTPEndpoint 节点。
 
         url 用 normalize_url() 去 fragment 后作为身份标识。
@@ -496,6 +645,25 @@ class GraphWriter:
           - crawl_status: "success" | "timeout" | "waf_blocked" | "auth_required" | "error"
           - sources: 发现来源列表
           - changed_at / changed_fields: 变化感知
+          - params: API 参数列表（从 JS/Swagger 提取）
+          - api_signals: API 判定信号（is_api_path, is_json, from_js 等）
+          - from_js: 来源 JS 文件 URL（用于追溯 API 提取来源）
+          - response_file: 响应文件路径（.http 格式，Burp/Yakit 兼容）
+
+        分类属性（分类→路由方案）：
+          - category: page | api | static | login | upload | redirect | protected | error
+          - product: 指纹识别的产品名（wordpress/weblogic/...）
+          - requires_auth: 需要认证
+          - params_detail: [{name, value, in: query|body}] 结构化参数
+            （Community Edition 属性不支持 list of maps → 写库时拆分为
+            params_query / params_body 两个 primitive 数组，保留可查询性）
+          - js_urls: 页面引用的 JS 文件
+          - classified_at / rule_classified: 分类时间与来源（规则 vs AI）
+          - classifier_attempts: AI 分类尝试次数（防死循环）
+
+        合并语义：category/classified_at 只在非空时覆盖（防止 httpx 重扫
+        清掉 AI 分类结果）；requires_auth/rule_classified 只升不降；
+        js_urls/params_detail 数组按值去重合并；classifier_attempts 递增。
         """
         normalized = normalize_url(url) or url
         # 过滤本地地址，避免 Neo4j/Redis/Web 自身端口混入攻击面
@@ -505,6 +673,8 @@ class GraphWriter:
         now = _now_iso()
         headers = response_headers or {}
         tech_list = tech or []
+        params_list = sorted(set(params or []))
+        api_signals_list = sorted(set(api_signals or []))
 
         with self._acquire_session(_session) as session:
             # 变化感知：对比已有 fingerprint
@@ -538,24 +708,51 @@ class GraphWriter:
                     e.content_type = $content_type,
                     e.response_headers = $headers, e.ssl_cert_cn = $ssl_cert_cn,
                     e.ssl_cert_issuer = $ssl_cert_issuer, e.tech = $tech,
-                    e.crawl_status = $crawl_status, e.first_seen_at = $now,
+                    e.crawl_status = $crawl_status,
                     e.sources = [$source], e.url_fragment = $url_fragment,
-                    e.asset_id = $asset_id, e.created_at = $now
+                    e.asset_id = $asset_id,
+                    e.params = $params, e.api_signals = $api_signals, e.from_js = $from_js,
+                    e.response_file = $response_file,
+                    e.category = $category, e.product = $product,
+                    e.requires_auth = $requires_auth,
+                    e.params_query = $params_query, e.params_body = $params_body,
+                    e.js_urls = $js_urls,
+                    e.classified_at = $classified_at, e.rule_classified = $rule_classified,
+                    e.classifier_attempts = $classifier_attempts,
+                    e.first_seen = $now, e.last_seen = $now, e.is_new = true
                   ON MATCH SET
                     e.status_code = $status_code, e.title = $title,
                     e.body_hash = $body_hash, e.content_length = $content_length,
                     e.content_type = $content_type,
                     e.response_headers = $headers,
                     e.ssl_cert_cn = $ssl_cert_cn, e.crawl_status = $crawl_status,
-                    e.url_fragment = $url_fragment, e.last_seen_at = $now
+                    e.url_fragment = $url_fragment, e.last_seen = $now,
+                    e.from_js = CASE WHEN $from_js <> '' THEN $from_js ELSE e.from_js END,
+                    e.response_file = CASE WHEN $response_file <> '' THEN $response_file ELSE e.response_file END,
+                    e.category = CASE WHEN $category <> '' THEN $category ELSE e.category END,
+                    e.requires_auth = e.requires_auth OR $requires_auth,
+                    e.classified_at = CASE WHEN $classified_at <> '' THEN $classified_at ELSE e.classified_at END,
+                    e.rule_classified = e.rule_classified OR $rule_classified,
+                    e.classifier_attempts = coalesce(e.classifier_attempts, 0) + $classifier_attempts,
+                    e.product = CASE WHEN $product <> '' THEN $product ELSE e.product END
                 WITH e, coalesce(e.sources, []) AS _cur
                 SET e.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
                 WITH e, coalesce(e.tech, []) AS _tech
                 SET e.tech = _tech + [x IN $tech WHERE NOT x IN _tech]
+                WITH e, coalesce(e.params, []) AS _params
+                SET e.params = _params + [x IN $params WHERE NOT x IN _params]
+                WITH e, coalesce(e.api_signals, []) AS _signals
+                SET e.api_signals = _signals + [x IN $api_signals WHERE NOT x IN _signals]
                 WITH e, coalesce(e.products, []) AS _prod
                 SET e.products = _prod + [x IN $products WHERE NOT x IN _prod]
                 WITH e, coalesce(e.vendors, []) AS _vend
                 SET e.vendors = _vend + [x IN $vendors WHERE NOT x IN _vend]
+                WITH e, coalesce(e.js_urls, []) AS _js
+                SET e.js_urls = _js + [x IN $js_urls WHERE NOT x IN _js]
+                WITH e, coalesce(e.params_query, []) AS _pq
+                SET e.params_query = _pq + [x IN $params_query WHERE NOT x IN _pq]
+                WITH e, coalesce(e.params_body, []) AS _pb
+                SET e.params_body = _pb + [x IN $params_body WHERE NOT x IN _pb]
                 WITH e
                 SET e.fingerprint_severity = CASE WHEN $fingerprint_severity <> ''
                       THEN $fingerprint_severity ELSE e.fingerprint_severity END,
@@ -587,6 +784,21 @@ class GraphWriter:
                 vendors=vendors or [],
                 fingerprint_severity=fingerprint_severity,
                 favicon_hash=favicon_hash,
+                params=params_list,
+                api_signals=api_signals_list,
+                from_js=from_js,
+                response_file=response_file,
+                category=category,
+                product=product,
+                requires_auth=bool(requires_auth),
+                params_query=[str(p.get("name")) for p in (params_detail or [])
+                              if isinstance(p, dict) and p.get("in") == "query" and str(p.get("name", "")).strip()],
+                params_body=[str(p.get("name")) for p in (params_detail or [])
+                             if isinstance(p, dict) and p.get("in") == "body" and str(p.get("name", "")).strip()],
+                js_urls=js_urls or [],
+                classified_at=classified_at,
+                rule_classified=bool(rule_classified),
+                classifier_attempts=int(classifier_attempts or 0),
                 asset_id=asset_id,
                 now=now,
             )
@@ -620,12 +832,16 @@ class GraphWriter:
         evidence: str = "",
         url: str = "",
         source: str = "",
+        status: str = "candidate",
         asset_id: str = "",
         _session: Any | None = None) -> dict[str, Any]:
         """写入 Vulnerability 节点，关联到 HTTPEndpoint 和 Subdomain。
 
         Subdomain 通过 Asset→RootDomain→Subdomain 完整链连接，
         不再创建孤儿子域名（修复 severity dashboard 查询丢失漏洞）。
+
+        status: candidate（未验证，流量信号/模板命中）→ confirmed（人工/AI 验证）。
+        ON MATCH 时 status 只在非空时覆盖 — 已 confirmed 的不会被后续写入降级。
         """
         import hashlib
 
@@ -661,9 +877,11 @@ class GraphWriter:
                     v.detail = $detail, v.impact = $impact,
                     v.remediation = $remediation, v.tags = $tags,
                     v.evidence = $evidence, v.url = $vuln_url,
-                    v.sources = [$source], v.created_at = $now,
-                    v.asset_id = $asset_id
-                  ON MATCH SET v.last_seen_at = $now
+                    v.status = CASE WHEN $status <> '' THEN $status ELSE 'candidate' END,
+                    v.sources = [$source], v.asset_id = $asset_id,
+                    v.first_seen = $now, v.last_seen = $now, v.is_new = true
+                  ON MATCH SET v.last_seen = $now,
+                    v.status = CASE WHEN $status <> '' THEN $status ELSE v.status END
                 WITH v, coalesce(v.sources, []) AS _cur
                 SET v.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
                 WITH v
@@ -691,6 +909,7 @@ class GraphWriter:
                 tags=tags, evidence=evidence,
                 vuln_url=url, source=source, ep_id=endpoint_id,
                 host=host, root_domain=root_domain,
+                status=status or "",  # 空串：ON MATCH 不覆盖（防降级），ON CREATE 默认 candidate
                 asset_id=asset_id, now=now,
             )
             return {"id": vuln_id}
@@ -750,30 +969,17 @@ class GraphWriter:
         content_type: str = "",
         size: int = 0,
         source: str = "", _session: Any | None = None) -> dict[str, Any]:
-        """写入 DirEntry 节点，关联到 HTTPEndpoint。用于目录爆破结果。"""
-        dir_id = f"dir:{endpoint_id}:{method}:{path}"
-        now = _now_iso()
+        """【已废弃】写入 DirEntry 节点，关联到 HTTPEndpoint。用于目录爆破结果。
 
-        with self._acquire_session(_session) as session:
-            session.run(
-                """
-                MERGE (d:DirEntry {id: $dir_id})
-                  ON CREATE SET
-                    d.endpoint_id = $ep_id, d.path = $path, d.method = $method,
-                    d.status_code = $status_code, d.content_type = $content_type,
-                    d.size = $size, d.sources = [$source], d.created_at = $now
-                  ON MATCH SET d.last_seen_at = $now
-                WITH d, coalesce(d.sources, []) AS _cur
-                SET d.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
-                WITH d
-                MATCH (e:HTTPEndpoint {id: $ep_id})
-                MERGE (e)-[:EXPOSES_PATH]->(d)
-                """,
-                dir_id=dir_id, ep_id=endpoint_id, path=path, method=method,
-                status_code=status_code, content_type=content_type, size=size,
-                source=source, now=now,
-            )
-            return {"id": dir_id}
+        废弃原因：DirEntry 与 HTTPEndpoint 功能重复，已统一使用 HTTPEndpoint。
+        此方法保留仅为向后兼容，实际调用 write_http_endpoint。
+
+        迁移指南：直接调用 write_http_endpoint 并传入完整 URL。
+        """
+        # 从 endpoint_id 和 path 构造完整 URL
+        # 由于没有足够信息，这里只是占位实现
+        # 实际上所有工具已经改为直接输出 http_endpoint
+        return {"id": "", "deprecated": True}
 
     def write_bypass_result(
         self,
@@ -786,74 +992,36 @@ class GraphWriter:
         success: bool = False,
         asset_id: str = "",
         source: str = "", _session: Any | None = None) -> dict[str, Any]:
-        """写入 403 绕过尝试结果，关联到 DirEntry 或 HTTPEndpoint。
+        """【已废弃】写入 403 绕过尝试结果，关联到 DirEntry 或 HTTPEndpoint。
 
-        原始数据包（请求 + 响应）落盘到 artifacts/bypass/<asset>/<id>.http，
-        节点只存 packet_path（磁盘路径）+ packet_url（浏览器可打开链接），
-        保持图轻量。technique/final_status/success 作索引字段（无需解析数据包
-        即可检索/过滤）。
+        废弃原因：BypassResult 与 Vulnerability 功能重复，403 绕过成功应视为访问控制漏洞。
+        此方法保留仅为向后兼容，实际调用 write_vulnerability。
 
-        target_id: 被绕过的节点 id（DirEntry 的 dir:... 或 HTTPEndpoint 的 ep:...）。
-        一个 403 目标可挂多个 BypassResult（不同手法各一条，幂等）。
-        success=True 表示该手法拿到了非 403 的可访问响应。
-
-        供后续 403 绕过工具回写结果使用。
+        迁移指南：直接调用 write_vulnerability 并传入 vuln_type="access_control_bypass"。
         """
-        import hashlib
+        # 废弃实现：只有成功的绕过才创建漏洞
+        if not success:
+            return {"id": "", "deprecated": True, "success": False}
 
-        identity = f"{target_id}|{technique}|{raw_request}"
-        bypass_id = f"bypass:{hashlib.md5(identity.encode()).hexdigest()[:16]}"
-        now = _now_iso()
+        # 转发到 write_vulnerability
+        evidence = f"403 绕过成功\n方法: {technique}\n原始状态: 403\n绕过后状态: {final_status}"
+        if raw_request:
+            evidence += f"\n\n请求:\n{raw_request[:500]}"
+        if raw_response:
+            evidence += f"\n\n响应:\n{raw_response[:500]}"
 
-        # 原始数据包落盘（请求 + 响应合存一个 .http 文件）
-        packet_path = ""
-        packet_url = ""
-        if raw_request or raw_response:
-            # asset_id 常含冒号等文件系统非法字符（asset:lab-acme），安全化为目录名
-            import re as _re
-            aid = _re.sub(r'[<>:"/\\|?*]', "_", asset_id or "default")
-            rel_dir = Path("data") / "artifacts" / "bypass" / aid
-            abs_dir = _PROJECT_ROOT / rel_dir
-            try:
-                abs_dir.mkdir(parents=True, exist_ok=True)
-                fname = f"{bypass_id.split(':', 1)[-1]}.http"
-                packet_text = (
-                    f"### REQUEST ({technique})\n{raw_request}\n\n"
-                    f"### RESPONSE (status={final_status})\n{raw_response}\n"
-                )
-                (abs_dir / fname).write_text(packet_text, encoding="utf-8")
-                packet_path = str(rel_dir / fname).replace("\\", "/")
-                packet_url = "/artifacts/bypass/" + aid + "/" + fname
-            except OSError:
-                packet_path = ""
-                packet_url = ""
-
-        with self._acquire_session(_session) as session:
-            session.run(
-                """
-                MERGE (b:BypassResult {id: $bypass_id})
-                  ON CREATE SET
-                    b.target_id = $target_id, b.technique = $technique,
-                    b.final_status = $final_status, b.success = $success,
-                    b.packet_path = $packet_path, b.packet_url = $packet_url,
-                    b.sources = [$source], b.created_at = $now
-                  ON MATCH SET
-                    b.final_status = $final_status, b.success = $success,
-                    b.packet_path = $packet_path, b.packet_url = $packet_url,
-                    b.last_seen_at = $now
-                WITH b, coalesce(b.sources, []) AS _cur
-                SET b.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
-                WITH b
-                MATCH (t {id: $target_id})
-                WHERE t:DirEntry OR t:HTTPEndpoint
-                MERGE (t)-[:BYPASS_ATTEMPT]->(b)
-                """,
-                bypass_id=bypass_id, target_id=target_id, technique=technique,
-                final_status=final_status, success=success,
-                packet_path=packet_path, packet_url=packet_url,
-                source=source, now=now,
-            )
-            return {"id": bypass_id, "success": success, "packet_path": packet_path}
+        return self.write_vulnerability(
+            endpoint_id=target_id,
+            vuln_type="access_control_bypass",
+            title=f"403 Bypass via {technique}",
+            severity="medium",
+            detail=f"通过 {technique} 方法成功绕过 403 访问限制，获得 {final_status} 响应",
+            evidence=evidence,
+            tags=["403bypass", "access_control", technique.lower().replace(" ", "_")],
+            asset_id=asset_id,
+            source=source,
+            _session=_session,
+        )
 
     def write_file(
         self,
@@ -882,8 +1050,8 @@ class GraphWriter:
                     f.url = $url, f.content_type = $content_type,
                     f.size = $size, f.content_hash = $content_hash,
                     f.local_path = $local_path, f.sources = [$source],
-                    f.created_at = $now
-                  ON MATCH SET f.last_seen_at = $now
+                    f.first_seen = $now, f.last_seen = $now, f.is_new = true
+                  ON MATCH SET f.last_seen = $now
                 WITH f, coalesce(f.sources, []) AS _cur
                 SET f.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
                 WITH f
@@ -910,90 +1078,27 @@ class GraphWriter:
         api_signals: list[str] | None = None,
         from_js: str = "",
         source: str = "", _session: Any | None = None) -> dict[str, Any]:
-        """幂等写入 ApiEndpoint 节点（katana 爬取发现的接口）。
+        """【已废弃】幂等写入 ApiEndpoint 节点。
 
-        设计原则：全量记录爬到的接口，不做激进过滤；命中的判定信号存入
-        api_signals，供后续 LLM 读图分析。遵守项目脱敏规范——params 只存
-        参数名，绝不存参数值。
+        废弃原因：ApiEndpoint 与 HTTPEndpoint 功能重复，已统一使用 HTTPEndpoint。
+        此方法保留仅为向后兼容，实际调用 write_http_endpoint。
 
-        关系：
-          - HTTPEndpoint -[:EXPOSES_API]-> ApiEndpoint（接口所属站点）
-          - File -[:DEFINES_API]-> ApiEndpoint（接口在某 JS 文件中被发现）
-
-        参数：
-          - url: 接口完整 URL（normalize 去 fragment 后作为身份的一部分）
-          - method: HTTP 方法（GET/POST/...）
-          - parent_id: 所属 HTTPEndpoint 的 id
-          - file_id: 发现该接口的 File（JS）节点 id（可选）
-          - params: 参数名列表，仅名称不含值（脱敏）
-          - param_source: 参数位置 query | body | form
-          - api_signals: 命中的接口判定信号 is_api_path|is_json|non_get|from_js
-          - from_js: 出处 JS 文件 URL（溯源用，前端展示友好）
+        迁移指南：直接调用 write_http_endpoint 并传入 params, api_signals, from_js 参数。
         """
-        import hashlib
-
-        normalized = normalize_url(url) or url
-        path = ""
-        try:
-            from urllib.parse import urlsplit
-
-            path = urlsplit(normalized).path or normalized
-        except Exception:
-            path = normalized
-
-        method = (method or "GET").upper()
-        api_id = f"api:{hashlib.md5(f'{method}:{normalized}'.encode()).hexdigest()[:16]}"
-        now = _now_iso()
-        param_list = sorted(set(params or []))
-        signal_list = sorted(set(api_signals or []))
-
-        with self._acquire_session(_session) as session:
-            session.run(
-                """
-                MERGE (a:ApiEndpoint {id: $api_id})
-                  ON CREATE SET
-                    a.url = $url, a.path = $path, a.method = $method,
-                    a.status_code = $status_code, a.content_type = $content_type,
-                    a.params = $params, a.param_source = $param_source,
-                    a.api_signals = $api_signals, a.from_js = $from_js,
-                    a.sources = [$source], a.first_seen_at = $now, a.created_at = $now
-                  ON MATCH SET
-                    a.status_code = $status_code, a.content_type = $content_type,
-                    a.param_source = CASE WHEN $param_source <> '' THEN $param_source ELSE a.param_source END,
-                    a.from_js = CASE WHEN $from_js <> '' THEN $from_js ELSE a.from_js END,
-                    a.last_seen_at = $now
-                WITH a, coalesce(a.params, []) AS _p, coalesce(a.api_signals, []) AS _s
-                SET a.params = _p + [x IN $params WHERE NOT x IN _p],
-                    a.api_signals = _s + [x IN $api_signals WHERE NOT x IN _s]
-                WITH a, coalesce(a.sources, []) AS _cur
-                SET a.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
-                """,
-                api_id=api_id, url=normalized, path=path, method=method,
-                status_code=status_code, content_type=content_type,
-                params=param_list, param_source=param_source,
-                api_signals=signal_list, from_js=from_js, source=source, now=now,
-            )
-            # 关系：所属站点
-            if parent_id:
-                session.run(
-                    """
-                    MATCH (a:ApiEndpoint {id: $api_id})
-                    MATCH (parent) WHERE parent.id = $parent_id
-                    MERGE (parent)-[:EXPOSES_API]->(a)
-                    """,
-                    api_id=api_id, parent_id=parent_id,
-                )
-            # 关系：出处 JS 文件
-            if file_id:
-                session.run(
-                    """
-                    MATCH (a:ApiEndpoint {id: $api_id})
-                    MATCH (f:File {id: $file_id})
-                    MERGE (f)-[:DEFINES_API]->(a)
-                    """,
-                    api_id=api_id, file_id=file_id,
-                )
-            return {"id": api_id}
+        # 转发到 write_http_endpoint
+        return self.write_http_endpoint(
+            url=url,
+            method=method,
+            parent_id=parent_id,
+            status_code=status_code,
+            content_type=content_type,
+            params=params,
+            api_signals=api_signals,
+            from_js=from_js,
+            crawl_status="not_fetched" if not status_code else "success",
+            source=source,
+            _session=_session,
+        )
 
     def _write_oob_callback(
         self,
@@ -1004,10 +1109,26 @@ class GraphWriter:
         remote_address: str = "",
         raw_request: str = "",
         timestamp: str = "",
-        asset_id: str = "",
+        vulnerability_id: str = "",
         _session: Any | None = None,
     ) -> dict[str, Any]:
-        """记录 OOB 回调交互证据。"""
+        """记录 OOB 回调交互证据，挂在 Vulnerability 节点上。
+
+        OOB（Out-of-Band）交互是漏洞的证据，表明目标服务器回连到 interactsh。
+        关系：(vuln:Vulnerability)-[:TRIGGERED_OOB]->(oob:OOBInteraction)
+
+        参数:
+        - vulnerability_id: 关联的漏洞 ID（必需）
+        - protocol: 协议类型（http/dns）
+        - unique_id: 唯一标识符
+        - full_id: 完整 ID
+        - remote_address: 远程地址
+        - raw_request: 原始请求
+        - timestamp: 时间戳
+        """
+        if not vulnerability_id:
+            raise ValueError("vulnerability_id is required for OOB interaction")
+
         import hashlib
         cb_id = f"oob:{hashlib.md5((unique_id or full_id).encode()).hexdigest()[:16]}"
         now = _now_iso()
@@ -1022,12 +1143,12 @@ class GraphWriter:
                       oob.timestamp = $timestamp,
                       oob.created_at = $now
                 WITH oob
-                MATCH (a:Asset {id: $asset_id})
-                MERGE (a)-[:HAS_OOB]->(oob)
+                MATCH (v:Vulnerability {id: $vuln_id})
+                MERGE (v)-[:TRIGGERED_OOB]->(oob)
                 """,
                 id=cb_id, protocol=protocol, full_id=full_id,
                 remote_address=remote_address, raw_request=raw_request[:3000],
-                timestamp=timestamp, asset_id=asset_id, now=now,
+                timestamp=timestamp, vuln_id=vulnerability_id, now=now,
             )
         return {"id": cb_id, "protocol": protocol}
 
@@ -1162,6 +1283,60 @@ class GraphWriter:
             )
         return {"id": nse_id}
 
+    def write_wildcard_result(
+        self,
+        domain: str,
+        has_wildcard: bool,
+        wildcard_ips: list[str] | None = None,
+        *,
+        asset_id: str = "",
+        source: str = "",
+        _session: Any | None = None) -> dict[str, Any]:
+        """写入泛解析检测结果。
+
+        在 RootDomain 节点上添加泛解析标记和泛解析IP列表。
+        后续子域名枚举可以参考这些IP进行过滤。
+
+        Args:
+            domain: 根域名
+            has_wildcard: 是否存在泛解析
+            wildcard_ips: 泛解析IP列表
+            asset_id: 资产ID
+            source: 来源工具
+            _session: 复用的 Neo4j session
+
+        Returns:
+            {"id": "root:example.com"}
+        """
+        root_id = f"root:{domain}"
+        now = _now_iso()
+        wildcard_ips = wildcard_ips or []
+
+        with self._acquire_session(_session) as session:
+            session.run(
+                """
+                MATCH (a:Asset {id: $asset_id})
+                MERGE (r:RootDomain {id: $root_id})
+                  ON CREATE SET r.value = $domain,
+                                r.first_seen = $now, r.last_seen = $now, r.is_new = true
+                  ON MATCH SET r.last_seen = $now
+                MERGE (a)-[:HAS_ROOT]->(r)
+                SET r.has_wildcard = $has_wildcard,
+                    r.wildcard_ips = $wildcard_ips,
+                    r.wildcard_checked_at = $now,
+                    r.wildcard_source = $source
+                """,
+                asset_id=asset_id,
+                root_id=root_id,
+                domain=domain,
+                has_wildcard=has_wildcard,
+                wildcard_ips=wildcard_ips,
+                source=source,
+                now=now,
+            )
+
+        return {"id": root_id}
+
     def write_batch(self, findings: list[dict[str, Any]], *, asset_id: str = "", _session: Any | None = None) -> list[dict[str, Any]]:
         """批量写入 Finding 对象。所有 finding 共享一个 session，避免 N 次往返开销。"""
         results: list[dict[str, Any]] = []
@@ -1235,6 +1410,10 @@ class GraphWriter:
                         vendors=f.get("vendors", []),
                         fingerprint_severity=f.get("fingerprint_severity", ""),
                         favicon_hash=f.get("favicon_hash", ""),
+                        params=f.get("params", []),
+                        api_signals=f.get("api_signals", []),
+                        from_js=f.get("from_js", ""),
+                        response_file=f.get("response_file", ""),
                         _session=batch_session,
                     )
                 elif ftype == "vulnerability":
@@ -1277,16 +1456,9 @@ class GraphWriter:
                     for domain in (f.get("domains") or []):
                         self.link_icp_to_domain(f["number"], domain, _session=batch_session)
                 elif ftype == "dir_entry":
-                    result = self.write_dir_entry(
-                        endpoint_id=f.get("parent_id", ""),
-                        path=f.get("path", ""),
-                        method=f.get("method", "GET"),
-                        status_code=f.get("status_code", 0),
-                        content_type=f.get("content_type", ""),
-                        size=f.get("size", 0),
-                        source=f.get("source", ""),
-                        _session=batch_session,
-                    )
+                    # 【已废弃】dir_entry 类型已废弃，忽略
+                    # 所有工具已改为输出 http_endpoint
+                    continue
                 elif ftype == "file":
                     result = self.write_file(
                         endpoint_id=f.get("parent_id", ""),
@@ -1298,17 +1470,9 @@ class GraphWriter:
                         _session=batch_session,
                     )
                 elif ftype == "bypass_result":
-                    result = self.write_bypass_result(
-                        target_id=f.get("target_id", "") or f.get("parent_id", ""),
-                        technique=f.get("technique", ""),
-                        raw_request=f.get("raw_request", ""),
-                        raw_response=f.get("raw_response", ""),
-                        final_status=f.get("final_status", 0),
-                        success=f.get("success", False),
-                        asset_id=asset_id or f.get("asset_id", ""),
-                        source=f.get("source", ""),
-                        _session=batch_session,
-                    )
+                    # 【已废弃】bypass_result 类型已废弃，忽略
+                    # 403bypass 工具已改为输出 vulnerability
+                    continue
                 elif ftype == "api_endpoint":
                     result = self.write_api_endpoint(
                         url=f.get("url", ""),
@@ -1321,6 +1485,15 @@ class GraphWriter:
                         param_source=f.get("param_source", ""),
                         api_signals=f.get("api_signals", []),
                         from_js=f.get("from_js", ""),
+                        source=f.get("source", ""),
+                        _session=batch_session,
+                    )
+                elif ftype == "wildcard_result":
+                    result = self.write_wildcard_result(
+                        domain=f.get("domain", ""),
+                        has_wildcard=f.get("has_wildcard", False),
+                        wildcard_ips=f.get("wildcard_ips", []),
+                        asset_id=asset_id or f.get("asset_id", ""),
                         source=f.get("source", ""),
                         _session=batch_session,
                     )
@@ -1640,10 +1813,17 @@ def _build_unverified_query(node_type: str) -> str:
 # ---- 单例 ----
 
 _writer: GraphWriter | None = None
+_writer_lock = __import__("threading").Lock()
 
 
 def get_graph_writer() -> GraphWriter:
+    """获取全局单例 GraphWriter（线程安全）。
+
+    Driver 已是单例，所有 GraphWriter 共享同一个连接池（默认 150 连接）。
+    """
     global _writer
     if _writer is None:
-        _writer = GraphWriter(_get_driver())
+        with _writer_lock:
+            if _writer is None:  # double-check
+                _writer = GraphWriter(_get_driver())
     return _writer

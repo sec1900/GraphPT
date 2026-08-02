@@ -1,0 +1,2 @@
+desc: "浏览器自动登录导出 Cookie（辅助工具 — CLI 手动触发，不参与调度）"
+command: "python {tool_dir}/browser_login.py --url {url} --asset {asset_id}"

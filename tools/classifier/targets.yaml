@@ -1,0 +1,25 @@
+selectors:
+  classifier:
+    desc: "AI 补分类 — 取未分类的 HTTPEndpoint（分类闸门的长尾兜底，7 天重试窗口）"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category IS NULL OR ep.category = ''
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category IS NULL OR ep.category = ''
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category IS NULL OR ep.category = ''
+        RETURN ep
+      }
+      WITH DISTINCT ep
+      WHERE (ep.classifier_attempts IS NULL OR ep.classifier_attempts < 2)
+        AND (ep.classified_at IS NULL OR ep.classified_at < datetime() - duration({days: 7}))
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+      RETURN ep.url AS url
+    mapping:
+      url: "{urls_file}"

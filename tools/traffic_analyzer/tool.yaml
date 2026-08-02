@@ -1,0 +1,7 @@
+desc: "流量信号分析 — 从成对流量提取高价值信号（L2 规则 + L3 AI 脱敏判断）→ 候选漏洞"
+command: "python {tool_dir}/traffic_analyzer.py -list {urls_file} --batch 20"
+use_on:
+  HTTPEndpoint:
+    desc: "分析高价值类别端点（api/login/upload/cms）的成对流量记录"
+    params:
+      urls_file: "{urls_file}"

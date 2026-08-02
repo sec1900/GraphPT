@@ -1,0 +1,7 @@
+desc: "Webpack Bundle API 提取（访问网站首页，自动发现 JS 文件，提取 API 接口和参数）"
+command: "python {tool_dir}/webpack_analyzer.py -u {url}"
+use_on:
+  HTTPEndpoint:
+    desc: "访问网站页面，自动发现并分析 JS bundle，提取 API 接口、参数、前端框架"
+    params:
+      url: "{url}"

@@ -8,16 +8,15 @@ from urllib.parse import urlsplit as _urlsplit
 
 
 class SecretfinderAdapter(BaseAdapter):
-    """secretfinder JSONL 输出适配器 → secret / http_endpoint / api_endpoint / subdomain。
+    """secretfinder JSONL 输出适配器 → secret / http_endpoint / domain（统一 Domain 节点）。
 
     secretfinder 抓取 File / HTTPEndpoint 内容做敏感信息检测（筛网式），
     JS 来源额外提取 URL / API / 子域名。每行一个 JSON finding，均带 source_url。
 
     入图策略（findings 按列表顺序写入，父节点先于子节点）：
       - secret：脱敏后的敏感信息，按 source_url 挂到 File 或 HTTPEndpoint（-[:MAY_CONTAIN]->）
-      - subdomain：value=host，挂入资产图（仅 JS 来源）
-      - http_endpoint：从 JS 提取的隐藏 URL，crawl_status=not_fetched（仅 JS 来源）
-      - api_endpoint：API 风格 URL，source_url 是 .js File，反推 file_id 关联（File-[:DEFINES_API]->）
+      - domain：value=host，挂入资产图（仅 JS 来源）
+      - http_endpoint：从 JS 提取的所有 URL（包括 API），统一用 HTTPEndpoint 节点存储
     """
 
     tool_name = "secretfinder"
@@ -68,9 +67,8 @@ class SecretfinderAdapter(BaseAdapter):
                     continue
                 seen_hosts.add(host)
                 findings.append({
-                    "type": "subdomain",
+                    "type": "domain",
                     "value": host,
-                    "root_domain": obj.get("root_domain") or ".".join(host.split(".")[-2:]),
                     "source": "secretfinder",
                     "asset_id": asset_id,
                 })
@@ -92,19 +90,23 @@ class SecretfinderAdapter(BaseAdapter):
                 })
 
             elif ftype == "api_endpoint":
+                # 废弃 ApiEndpoint 节点，改用 HTTPEndpoint（统一所有 HTTP 端点）
                 url = str(obj.get("url") or "").strip()
-                if not url:
+                if not url or url in seen_urls:
                     continue
+                seen_urls.add(url)
+                host = (_split(url).hostname or "").strip(".").lower()
                 findings.append({
-                    "type": "api_endpoint",
+                    "type": "http_endpoint",  # 改为 http_endpoint
                     "url": url,
                     "method": obj.get("method", "GET"),
-                    "file_id": self._file_id_from_url(source_url),
-                    "params": obj.get("params", []),
-                    "param_source": obj.get("param_source", ""),
-                    "api_signals": obj.get("api_signals", []),
-                    "from_js": source_url,
+                    "parent_id": f"sub:{host}" if host else "",
+                    "params": obj.get("params", []),  # API 参数
+                    "api_signals": obj.get("api_signals", []),  # API 判定信号
+                    "from_js": source_url,  # 来源 JS 文件
+                    "crawl_status": "not_fetched",
                     "source": "secretfinder",
+                    "asset_id": asset_id,
                 })
 
         return findings

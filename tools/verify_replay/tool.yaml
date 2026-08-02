@@ -1,0 +1,7 @@
+desc: "候选漏洞自动重放验证 — candidate → verified/dismissed（验证闭环 L4）"
+command: "python {tool_dir}/verify_replay.py -list {urls_file}"
+use_on:
+  HTTPEndpoint:
+    desc: "验证该端点下 status=candidate 的漏洞"
+    params:
+      urls_file: "{urls_file}"

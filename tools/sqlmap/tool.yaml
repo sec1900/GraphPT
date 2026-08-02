@@ -1,5 +1,7 @@
-desc: "SQLi 自动化利用 — 对所有带参数 URL 自动测试注入"
-command: "{bin} -u {url} --batch --random-agent --level=3 --risk=2 --flush-session"
+desc: "SQLi 检测 — 对已分类为 API 且含参数的端点测试注入（{data} 注入 POST body 参数）"
+command: "{bin} -u {url} --batch --random-agent --level=3 --risk=2 --timeout 30 --threads 1 {data} --flush-session"
 use_on:
-  Vulnerability:
-    desc: "对 SQLi 漏洞做自动化利用验证"
+  HTTPEndpoint:
+    desc: "对含参数的 API 端点测试注入（query 参数走 -u，POST body 参数走 --data）"
+    params:
+      url: "{url}"

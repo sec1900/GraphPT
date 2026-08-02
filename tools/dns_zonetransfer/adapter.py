@@ -19,6 +19,8 @@ _MAX_AXFR_FINDINGS = 500  # 单次 AXFR 输出上限，防止扩散失控
 
 
 class DnsZonetransferAdapter(BaseAdapter):
+    """dns_zonetransfer adapter — 解析 AXFR 输出，统一 Domain 节点。"""
+
     tool_name = "dns_zonetransfer"
 
     def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:
@@ -57,9 +59,8 @@ class DnsZonetransferAdapter(BaseAdapter):
                     continue
 
                 findings.append({
-                    "type": "subdomain",
+                    "type": "domain",
                     "value": subdomain,
-                    "root_domain": derived_root,
                     "source": "axfr",
                     "asset_id": asset_id,
                 })
@@ -67,7 +68,7 @@ class DnsZonetransferAdapter(BaseAdapter):
                     findings.append({
                         "type": "ip",
                         "value": ip,
-                        "parent_id": f"sub:{subdomain}",
+                        "parent_id": f"domain:{subdomain}",  # 改为 domain: 前缀
                         "source": "axfr",
                         "asset_id": asset_id,
                     })

@@ -1,10 +1,11 @@
 selectors:
   crt:
-    desc: 证书透明日志子域名发现 — 取未扫过的根域名
+    desc: 证书透明日志子域名发现 — 取未扫过的根域名（跳过泛解析）
     query: 'MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
 
       WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target =
       rd.value }
+        AND (rd.has_wildcard IS NULL OR rd.has_wildcard = false)
 
       RETURN rd.value AS domain'
     mapping:
