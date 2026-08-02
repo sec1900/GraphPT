@@ -28,6 +28,7 @@ GRAPHPT_AI_API_KEY。无配置时只输出规则可确定的信号（降级不�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -116,6 +117,58 @@ def _extract_params_from_body(body: str) -> list[str]:
         if k not in params:
             params.append(k)
     return params
+
+
+def _extract_record_params(rec: dict) -> dict[str, str]:
+    """从一条流量记录提取参数名→值（URL query + 请求体）。"""
+    params: dict[str, str] = {}
+    from urllib.parse import parse_qsl, urlsplit
+    try:
+        for k, v in parse_qsl(urlsplit(str(rec.get("url", ""))).query, keep_blank_values=True):
+            if str(k).strip():
+                params.setdefault(str(k).strip(), str(v or ""))
+    except ValueError:
+        pass
+    for m in re.finditer(r'([A-Za-z_][A-Za-z0-9_-]{0,31})=([^&\s"\'<>]+)',
+                         str(rec.get("req_body", "") or "")):
+        params.setdefault(m.group(1), m.group(2))
+    return params
+
+
+def _response_sig(rec: dict) -> tuple[int, int, str]:
+    body = str(rec.get("resp_body", "") or "")
+    return (int(rec.get("resp_status", 0) or 0), len(body),
+            hashlib.sha1(body.encode("utf-8", "replace")).hexdigest()[:10])
+
+
+def _idor_diff_signals(url: str, records: list[dict]) -> list[dict]:
+    """越权信号（多记录对比）：同一资源标识参数、不同值 → 响应差异。
+
+    同 URL 的多条流量（如多次探测/爬取）中，资源标识参数（id/userId/uid
+    等）取不同值时响应不同 → 越权/资源枚举特征（conf 0.6，语义需人工确认）。
+    所有值响应相同 → 无特征。
+    """
+    signals: list[dict] = []
+    by_param: dict[str, dict[str, list[dict]]] = {}
+    for rec in records:
+        for name, value in _extract_record_params(rec).items():
+            if name.lower() in _IDOR_PARAMS:
+                by_param.setdefault(name, {}).setdefault(value, []).append(rec)
+    for name, groups in by_param.items():
+        if len(groups) < 2:
+            continue  # 只有一种值，无对比
+        distinct_sigs = {_response_sig(g[0]) for g in groups.values()}
+        if len(distinct_sigs) < 2:
+            continue  # 所有值响应相同 → 无越权特征
+        values = list(groups.keys())[:5]
+        signals.append({
+            "signal_type": "idor_diff",
+            "vuln_type": "idor",
+            "title": f"越权特征: 参数 {name} 不同值响应差异（{len(groups)} 种值）",
+            "confidence": 0.6,
+            "evidence": f"param={name}, values={values}, 响应指纹差异",
+        })
+    return signals
 
 
 def _signal_records(url: str, method: str, req_body: str, resp_body: str,
@@ -364,6 +417,20 @@ def main() -> int:
             sig.setdefault("method", method)
             sig["_traffic"] = rec  # 内部字段：供 AI 判断读取，输出前删除
             outputs.append(sig)
+        # 越权信号（多记录对比）：按资源路径聚合（忽略 query 参数值），
+        # 同路径多条流量中资源参数值变化 → 响应差异 → 越权特征
+        try:
+            from urllib.parse import urlsplit
+            base_url = urlsplit(url)._replace(query="").geturl()
+        except ValueError:
+            base_url = url
+        traffic_by_path = _load_traffic(base_url) if base_url != url else traffic
+        if len(traffic_by_path) >= 2:
+            for sig in _idor_diff_signals(url, traffic_by_path):
+                sig.setdefault("url", url)
+                sig.setdefault("method", method)
+                sig["_traffic"] = rec
+                outputs.append(sig)
 
     # L3：需判断的信号组批交 AI（按 (url, signal_type) 键替换，
     # 只替换被 AI 处理过的信号，同 URL 的规则信号保留）

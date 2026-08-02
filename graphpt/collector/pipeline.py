@@ -1673,6 +1673,13 @@ class PipelineExecutor:
                 val = ctx.get("data", "")
                 return f'--data "{val}"' if val else ""
 
+            # nuclei severity 分级：{severity} → GRAPHPT_NUCLEI_SEVERITY
+            # （默认空 = 全量模板不回归；快速轮配 high,critical 精准扫）
+            if key == "severity":
+                import os as _os
+                val = _os.environ.get("GRAPHPT_NUCLEI_SEVERITY", "").strip()
+                return f"-severity {val}" if val else ""
+
             # 普通占位符
             val = ctx.get(key)
             if val is None:
