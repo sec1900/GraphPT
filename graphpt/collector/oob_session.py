@@ -30,6 +30,69 @@ _SESSION_TTL = 6 * 3600  # 6h
 
 _processes: dict[str, subprocess.Popen] = {}
 _processes_lock = threading.Lock()
+_pollers: dict[str, threading.Thread] = {}
+_CALLBACK_TTL = 24 * 3600
+_CALLBACK_MAX = 200
+
+
+def _callback_key(asset_id: str) -> str:
+    return f"oob:callbacks:{asset_id}"
+
+
+def _start_callback_poller(asset_id: str, proc: subprocess.Popen) -> None:
+    """后台线程：读 interactsh-client 后续输出（回调）→ Redis 列表。
+
+    回调格式（interactsh-client JSON 行）:
+      {"protocol": "dns", "unique_id": "...", "full_id": "...",
+       "remote_address": "...", "raw_request": "..."}
+    """
+
+    def _poll() -> None:
+        try:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.5)
+                    continue
+                try:
+                    data = json.loads(line.strip())
+                except json.JSONDecodeError:
+                    continue
+                if not data.get("protocol"):
+                    continue
+                try:
+                    r = _redis()
+                    key = _callback_key(asset_id)
+                    r.lpush(key, json.dumps(data, ensure_ascii=False))
+                    r.ltrim(key, 0, _CALLBACK_MAX - 1)
+                    r.expire(key, _CALLBACK_TTL)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=_poll, name=f"oob-poller-{asset_id}", daemon=True)
+    thread.start()
+    with _processes_lock:
+        _pollers[asset_id] = thread
+
+
+def get_callbacks(asset_id: str = "default", limit: int = 50) -> list[dict]:
+    """读该资产的 OOB 回调记录（最新在前）。"""
+    try:
+        r = _redis()
+        raw_list = r.lrange(_callback_key(asset_id), 0, max(0, limit - 1))
+        out = []
+        for raw in raw_list or []:
+            try:
+                out.append(json.loads(raw))
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return out
+    except Exception:
+        return []
 
 
 def _redis() -> Any:
@@ -83,6 +146,7 @@ def start(asset_id: str = "default", server: str = "") -> dict[str, Any]:
             return {}
         with _processes_lock:
             _processes[asset_id] = proc
+        _start_callback_poller(asset_id, proc)  # 回调 → Redis（证据归档）
         try:
             _redis().setex(_session_key(asset_id), _SESSION_TTL, json.dumps({
                 "domain": domain, "token": token, "started_at": time.time(),
@@ -137,3 +201,5 @@ def stop(asset_id: str = "default") -> None:
         _redis().delete(_session_key(asset_id))
     except Exception:
         pass
+    with _processes_lock:
+        _pollers.pop(asset_id, None)  # 轮询线程随进程退出自然结束
