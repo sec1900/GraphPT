@@ -6,7 +6,7 @@
   - detail: 信号类型 + 证据 + 验证建议
 """
 
-from graphpt.collector.adapter import BaseAdapter, register_adapter
+from graphpt.collector.adapter import BaseAdapter, register_adapter, _endpoint_id_from_url
 import json
 from typing import Any
 
@@ -50,7 +50,7 @@ class TrafficAnalyzerAdapter(BaseAdapter):
             except (TypeError, ValueError):
                 confidence = 0.0
 
-            endpoint_id = f"ep:{method}:{url}"
+            endpoint_id = _endpoint_id_from_url(url, method=method)
             key = (endpoint_id, vuln_type)
             if key in seen:
                 continue

@@ -3032,7 +3032,7 @@ async function doSearch() {
     }
     if (data.endpoints && data.endpoints.length) {
       html += '<div style="color:var(--purple);font-size:11px;margin:8px 0 4px">Endpoints ('+data.endpoints.length+')</div>';
-      data.endpoints.slice(0,5).forEach(s => html += '<div style="font-size:12px;padding:2px 0;cursor:pointer" onclick="showNodeDetail(\''+esc(s.url)+'\')">['+s.sc+'] '+esc(s.url).substring(0,80)+'</div>');
+      data.endpoints.slice(0,5).forEach(s => html += '<div style="font-size:12px;padding:2px 0;cursor:pointer" onclick="showNodeDetail(\''+esc(s.url)+'\',\''+esc(s.id||'')+'\')">['+s.sc+'] '+esc(s.url).substring(0,80)+'</div>');
     }
     box.innerHTML = html || '<div style="color:var(--muted);font-size:12px">No results</div>';
     box.style.display = 'block';
@@ -3040,9 +3040,9 @@ async function doSearch() {
 }
 
 // Node detail popup
-async function showNodeDetail(url) {
+async function showNodeDetail(url, nodeId) {
   try {
-    const r = await fetch(aq('/api/nodes/'+encodeURIComponent('ep:GET:'+url)));
+    const r = await fetch(aq('/api/nodes/'+encodeURIComponent(nodeId || 'ep:GET:'+url)));
     const d = await r.json();
     if (!d.ok) return;
     const n = d.data;

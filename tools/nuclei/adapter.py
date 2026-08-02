@@ -6,7 +6,7 @@ nuclei JSONL 输出 → Vulnerability Finding。
 （httpx 受工具能力限制只能重建+预览）。
 """
 
-from graphpt.collector.adapter import BaseAdapter, register_adapter
+from graphpt.collector.adapter import BaseAdapter, register_adapter, _endpoint_id_from_url
 from graphpt.collector.traffic_store import save_traffic_pair
 import json
 import re
@@ -102,7 +102,7 @@ class NucleiAdapter(BaseAdapter):
             remediation = str(info.get("remediation", "") or metadata.get("remediation", ""))
             tags = str(info.get("tags", ""))
             method = str(obj.get("request", "GET ")).split(" ", 1)[0] or "GET"
-            endpoint_id = f"ep:{method}:{endpoint_url}"
+            endpoint_id = _endpoint_id_from_url(endpoint_url, method=method)
 
             key = (endpoint_id, template_id or title)
             if key in seen:

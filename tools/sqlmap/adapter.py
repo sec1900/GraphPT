@@ -1,5 +1,5 @@
 """sqlmap adapter — SQLi 利用结果解析器。"""
-from graphpt.collector.adapter import BaseAdapter, register_adapter
+from graphpt.collector.adapter import BaseAdapter, register_adapter, _endpoint_id_from_url
 from typing import Any
 import re
 
@@ -60,7 +60,7 @@ class SqlmapAdapter(BaseAdapter):
 
         findings.append({
             "type": "vulnerability",
-            "endpoint_id": f"ep:{ctx.get('method', 'GET')}:{target_url}",
+            "endpoint_id": _endpoint_id_from_url(target_url, method=str(ctx.get("method", "GET"))),
             "vuln_type": "sqli_confirmed",
             "title": f"SQL Injection ({', '.join(techniques)}) — {dbms}" if techniques else f"SQL Injection — {dbms}",
             "severity": "critical",

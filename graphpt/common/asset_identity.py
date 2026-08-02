@@ -92,6 +92,59 @@ def normalize_url(raw: str) -> str:
     return urllib.parse.urlunsplit((scheme, netloc, path, parsed.query, ""))
 
 
+def normalize_path(raw: str) -> str:
+    """路径级 URL 归一化（HTTPEndpoint 身份用）— 与 normalize_url 的区别：
+    剥离 query/fragment、折叠双斜杠、去尾斜杠（根保留 /）。
+
+    输入 `https://h/path?a=1` → `https://h/path`
+    输入 `https://h//ADM` → `https://h/ADM`
+    无效输入（空/相对路径/含空白）返回 ""（与 normalize_url 同语义）。
+    normalize_url 保留 query 的现状被 url 属性/sr.target 继续依赖，此处不碰。
+    """
+    candidate = str(raw or "").strip().rstrip(_URL_TRAILING_NOISE)
+    if not candidate or candidate.startswith("/") or re.search(r"\s", candidate):
+        return ""
+
+    try:
+        parsed = urllib.parse.urlsplit(candidate if "://" in candidate else f"http://{candidate}")
+        port = parsed.port
+    except ValueError:
+        return ""
+    host = normalize_host_label(parsed.hostname or "", strip_www=False)
+    if not host:
+        return ""
+
+    scheme = (parsed.scheme or "http").lower()
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        port = None
+
+    if ":" in host and not host.startswith("["):
+        netloc = f"[{host}]"
+    else:
+        netloc = host
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+
+    # 路径：折叠双斜杠（//ADM → /ADM）、去尾斜杠（根保留 /）
+    path = parsed.path or "/"
+    if path != "/":
+        path = re.sub(r"/{2,}", "/", path)
+        path = path.rstrip("/") or "/"
+    # query/fragment 丢弃（身份 = 路径级；变体在 urls 属性与 traffic_store）
+    return urllib.parse.urlunsplit((scheme, netloc, path, "", ""))
+
+
+def endpoint_id_from_url(raw: str, method: str = "GET") -> str:
+    """HTTPEndpoint 节点 id：`ep:{METHOD}:{normalize_path(url)}`。
+
+    method 强制大写（修复 ep:: 空 method / ep:get: 小写漂移）。
+    """
+    path = normalize_path(raw)
+    if not path:
+        return ""
+    return f"ep:{(method or 'GET').upper()}:{path}"
+
+
 def build_url_identity_key(raw: str) -> str:
     normalized = normalize_url(raw)
     if not normalized:

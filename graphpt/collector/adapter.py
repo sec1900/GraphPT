@@ -54,10 +54,9 @@ def register_adapter(tool_name: str, adapter_cls: type[BaseAdapter]) -> None:
 # ---- 共享工具 ----
 
 def _endpoint_id_from_url(url: str, method: str = "GET") -> str:
-    from graphpt.common.asset_identity import normalize_url
+    from graphpt.common.asset_identity import endpoint_id_from_url
 
-    normalized = normalize_url(url) or str(url or "").strip()
-    return f"ep:{method}:{normalized}" if normalized else ""
+    return endpoint_id_from_url(url, method=method)
 
 
 # ---- 自动发现 ----

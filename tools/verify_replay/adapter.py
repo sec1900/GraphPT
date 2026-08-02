@@ -8,7 +8,7 @@ endpoint_id|vuln_type|title|severity）→ ON MATCH status 非空覆盖：
 detail 追加验证证据（验证结果 + checks），便于审计。
 """
 
-from graphpt.collector.adapter import BaseAdapter, register_adapter
+from graphpt.collector.adapter import BaseAdapter, register_adapter, _endpoint_id_from_url
 import json
 from typing import Any
 
@@ -42,7 +42,7 @@ class VerifyReplayAdapter(BaseAdapter):
             if new_status not in ("verified", "dismissed", "candidate"):
                 continue
 
-            endpoint_id = f"ep:{method}:{url}"
+            endpoint_id = _endpoint_id_from_url(url, method=method)
             detail = str(obj.get("detail", "") or "")
             evidence = str(obj.get("evidence", "") or "")
             checks_raw = str(obj.get("verify_checks", "") or "")

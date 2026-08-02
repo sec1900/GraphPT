@@ -171,8 +171,9 @@ class GraphPTAddon:
                            "war","ear","yml","yaml","toml","ini","cfg","conf"}
                 if ext in FILE_EXTS:
                     file_url = f"{scheme}://{host}{path}"
+                    from graphpt.collector.adapter import _endpoint_id_from_url
                     writer.write_file(
-                        endpoint_id=f"ep:{method}:{file_url}",
+                        endpoint_id=_endpoint_id_from_url(file_url, method=method),
                         url=file_url,
                         content_type=ext,
                         source="mitmproxy",

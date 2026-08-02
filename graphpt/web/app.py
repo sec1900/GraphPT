@@ -2896,11 +2896,11 @@ async def global_search(q: str = "", asset_id: str = "default", limit: int = 15)
         p = f".*{_safe_q}.*"
         domains = _neo4j_query("MATCH (:Asset {id:$aid})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(d:Domain) WHERE d.value=~$p RETURN d.value AS v LIMIT $lim", aid=asset_id, p=p, lim=limit)
         ips = _neo4j_query("MATCH (a:Asset {id:$aid}) CALL (a) { MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(ip:IP) RETURN ip UNION MATCH (a)-[:HAS_IP]->(ip:IP) RETURN ip } WITH DISTINCT ip WHERE ip.value=~$p RETURN ip.value AS v LIMIT $lim", aid=asset_id, p=p, lim=limit)
-        eps = _neo4j_query("MATCH (a:Asset {id:$aid}) CALL (a) { MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep } WITH DISTINCT ep WHERE ep.url=~$p RETURN ep.url AS url, ep.status_code AS sc, ep.title AS t LIMIT $lim", aid=asset_id, p=p, lim=limit)
+        eps = _neo4j_query("MATCH (a:Asset {id:$aid}) CALL (a) { MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep } WITH DISTINCT ep WHERE ep.url=~$p RETURN ep.id AS id, ep.url AS url, ep.status_code AS sc, ep.title AS t LIMIT $lim", aid=asset_id, p=p, lim=limit)
         result = {"ok": True, "data": {
             "domains": [{"value":r["v"]} for r in domains],
             "ips": [{"value":r["v"]} for r in ips],
-            "endpoints": [{"url":r["url"],"sc":r["sc"],"title":r["t"]} for r in eps],
+            "endpoints": [{"id":r["id"],"url":r["url"],"sc":r["sc"],"title":r["t"]} for r in eps],
         }}
         _cache_set(cache_key, result)
         return result

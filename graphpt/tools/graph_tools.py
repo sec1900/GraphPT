@@ -267,8 +267,8 @@ def _normalize_endpoint_target(target: str) -> str:
 
 
 def _endpoint_parent_id(target: str) -> str:
-    normalized = _normalize_endpoint_target(target)
-    return f"ep:GET:{normalized}" if normalized else ""
+    from graphpt.common.asset_identity import endpoint_id_from_url
+    return endpoint_id_from_url(target, method="GET")
 
 
 def _parse_host_and_ports(target: str, arguments: dict[str, Any]) -> tuple[str, list[int]]:

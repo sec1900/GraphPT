@@ -16,19 +16,12 @@ class WebpackAnalyzerAdapter(BaseAdapter):
 
     @staticmethod
     def _endpoint_id_from_url(url: str, method: str = "GET") -> str:
-        """生成 HTTPEndpoint 的 id：ep:{method}:{md5(url)[:16]}
+        """生成 HTTPEndpoint 的 id（统一走共享助手 — 路径级身份）。
 
-        统一 ID 生成规则，与 neo4j_client.py 的 write_http_endpoint 保持一致。
+        历史版本用 md5 规则（与 write_http_endpoint 不一致），已修正。
         """
-        import hashlib
-        if not url:
-            return ""
-        # 去除 fragment，与 normalize_url 逻辑保持一致
-        from urllib.parse import urlsplit, urlunsplit
-        parsed = urlsplit(url)
-        normalized = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
-        url_hash = hashlib.md5(normalized.encode()).hexdigest()[:16]
-        return f"ep:{method.upper()}:{url_hash}"
+        from graphpt.collector.adapter import _endpoint_id_from_url as _shared
+        return _shared(url, method)
 
     @staticmethod
     def _file_id_from_url(url: str) -> str:

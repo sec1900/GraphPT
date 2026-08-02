@@ -164,7 +164,7 @@ class KatanaAdapter(BaseAdapter):
             from_js = src_origin if (src_origin.lower().endswith(".js") or req_tag == "js") else ""
 
             normalized_url = normalize_url(url) or url
-            current_endpoint_id = endpoint_id or f"ep:GET:{normalized_url}"
+            current_endpoint_id = endpoint_id or _endpoint_id_from_url(url, method="GET")
 
             url_no_q = url.split("?", 1)[0].lower()
 

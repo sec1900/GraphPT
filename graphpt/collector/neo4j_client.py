@@ -672,7 +672,11 @@ class GraphWriter:
         # method 兜底：adapter 缺失时统一 GET —
         # 否则 method='' 会生成 ep:: 不同 identity，参数合并写进重复节点
         method = method or "GET"
-        endpoint_id = f"ep:{method}:{normalized}"
+        # 路径级身份（图膨胀根治）：id = ep:{METHOD}:{normalize_path(url)} —
+        # query 剥离、双斜杠折叠；完整 URL 保留在 url 属性（选择器零改动）
+        from graphpt.common.asset_identity import endpoint_id_from_url, normalize_path
+        endpoint_id = endpoint_id_from_url(normalized, method=method) or f"ep:{method}:{normalized}"
+        base_path = normalize_path(normalized) or normalized
         now = _now_iso()
         headers = response_headers or {}
         tech_list = tech or []
@@ -716,6 +720,7 @@ class GraphWriter:
                     e.asset_id = $asset_id,
                     e.params = $params, e.api_signals = $api_signals, e.from_js = $from_js,
                     e.response_file = $response_file,
+                    e.base_path = $base_path, e.urls = [$url],
                     e.category = $category, e.product = $product,
                     e.requires_auth = $requires_auth,
                     e.params_query = $params_query, e.params_body = $params_body,
@@ -732,6 +737,7 @@ class GraphWriter:
                     e.url_fragment = $url_fragment, e.last_seen = $now,
                     e.from_js = CASE WHEN $from_js <> '' THEN $from_js ELSE e.from_js END,
                     e.response_file = CASE WHEN $response_file <> '' THEN $response_file ELSE e.response_file END,
+                    e.base_path = coalesce(e.base_path, $base_path),
                     e.category = CASE WHEN $category <> '' THEN $category ELSE e.category END,
                     e.requires_auth = e.requires_auth OR $requires_auth,
                     e.classified_at = CASE WHEN $classified_at <> '' THEN $classified_at ELSE e.classified_at END,
@@ -750,6 +756,8 @@ class GraphWriter:
                 SET e.products = _prod + [x IN $products WHERE NOT x IN _prod]
                 WITH e, coalesce(e.vendors, []) AS _vend
                 SET e.vendors = _vend + [x IN $vendors WHERE NOT x IN _vend]
+                WITH e, coalesce(e.urls, []) AS _urls
+                SET e.urls = CASE WHEN $url IN _urls THEN _urls ELSE _urls + [$url] END
                 WITH e, coalesce(e.js_urls, []) AS _js
                 SET e.js_urls = _js + [x IN $js_urls WHERE NOT x IN _js]
                 WITH e, coalesce(e.params_query, []) AS _pq
@@ -793,6 +801,7 @@ class GraphWriter:
                 response_file=response_file,
                 category=category,
                 product=product,
+                base_path=base_path,
                 requires_auth=bool(requires_auth),
                 params_query=[str(p.get("name")) for p in (params_detail or [])
                               if isinstance(p, dict) and p.get("in") == "query" and str(p.get("name", "")).strip()],

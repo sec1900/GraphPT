@@ -189,9 +189,10 @@ def _scan_target_node_ids(asset_id: str, tool: str, target_label: str) -> list[s
         return node_ids
 
     if "://" in label:
-        normalized = normalize_url(label)
-        if normalized:
-            add(f"ep:GET:{normalized}")
+        from graphpt.common.asset_identity import endpoint_id_from_url
+        eid = endpoint_id_from_url(label, method="GET")
+        if eid:
+            add(eid)
             return node_ids
 
     host_port = normalize_host_port(label)
