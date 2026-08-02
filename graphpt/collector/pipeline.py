@@ -457,6 +457,51 @@ def _transform_nuclei_tags(tech: Any) -> str:
 _register_transform("nuclei_tags", _transform_nuclei_tags)
 
 
+def _preselect_nuclei_templates(bin_path: str, cmd_str: str) -> str:
+    """nuclei -tags 命中时预筛模板文件，只加载匹配模板。
+
+    全量 `-t res/nuclei-templates/` 时 nuclei 把 1.5 万模板全部加载编译
+    （~550MB、55s+），-tags 只是执行期过滤，加载开销一点没省。
+    这里先 `-tl -tags x,y` 列出匹配模板 → 写入临时列表 → `-t <list>`
+    精确加载（1.6s / 37 个模板）。失败或盲扫（无 -tags）回退全量。
+    """
+    if "-tags " not in cmd_str:
+        return cmd_str
+    m = re.search(r"-tags\s+([\w,]+)", cmd_str)
+    if not m:
+        return cmd_str
+    tags = m.group(1)
+    try:
+        # Windows CreateProcess 不解析相对路径 exe，需绝对路径
+        bin_abs = str(Path(bin_path).resolve())
+        tl = subprocess.run(
+            [bin_abs, "-tl", "-tags", tags,
+             "-t", "res/nuclei-templates/", "-t", "res/poc/", "-silent"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=30, cwd=str(_PROJECT_ROOT),
+        )
+        files = [ln.strip() for ln in tl.stdout.splitlines()
+                 if ln.strip().lower().endswith(".yaml")]
+        if not files:
+            return cmd_str
+        (_PROJECT_ROOT / "data" / "tmp").mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".txt", delete=False, encoding="utf-8",
+            prefix="graphpt_nuclei_tpl_", dir=str(_PROJECT_ROOT / "data" / "tmp"),
+            newline="\n",
+        ) as tf:
+            for f in files:
+                tf.write(f + "\n")
+            tpl_list = tf.name
+        _register_temp_cleanup(tpl_list)
+        new_cmd = cmd_str
+        for d in ("res/nuclei-templates/", "res/poc/"):
+            new_cmd = re.sub(r"-t\s+" + re.escape(d) + r"\s*", "", new_cmd)
+        return new_cmd + f" -t {tpl_list}"
+    except Exception:
+        return cmd_str
+
+
 def _load_target_selectors() -> dict[str, dict[str, Any]]:
     """扫描 tools/*/targets.yaml，构建选择器字典。
 
@@ -1104,6 +1149,11 @@ class PipelineExecutor:
                 })
                 _cleanup_iteration_file()
                 continue
+
+            # nuclei 按 tag 预筛模板（-tags 命中时避免全量 1.5 万模板加载）
+            if _base_tool(tool) == "nuclei" and "-tags " in cmd_str:
+                cmd_str = _preselect_nuclei_templates(str(self.ctx.get("bin", "")), cmd_str)
+
             cmd = _split_command(cmd_str)
 
             # 工具输出写日志(流式,浏览器实时可见), 同时收齐供 adapter 解析
