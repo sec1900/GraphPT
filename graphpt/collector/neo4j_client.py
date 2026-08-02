@@ -669,6 +669,9 @@ class GraphWriter:
         # 过滤本地地址，避免 Neo4j/Redis/Web 自身端口混入攻击面
         if any(x in normalized for x in ("127.0.0.1", "localhost", "0.0.0.0")):
             return {"id": "", "skipped": True, "reason": "localhost"}
+        # method 兜底：adapter 缺失时统一 GET —
+        # 否则 method='' 会生成 ep:: 不同 identity，参数合并写进重复节点
+        method = method or "GET"
         endpoint_id = f"ep:{method}:{normalized}"
         now = _now_iso()
         headers = response_headers or {}

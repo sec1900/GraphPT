@@ -308,6 +308,10 @@ def init_builtin_tools() -> None:
     from graphpt.tools.graph_tools import init_graph_tools
     init_graph_tools()
 
+    # Neo4j 图写入工具（Agent 与采集链单一事实源融合）
+    from graphpt.tools.graph_write_tools import init_graph_write_tools
+    init_graph_write_tools()
+
 
 # TodoWrite 式任务清单：每次调用提交「完整」清单，覆盖式更新。
 _TODO_STATUSES = ("pending", "in_progress", "completed")

@@ -119,13 +119,14 @@ def main() -> None:
         writer.write_batch(VerifyReplayAdapter().parse(r2.stdout, asset_id=asset), asset_id=asset)
         print(f"[OK] verify_replay: {len(statuses)} 条全部 dismissed")
 
-        # 5. SignalStat 已更新（sqli total=5, fp_rate=1.0 — 跨过样本门槛）
+        # 5. SignalStat 已更新（traffic_analyzer:sqli total=5, fp_rate=1.0 — 跨过样本门槛）
         with writer._driver.session() as s:
             row = s.run(
-                "MATCH (st:SignalStat {id: 'stat:sqli'}) RETURN st.fp_rate AS fp, st.dismissed AS d, st.total AS t"
+                "MATCH (st:SignalStat {id: 'stat:traffic_analyzer:sqli'}) "
+                "RETURN st.fp_rate AS fp, st.dismissed AS d, st.total AS t"
             ).single()
             assert row and float(row["fp"]) >= 0.8 and int(row["t"]) >= 5, f"SignalStat: {row}"
-            print(f"[OK] SignalStat sqli: total={row['t']} fp_rate={row['fp']}")
+            print(f"[OK] SignalStat traffic_analyzer:sqli: total={row['t']} fp_rate={row['fp']}")
 
         # 6. traffic_analyzer 第二轮：sqli 高误报（fp=1.0 ≥ 0.8）→ 被反哺跳过
         r3 = _run_tool(ANALYZER, uf1, env)
@@ -143,7 +144,8 @@ def main() -> None:
             assert resp.status_code == 200, resp.text[:200]
             data = resp.json()
             assert data["ok"] is True
-            sqli_stats = [st for st in data["data"] if st["vuln_type"] == "sqli"]
+            sqli_stats = [st for st in data["data"]
+                          if st["vuln_type"] == "sqli" and st["source"] == "traffic_analyzer"]
             assert sqli_stats and sqli_stats[0]["fp_rate"] >= 0.8 and sqli_stats[0]["total"] >= 5, \
                 f"API 排行缺 sqli: {data['data']}"
             print(f"[OK] Web API /api/signal-stats: sqli fp_rate={sqli_stats[0]['fp_rate']} total={sqli_stats[0]['total']}")

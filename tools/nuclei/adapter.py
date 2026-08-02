@@ -109,6 +109,21 @@ class NucleiAdapter(BaseAdapter):
                 continue
             seen.add(key)
 
+            # OOB 回调确认：nuclei 命中盲模板（SSRF/XXE/RCE/盲 SQLi）时
+            # JSONL 带 interactsh 字段（目标服务器回连了我们的 OAST 域）—
+            # 回调到达即强证据，直接 verified（不再停留 candidate）
+            oob_hits = obj.get("interactsh") if isinstance(obj.get("interactsh"), list) else []
+            oob_evidence = ""
+            if oob_hits:
+                parts = []
+                for hit in oob_hits:
+                    if isinstance(hit, dict):
+                        parts.append(
+                            f"{hit.get('protocol', '?')}:{hit.get('full-id', hit.get('unique-id', ''))}"
+                        )
+                if parts:
+                    oob_evidence = "OOB回调确认: " + ", ".join(parts)
+
             # -irr 全量成对存储：request/response 字段是完整 raw HTTP
             # （仅当 request 是 raw 请求行而非 curl 命令时）
             try:
@@ -146,7 +161,8 @@ class NucleiAdapter(BaseAdapter):
                 "impact": impact,
                 "remediation": remediation,
                 "tags": tags,
-                "evidence": evidence,
+                "evidence": (evidence + "\n" + oob_evidence).strip() if oob_evidence else evidence,
+                "status": "verified" if oob_hits else "",  # OOB 回调 = 强证据直接 verified
                 "source": "nuclei",
                 "asset_id": asset_id,
                 "url": endpoint_url or url,

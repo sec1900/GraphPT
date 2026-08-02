@@ -58,6 +58,23 @@ _web_log = logging.getLogger("graphpt.web")
 web_app = FastAPI(title="GraphPT Admin", version="0.1.0")
 
 
+# ── API 鉴权（可选）──
+# 设置 GRAPHPT_API_KEY 后所有 /api/* 请求须带 X-GraphPT-Key 头；
+# 未设置 → 不鉴权（本地默认行为不变，零回归）。静态资源与文档放行。
+_API_KEY = os.environ.get("GRAPHPT_API_KEY", "").strip()
+
+
+@web_app.middleware("http")
+async def _auth_middleware(request: Request, call_next):
+    if _API_KEY and request.url.path.startswith("/api/"):
+        if request.headers.get("X-GraphPT-Key", "") != _API_KEY:
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "error": "unauthorized", "hint": "X-GraphPT-Key header required"},
+            )
+    return await call_next(request)
+
+
 # ── 安全头 + 静态文件 no-cache ──
 @web_app.middleware("http")
 async def _security_headers(request: Request, call_next):

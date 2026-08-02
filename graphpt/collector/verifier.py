@@ -95,6 +95,23 @@ def _inject_param(url: str, body: str, payload: str) -> tuple[str, str]:
     return url, body
 
 
+_CSRF_PATTERNS = [
+    r'<input[^>]+name=["\'](csrf[_a-z]*token|_token|csrf)["\'][^>]*value=["\']([^"\']+)["\']',
+    r'name=["\'](csrf[_a-z]*token|_token)["\'][^>]*value=["\']([^"\']+)["\']',
+    r'["\'](?:csrf[_a-z]*token|_token)["\']\s*:\s*["\']([^"\']+)["\']',
+]
+
+
+def _extract_csrf_token(body: str) -> str:
+    """从响应体提取 CSRF token（表单字段 / JSON 字段）。未找到返回空串。"""
+    for pat in _CSRF_PATTERNS:
+        m = re.search(pat, body or "", re.IGNORECASE)
+        if m:
+            # 组 1 是 name（匹配 1/2），组 2 是 value — JSON 模式 token 在组 1
+            return m.group(2) if m.lastindex and m.lastindex >= 2 and m.group(2) else m.group(1)
+    return ""
+
+
 def _body_has_sql_error(body: str) -> bool:
     lower = (body or "").lower()
     return any(re.search(pat, lower) for pat in _SQL_ERROR_PATTERNS)
@@ -137,14 +154,25 @@ def verify_candidate(
 
     # ---- sqli: 基线 + 注入变体对比 ----
     if vtype == "sqli":
-        base_status, base_body, _ = _replay(method, url, req_headers, req_body)
+        # CSRF 预热：POST/PUT 表单端点常见 CSRF 防护 — 不带 token 重放会被拒
+        # （403/400）导致误判 dismissed。token 在 GET 表单页里 — 先 GET 预热
+        # 提取 token，基线与注入变体携带。
+        csrf_token = ""
+        base_body = req_body
+        if method in ("POST", "PUT", "PATCH") and req_body:
+            _warm_status, _warm_body, _ = _replay("GET", url, req_headers, "")
+            csrf_token = _extract_csrf_token(_warm_body)
+            if csrf_token:
+                base_body = req_body + f"&csrf_token={csrf_token}"
+                _check("csrf_token", True, "GET 预热提取 CSRF token 并携带")
+        base_status, base_body_resp, _ = _replay(method, url, req_headers, base_body)
         _check("baseline", base_status > 0, f"status={base_status}")
-        base_fp = _response_fingerprint(base_status, base_body)
+        base_fp = _response_fingerprint(base_status, base_body_resp)
         if base_status == 0:
             return {"status": "candidate", "evidence": "基线请求失败（网络/超时），保持候选",
                     "checks": checks}
         for name, payload in _INJECTION_PAYLOADS:
-            inj_url, inj_body = _inject_param(url, req_body, payload)
+            inj_url, inj_body = _inject_param(url, base_body, payload)
             status, body, _ = _replay(method, inj_url, req_headers, inj_body)
             if status == 0:
                 # 请求失败（超时/断连/WAF 拦截）不是"注入差异"证据 — 跳过该 payload

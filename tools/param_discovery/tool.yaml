@@ -1,0 +1,7 @@
+desc: "参数枚举 — API 端点隐藏参数主动发现（arjun 类，响应差异判定）"
+command: "python {tool_dir}/param_discovery.py -list {urls_file} {auth_headers}"
+use_on:
+  HTTPEndpoint:
+    desc: "对 api 类端点枚举隐藏参数（写回 params_query → sqlmap/信号层）"
+    params:
+      urls_file: "{urls_file}"

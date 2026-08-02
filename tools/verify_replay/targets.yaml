@@ -1,6 +1,6 @@
 selectors:
   verify_replay:
-    desc: "候选漏洞验证 — 取挂载 candidate 漏洞的端点"
+    desc: "候选漏洞验证 — candidate 端点；保持 candidate 的 7 天后重验（新证据触发，非一次冻结）"
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
@@ -17,7 +17,12 @@ selectors:
         RETURN ep
       }
       WITH DISTINCT ep
-      WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+      // 重验机制：从未验证过（无 ScanRun）或上次验证超过 7 天
+      // （保持 candidate 说明首轮验证无结论 — 新证据/新流量后值得重验）
+      WHERE NOT EXISTS {
+          MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url
+            AND (sr.last_run_at IS NULL OR sr.last_run_at >= datetime() - duration({days: 7}))
+      }
       RETURN ep.url AS url
     mapping:
       url: "{urls_file}"

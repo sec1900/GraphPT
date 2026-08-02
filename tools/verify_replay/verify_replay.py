@@ -43,6 +43,7 @@ def _load_candidates(urls: list[str]) -> list[dict]:
                 RETURN v.id AS vid, v.type AS vuln_type, v.title AS title,
                        v.severity AS severity, v.detail AS detail,
                        v.evidence AS evidence, v.url AS url,
+                       coalesce(v.sources, []) AS sources,
                        coalesce(ep.method, 'GET') AS method
                 """,
                 urls=urls,
@@ -87,7 +88,7 @@ def main() -> int:
         return 0
 
     stats = {"verified": 0, "dismissed": 0, "candidate": 0}
-    per_type: dict[str, dict[str, int]] = {}
+    per_key: dict[str, dict] = {}
     for cand in candidates:
         url = str(cand.get("url", "") or "")
         if not url:
@@ -106,8 +107,15 @@ def main() -> int:
         new_status = str(result.get("status", "candidate") or "candidate")
         stats[new_status] = stats.get(new_status, 0) + 1
         if new_status in ("verified", "dismissed"):
+            # 来源取 sources 第一个非 verify_replay 的（信号来源工具）
+            sources = cand.get("sources") or []
+            source = next((s for s in sources if s != "verify_replay"), "traffic_analyzer")
             vt = str(cand.get("vuln_type", "") or "unknown")
-            entry = per_type.setdefault(vt, {"verified": 0, "dismissed": 0})
+            key = f"{source}:{vt}"
+            entry = per_key.setdefault(key, {
+                "source": source, "vuln_type": vt,
+                "verified": 0, "dismissed": 0,
+            })
             entry[new_status] = entry.get(new_status, 0) + 1
 
         out = {
@@ -125,13 +133,13 @@ def main() -> int:
 
     print(f"[verify_replay] stats: {json.dumps(stats, ensure_ascii=False)}", file=sys.stderr)
 
-    # 误报率反哺：本轮验证结果按 vuln_type 累加 → SignalStat
+    # 误报率反哺：本轮验证结果按 (source, vuln_type) 累加 → SignalStat
     # （traffic_analyzer 下次生成信号时消费；不依赖 adapter 写回图的时序）
     try:
         from graphpt.collector.signal_stats import update_from_counts
-        result = update_from_counts(per_type)
+        result = update_from_counts(per_key)
         if result.get("ok"):
-            print(f"[verify_replay] signal_stats_updated: {json.dumps(per_type, ensure_ascii=False)}",
+            print(f"[verify_replay] signal_stats_updated: {json.dumps(per_key, ensure_ascii=False)}",
                   file=sys.stderr)
     except Exception as exc:
         print(f"[verify_replay] signal_stats_update_failed: {exc}", file=sys.stderr)

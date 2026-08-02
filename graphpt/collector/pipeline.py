@@ -423,6 +423,19 @@ def _transform_join_params_body(params: Any) -> str:
 _register_transform("join_params_body", _transform_join_params_body)
 
 
+def _transform_poc_tags(product: Any) -> str:
+    """指纹→POC：product → "-tags a,b"（nuclei 定向扫厂商模板）。
+
+    命中 → 精准扫；未命中/无 product → 空串（全量盲扫兜底）。
+    消费 res/poc_index.yaml（observer_ward/AI 分类器产出的 product）。
+    """
+    from graphpt.collector.poc_index import match_poc_tags
+    return match_poc_tags(str(product or ""))
+
+
+_register_transform("poc_tags", _transform_poc_tags)
+
+
 def _transform_nuclei_tags(tech: Any) -> str:
     """指纹驱动：端点 tech[] 切词匹配 nuclei tag。
 
@@ -1082,18 +1095,9 @@ class PipelineExecutor:
             cmd = _split_command(cmd_str)
 
             # 工具输出写日志(流式,浏览器实时可见), 同时收齐供 adapter 解析
-            import hashlib, time as _time
-            _tool_log = _PROJECT_ROOT / "data" / "logs" / base
-            _tool_log.mkdir(parents=True, exist_ok=True)
-            _tool_log.mkdir(parents=True, exist_ok=True)
-            _log_file = _tool_log / f"{_time.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(cmd_str.encode()).hexdigest()[:8]}.log"
+            _log_file = _tool_log_path(base, cmd_str)
             # 若上下文有 urls_file, 通过 stdin 管道传入 (httpx -l 在 Windows 上有 bug)
-            _stdin = None
-            _stdfile = ""
-            _urls = self.ctx.get("urls_file", "")
-            if _urls and os.path.isfile(_urls):
-                _stdfile = _urls
-                _stdin = open(_urls, "r", encoding="utf-8", errors="replace")
+            _stdin, _stdfile = _open_stdin(str(self.ctx.get("urls_file", "")))
             # 活性超时 — 统一由 GRAPHPT_STALE_TIMEOUT 控制（默认 300s）
             _STALE_TIMEOUT = int(os.getenv("GRAPHPT_STALE_TIMEOUT", "300"))
             _MAX_TOOL_TIME = int(os.getenv("GRAPHPT_MAX_TOOL_TIME", "1800") or "0")  # 绝对上限，默认30min，0=不限
@@ -1184,18 +1188,7 @@ class PipelineExecutor:
                     return True  # 解析失败 → 保守处理，算新内容
 
             try:
-                _proc_env = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
-                # 注入代理
-                try:
-                    from graphpt.common.settings import get_proxy_url
-                    _pxy = get_proxy_url()
-                    if _pxy:
-                        for _pk in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
-                            _proc_env[_pk] = _pxy
-                        # 本地地址不走代理
-                        _proc_env["NO_PROXY"] = "127.0.0.1,localhost,::1,*.local"
-                        _proc_env["no_proxy"] = "127.0.0.1,localhost,::1,*.local"
-                except Exception: pass
+                _proc_env = _env_with_proxy()
                 # stdout → PIPE (PeekNamedPipe 非阻塞读 — Windows 原生方案)
                 proc = subprocess.Popen(cmd, text=False,
                                         env=_proc_env,
@@ -1389,11 +1382,9 @@ class PipelineExecutor:
                         except RuntimeError: raise
                         except Exception: pass
                 # 读剩余输出
-                _remaining, _ = proc.communicate(timeout=5)
+                _remaining = _drain_remaining_output(proc, _log_file)
                 if _remaining:
                     _chunks.append(_remaining)
-                    with open(_log_file, "ab") as _lf:
-                        _lf.write(_remaining)
                 stdout = b"".join(_chunks).decode("utf-8", errors="replace")
                 self.ctx["_last_tool_log"] = str(_log_file)
             except Exception as exc:
@@ -1685,6 +1676,12 @@ class PipelineExecutor:
                 val = ctx.get("data", "")
                 return f'--data "{val}"' if val else ""
 
+            # OOB 会话：{oob_args} → "-interactsh-url x -interactsh-token y"
+            # （扫描启动拉起会话；无会话 → 空串，nuclei 不带 OOB 参数）
+            if key == "oob_args":
+                from graphpt.collector.oob_session import oob_args_string
+                return oob_args_string(ctx.get("asset_id", "default"))
+
             # nuclei severity 分级：{severity} → ctx 优先（按资产传参），
             # env GRAPHPT_NUCLEI_SEVERITY 兜底（默认空 = 全量不回归）
             if key == "severity":
@@ -1812,6 +1809,55 @@ def expand_tool_stages(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             expanded.append(stage)
     return expanded
+
+
+# ---- _run_tool 辅助（提取式拆分：逻辑零变更，仅搬迁独立片段）----
+
+def _env_with_proxy() -> dict[str, str]:
+    """进程环境副本 + 代理注入（本地地址不走代理）。"""
+    proc_env = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+    try:
+        from graphpt.common.settings import get_proxy_url
+        pxy = get_proxy_url()
+        if pxy:
+            for pk in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                proc_env[pk] = pxy
+            proc_env["NO_PROXY"] = "127.0.0.1,localhost,::1,*.local"
+            proc_env["no_proxy"] = "127.0.0.1,localhost,::1,*.local"
+    except Exception:
+        pass
+    return proc_env
+
+
+def _tool_log_path(base: str, cmd_str: str) -> Path:
+    """工具日志文件路径：data/logs/{base}/{ts}_{cmd_hash}.log。"""
+    import hashlib
+    import time as _time
+    tool_log = _PROJECT_ROOT / "data" / "logs" / base
+    tool_log.mkdir(parents=True, exist_ok=True)
+    return tool_log / f"{_time.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(cmd_str.encode()).hexdigest()[:8]}.log"
+
+
+def _open_stdin(urls_file: str) -> tuple[object | None, str]:
+    """若上下文有 urls_file，通过 stdin 管道传入（httpx -l 在 Windows 上有 bug）。"""
+    if urls_file and os.path.isfile(urls_file):
+        return open(urls_file, "r", encoding="utf-8", errors="replace"), urls_file
+    return None, ""
+
+
+def _drain_remaining_output(proc: subprocess.Popen, log_file: Path) -> bytes:
+    """进程退出后读剩余输出（追加到日志，返回供 adapter 解析）。"""
+    try:
+        remaining, _ = proc.communicate(timeout=5)
+    except Exception:
+        return b""
+    if remaining:
+        try:
+            with open(log_file, "ab") as lf:
+                lf.write(remaining)
+        except OSError:
+            pass
+    return remaining or b""
 
 
 def _save_run_state(name, asset_id, ctx, stage_results, failed_at):
