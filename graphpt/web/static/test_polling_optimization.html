@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>前端轮询优化测试</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
+        .status { margin: 10px 0; padding: 10px; background: #2d2d2d; border-radius: 4px; }
+        .ok { color: #4ec9b0; }
+        .skip { color: #ce9178; }
+        .pending { color: #dcdcaa; }
+        button { padding: 8px 16px; margin: 5px; background: #0e639c; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #1177bb; }
+    </style>
+</head>
+<body>
+    <h2>前端轮询优化测试</h2>
+    <p>打开浏览器开发者工具 Network 面板监控请求</p>
+
+    <h3>测试场景：</h3>
+    <button onclick="testVisibility()">测试 Page Visibility</button>
+    <button onclick="testDebounce()">测试请求防抖</button>
+    <button onclick="stopTests()">停止测试</button>
+
+    <div id="results"></div>
+
+    <h3>优化说明：</h3>
+    <ul>
+        <li>✓ Page Visibility API: 页面切换到后台时自动暂停轮询</li>
+        <li>✓ 请求防抖: 如果上一个请求未完成，跳过本次请求</li>
+        <li>✓ 资源优化: 减少不必要的 API 调用</li>
+    </ul>
+
+    <script>
+        let testTimer = null;
+        let requestCount = 0;
+        let skippedCount = 0;
+        const results = document.getElementById('results');
+
+        function log(msg, className = '') {
+            const div = document.createElement('div');
+            div.className = 'status ' + className;
+            div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            results.appendChild(div);
+            results.scrollTop = results.scrollHeight;
+        }
+
+        function testVisibility() {
+            log('开始 Page Visibility 测试...', 'ok');
+            log('请切换到其他标签页，然后回来查看效果', 'pending');
+
+            let visible = !document.hidden;
+            document.addEventListener('visibilitychange', () => {
+                const nowVisible = !document.hidden;
+                if (nowVisible !== visible) {
+                    visible = nowVisible;
+                    log(visible ? '页面可见 → 恢复轮询' : '页面隐藏 → 暂停轮询', visible ? 'ok' : 'skip');
+                }
+            });
+
+            testTimer = setInterval(() => {
+                if (!document.hidden) {
+                    requestCount++;
+                    log(`模拟 API 请求 #${requestCount}`, 'ok');
+                } else {
+                    skippedCount++;
+                    log(`跳过请求（页面隐藏）`, 'skip');
+                }
+            }, 2000);
+        }
+
+        async function testDebounce() {
+            log('开始请求防抖测试...', 'ok');
+
+            let pending = false;
+
+            async function mockFetch(delay) {
+                if (pending) {
+                    log('跳过请求（上一个请求未完成）', 'skip');
+                    return null;
+                }
+
+                pending = true;
+                log(`开始请求（耗时 ${delay}ms）`, 'pending');
+
+                await new Promise(r => setTimeout(r, delay));
+
+                pending = false;
+                log(`请求完成`, 'ok');
+                return 'ok';
+            }
+
+            // 快速触发 3 次请求（间隔 500ms，但每次耗时 2s）
+            for (let i = 0; i < 3; i++) {
+                setTimeout(() => mockFetch(2000), i * 500);
+            }
+        }
+
+        function stopTests() {
+            if (testTimer) {
+                clearInterval(testTimer);
+                testTimer = null;
+            }
+            log('测试已停止', 'ok');
+            log(`统计: 发送 ${requestCount} 个请求, 跳过 ${skippedCount} 个`, 'ok');
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,799 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>GraphPT 系统架构全景图</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #0a0e27;
+            color: #e0e0e0;
+        }
+        #container {
+            width: 100vw;
+            height: 100vh;
+            overflow: auto;
+            position: relative;
+        }
+        svg {
+            display: block;
+        }
+        h1 {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #fff;
+            z-index: 100;
+            background: rgba(10, 14, 39, 0.9);
+            padding: 10px 20px;
+            border-radius: 8px;
+        }
+
+        /* 搜索框 */
+        #search-box {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 100;
+        }
+        #search-input {
+            padding: 8px 12px;
+            border: 1px solid #444;
+            background: rgba(10, 14, 39, 0.95);
+            color: #e0e0e0;
+            border-radius: 6px;
+            width: 200px;
+            font-size: 14px;
+        }
+        #search-input::placeholder {
+            color: #666;
+        }
+
+        /* 缩放控制 */
+        #zoom-controls {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 100;
+            display: flex;
+            gap: 8px;
+        }
+        .zoom-btn {
+            width: 40px;
+            height: 40px;
+            background: rgba(10, 14, 39, 0.95);
+            border: 1px solid #444;
+            color: #e0e0e0;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .zoom-btn:hover {
+            background: rgba(20, 24, 49, 0.95);
+            border-color: #666;
+        }
+
+        /* 节点详情面板 */
+        #detail-panel {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            width: 320px;
+            max-height: calc(100vh - 180px);
+            background: rgba(10, 14, 39, 0.98);
+            border: 1px solid #444;
+            border-radius: 8px;
+            padding: 20px;
+            z-index: 100;
+            display: none;
+            overflow-y: auto;
+        }
+        #detail-panel h3 {
+            margin-bottom: 12px;
+            color: #4a9eff;
+        }
+        #detail-panel .close-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            cursor: pointer;
+            font-size: 24px;
+            color: #666;
+        }
+        #detail-panel .close-btn:hover {
+            color: #e0e0e0;
+        }
+        #detail-panel .detail-section {
+            margin-bottom: 16px;
+        }
+        #detail-panel .detail-label {
+            color: #888;
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+        #detail-panel .detail-value {
+            color: #e0e0e0;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+
+        /* 节点高亮 */
+        .node-highlight {
+            stroke: #ffd700 !important;
+            stroke-width: 3px !important;
+        }
+            border-radius: 8px;
+        }
+        .data-node rect {
+            fill: #2196F3;
+            stroke: #1976D2;
+            stroke-width: 2;
+        }
+        .tool-node rect {
+            fill: #4CAF50;
+            stroke: #388E3C;
+            stroke-width: 2;
+        }
+        .node-label {
+            fill: #fff;
+            font-weight: bold;
+            font-size: 13px;
+            text-anchor: middle;
+        }
+        .node-detail {
+            fill: #ddd;
+            font-size: 10px;
+            text-anchor: start;
+        }
+        .link-read {
+            stroke: #FFC107;
+            stroke-width: 1.5;
+            stroke-dasharray: 5,5;
+        }
+        .link-write {
+            stroke: #FF5722;
+            stroke-width: 2.5;
+        }
+        .link-update {
+            stroke: #9C27B0;
+            stroke-width: 2;
+            stroke-dasharray: 3,3;
+        }
+        .arrow-read { fill: #FFC107; }
+        .arrow-write { fill: #FF5722; }
+        .arrow-update { fill: #9C27B0; }
+    </style>
+</head>
+<body>
+    <h1>GraphPT 系统架构全景图</h1>
+
+    <!-- 搜索框 -->
+    <div id="search-box">
+        <input type="text" id="search-input" placeholder="搜索节点或工具...">
+    </div>
+
+    <!-- 缩放控制 -->
+    <div id="zoom-controls">
+        <button class="zoom-btn" id="zoom-in">+</button>
+        <button class="zoom-btn" id="zoom-reset">⊙</button>
+        <button class="zoom-btn" id="zoom-out">−</button>
+    </div>
+
+    <!-- 节点详情面板 -->
+    <div id="detail-panel">
+        <span class="close-btn" id="close-detail">×</span>
+        <div id="detail-content"></div>
+    </div>
+
+    <div id="container"></div>
+
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script>
+        fetch('/api/schema')
+            .then(res => res.json())
+            .then(data => renderSchema(data))
+            .catch(err => console.error('加载失败:', err));
+
+        function renderSchema(schema) {
+            const width = window.innerWidth - 40;
+            const height = window.innerHeight - 100;
+
+            // 构建节点和链接 - 完全基于API数据自动识别
+            const nodes = [];
+            const links = [];
+
+            // 添加所有数据节点
+            schema.nodes.forEach(n => {
+                nodes.push({
+                    id: n.type,
+                    type: 'data',
+                    label: n.type,
+                    properties: n.properties
+                });
+            });
+
+            // 添加所有工具节点
+            schema.tools.forEach(t => {
+                nodes.push({
+                    id: `tool_${t.name}`,
+                    type: 'tool',
+                    label: t.name,
+                    inputs: t.inputs,
+                    outputs: t.outputs,
+                    filters: t.filters || [],
+                    dependencies: t.dependencies || []  // 添加依赖信息
+                });
+
+                // 工具读取数据节点
+                t.inputs.forEach(input => {
+                    const mappedInput = mapNodeName(input, schema.nodes);
+                    if (mappedInput && nodes.find(n => n.id === mappedInput)) {
+                        links.push({
+                            source: mappedInput,
+                            target: `tool_${t.name}`,
+                            type: 'read'
+                        });
+                    }
+                });
+
+                // 工具写入数据节点
+                t.outputs.forEach(output => {
+                    const mappedOutput = mapNodeName(output, schema.nodes);
+                    if (mappedOutput && nodes.find(n => n.id === mappedOutput)) {
+                        // 检查是否是自环（工具读写同一个节点）
+                        const isSelfLoop = t.inputs.some(inp => {
+                            const mappedInp = mapNodeName(inp, schema.nodes);
+                            return mappedInp === mappedOutput;
+                        });
+
+                        // 自环连接仍然绘制，但标记为特殊类型
+                        links.push({
+                            source: `tool_${t.name}`,
+                            target: mappedOutput,
+                            type: isSelfLoop ? 'update' : 'write'
+                        });
+                    }
+                });
+            });
+
+            // 自动分层布局
+            const layers = buildLayers(nodes, links);
+
+            // 根据实际层数计算 SVG 宽度
+            const layerCount = Object.keys(layers).length;
+            const totalWidth = layerCount * 220 + 200; // 每层220px + 左右边距
+
+            // 创建 SVG
+            const svg = d3.select('#container')
+                .append('svg')
+                .attr('width', totalWidth)
+                .attr('height', height);
+
+            // 定义箭头（使用 userSpaceOnUse，固定大小）
+            const defs = svg.append('defs');
+
+            // read 箭头（黄色）
+            defs.append('marker')
+                .attr('id', 'arrow-read')
+                .attr('viewBox', '0 -5 10 10')
+                .attr('refX', 10)
+                .attr('refY', 0)
+                .attr('markerWidth', 10)
+                .attr('markerHeight', 10)
+                .attr('markerUnits', 'userSpaceOnUse')
+                .attr('orient', 'auto')
+                .append('path')
+                .attr('d', 'M0,-5L10,0L0,5')
+                .style('fill', '#FFC107');
+
+            // write 箭头（橙色）
+            defs.append('marker')
+                .attr('id', 'arrow-write')
+                .attr('viewBox', '0 -5 10 10')
+                .attr('refX', 10)
+                .attr('refY', 0)
+                .attr('markerWidth', 10)
+                .attr('markerHeight', 10)
+                .attr('markerUnits', 'userSpaceOnUse')
+                .attr('orient', 'auto')
+                .append('path')
+                .attr('d', 'M0,-5L10,0L0,5')
+                .style('fill', '#FF5722');
+
+            // update 箭头（紫色）
+            defs.append('marker')
+                .attr('id', 'arrow-update')
+                .attr('viewBox', '0 -5 10 10')
+                .attr('refX', 10)
+                .attr('refY', 0)
+                .attr('markerWidth', 10)
+                .attr('markerHeight', 10)
+                .attr('markerUnits', 'userSpaceOnUse')
+                .attr('orient', 'auto')
+                .append('path')
+                .attr('d', 'M0,-5L10,0L0,5')
+                .style('fill', '#9C27B0');
+
+
+            // 调试：输出层信息和连接数
+            console.log('Total nodes:', nodes.length);
+            console.log('Total links:', links.length);
+            console.log('Layer distribution:', layers);
+            console.log('Layer count:', Object.keys(layers).length);
+            Object.entries(layers).forEach(([idx, ids]) => {
+                console.log(`Layer ${idx}: ${ids.length} nodes -`, ids.slice(0, 5));
+            });
+
+            layoutNodes(nodes, layers, width, height);
+
+            // 绘制链接（使用曲线）
+            const link = svg.append('g')
+                .selectAll('path')
+                .data(links)
+                .join('path')
+                .attr('class', d => `link-${d.type}`)
+                .attr('fill', 'none')
+                .attr('d', d => {
+                    const src = nodes.find(n => n.id === d.source);
+                    const tgt = nodes.find(n => n.id === d.target);
+                    if (!src || !tgt) return '';
+
+                    const x1 = src.x, y1 = src.y;
+                    const x2 = tgt.x, y2 = tgt.y;
+
+                    // 计算贝塞尔曲线控制点（水平方向的曲线）
+                    const midX = (x1 + x2) / 2;
+
+                    // 使用三次贝塞尔曲线
+                    return `M ${x1},${y1} C ${midX},${y1} ${midX},${y2} ${x2},${y2}`;
+                })
+                .attr('marker-end', d => `url(#arrow-${d.type})`);
+
+            // 绘制节点
+            const node = svg.append('g')
+                .selectAll('g')
+                .data(nodes)
+                .join('g')
+                .attr('class', d => `${d.type}-node`)
+                .attr('transform', d => `translate(${d.x},${d.y})`);
+
+            // 数据节点
+            node.filter(d => d.type === 'data')
+                .each(function(d) {
+                    const g = d3.select(this);
+
+                    g.append('rect')
+                        .attr('width', 120)
+                        .attr('height', 50)
+                        .attr('x', -60)
+                        .attr('y', -25)
+                        .attr('rx', 6);
+
+                    g.append('text')
+                        .attr('class', 'node-label')
+                        .attr('y', 5)
+                        .style('font-size', '13px')
+                        .text(d.label);
+                });
+
+            // 工具节点
+            node.filter(d => d.type === 'tool')
+                .each(function(d) {
+                    const g = d3.select(this);
+                    let h = 60;
+                    if (d.filters.length > 0) h += 12;
+
+                    g.append('rect')
+                        .attr('width', 140)
+                        .attr('height', h)
+                        .attr('x', -70)
+                        .attr('y', -h/2)
+                        .attr('rx', 6);
+
+                    g.append('text')
+                        .attr('class', 'node-label')
+                        .attr('y', -h/2 + 14)
+                        .style('font-size', '10px')
+                        .text(`🔧 ${d.label}`);
+
+                    g.append('line')
+                        .attr('x1', -60).attr('x2', 60)
+                        .attr('y1', -h/2 + 20).attr('y2', -h/2 + 20)
+                        .attr('stroke', '#444');
+
+                    let y = -h/2 + 30;
+
+                    g.append('text')
+                        .attr('class', 'node-detail')
+                        .attr('x', -60)
+                        .attr('y', y)
+                        .style('font-size', '8px')
+                        .text(`in: ${d.inputs.join(',')}`);
+                    y += 11;
+
+                    g.append('text')
+                        .attr('class', 'node-detail')
+                        .attr('x', -60)
+                        .attr('y', y)
+                        .style('font-size', '8px')
+                        .text(`out: ${d.outputs.join(',')}`);
+                    y += 11;
+
+                    if (d.filters.length > 0) {
+                        g.append('text')
+                            .attr('class', 'node-detail')
+                            .attr('x', -60)
+                            .attr('y', y)
+                            .style('fill', '#FFC107')
+                            .style('font-size', '8px')
+                            .text(`过滤`);
+                    }
+                });
+
+            // === 交互功能 ===
+            let currentScale = 1;
+
+            // 0. 拖动功能
+            const linkElements = link;
+
+            function dragstarted(event, d) {
+                d3.select(this).style('cursor', 'grabbing');
+            }
+
+            function dragged(event, d) {
+                d.x = event.x;
+                d.y = event.y;
+
+                // 更新节点位置
+                d3.select(this).attr('transform', `translate(${d.x},${d.y})`);
+
+                // 更新连接到这个节点的所有曲线
+                linkElements.each(function(linkData) {
+                    const src = nodes.find(n => n.id === linkData.source);
+                    const tgt = nodes.find(n => n.id === linkData.target);
+                    if (!src || !tgt) return;
+
+                    const x1 = src.x, y1 = src.y;
+                    const x2 = tgt.x, y2 = tgt.y;
+                    const midX = (x1 + x2) / 2;
+
+                    // 更新路径
+                    d3.select(this).attr('d', `M ${x1},${y1} C ${midX},${y1} ${midX},${y2} ${x2},${y2}`);
+                });
+            }
+
+            function dragended(event, d) {
+                d3.select(this).style('cursor', 'grab');
+            }
+
+            const drag = d3.drag()
+                .on('start', dragstarted)
+                .on('drag', dragged)
+                .on('end', dragended);
+
+            node.call(drag);
+
+            // 1. 点击节点显示详情
+            node.on('click', function(event, d) {
+                event.stopPropagation();
+                showNodeDetail(d);
+
+                // 高亮当前节点
+                node.selectAll('rect').classed('node-highlight', false);
+                d3.select(this).select('rect').classed('node-highlight', true);
+            });
+
+            // 节点悬停效果
+            node.style('cursor', 'grab')
+                .on('mouseenter', function() {
+                    d3.select(this).select('rect').style('opacity', 0.8);
+                })
+                .on('mouseleave', function() {
+                    d3.select(this).select('rect').style('opacity', 1);
+                });
+
+            // 2. 搜索功能
+            const searchInput = document.getElementById('search-input');
+            searchInput.addEventListener('input', (e) => {
+                const query = e.target.value.toLowerCase().trim();
+
+                if (!query) {
+                    // 清空搜索，恢复所有节点
+                    node.style('opacity', 1);
+                    node.selectAll('rect').classed('node-highlight', false);
+                    return;
+                }
+
+                // 过滤匹配的节点
+                node.each(function(d) {
+                    const matches = d.label.toLowerCase().includes(query) ||
+                                  d.id.toLowerCase().includes(query);
+                    d3.select(this).style('opacity', matches ? 1 : 0.2);
+                    d3.select(this).select('rect').classed('node-highlight', matches);
+                });
+            });
+
+            // 3. 缩放功能
+            const container = document.getElementById('container');
+            const svgElement = svg.node();
+
+            document.getElementById('zoom-in').addEventListener('click', () => {
+                currentScale = Math.min(currentScale * 1.2, 3);
+                applyZoom();
+            });
+
+            document.getElementById('zoom-out').addEventListener('click', () => {
+                currentScale = Math.max(currentScale / 1.2, 0.5);
+                applyZoom();
+            });
+
+            document.getElementById('zoom-reset').addEventListener('click', () => {
+                currentScale = 1;
+                applyZoom();
+            });
+
+            function applyZoom() {
+                svgElement.style.transform = `scale(${currentScale})`;
+                svgElement.style.transformOrigin = 'top left';
+            }
+
+            // 4. 显示节点详情
+            function showNodeDetail(d) {
+                const panel = document.getElementById('detail-panel');
+                const content = document.getElementById('detail-content');
+
+                if (d.type === 'data') {
+                    // 数据节点详情
+                    content.innerHTML = `
+                        <h3>${d.label}</h3>
+                        <div class="detail-section">
+                            <div class="detail-label">节点类型</div>
+                            <div class="detail-value">数据节点</div>
+                        </div>
+                        <div class="detail-section">
+                            <div class="detail-label">属性列表 (${d.properties.length})</div>
+                            ${d.properties.map(p => `
+                                <div class="detail-value">• ${p.name}: ${p.type}</div>
+                            `).join('')}
+                        </div>
+                    `;
+                } else if (d.type === 'tool') {
+                    // 工具节点详情
+                    content.innerHTML = `
+                        <h3>🔧 ${d.label}</h3>
+                        <div class="detail-section">
+                            <div class="detail-label">节点类型</div>
+                            <div class="detail-value">工具节点</div>
+                        </div>
+                        <div class="detail-section">
+                            <div class="detail-label">输入 (${d.inputs.length})</div>
+                            ${d.inputs.map(inp => `
+                                <div class="detail-value">• ${inp}</div>
+                            `).join('')}
+                        </div>
+                        <div class="detail-section">
+                            <div class="detail-label">输出 (${d.outputs.length})</div>
+                            ${d.outputs.map(out => `
+                                <div class="detail-value">• ${out}</div>
+                            `).join('')}
+                        </div>
+                        ${d.filters.length > 0 ? `
+                            <div class="detail-section">
+                                <div class="detail-label">过滤条件</div>
+                                <div class="detail-value" style="color: #FFC107;">已配置过滤器</div>
+                            </div>
+                        ` : ''}
+                    `;
+                }
+
+                panel.style.display = 'block';
+            }
+
+            // 5. 关闭详情面板
+            document.getElementById('close-detail').addEventListener('click', () => {
+                document.getElementById('detail-panel').style.display = 'none';
+                node.selectAll('rect').classed('node-highlight', false);
+            });
+
+            // 点击空白处关闭详情面板
+            svg.on('click', () => {
+                document.getElementById('detail-panel').style.display = 'none';
+                node.selectAll('rect').classed('node-highlight', false);
+            });
+        }
+
+        function mapNodeName(name, nodes) {
+            // 统一的节点名称映射 - 处理所有别名
+            const lower = name.toLowerCase();
+            const mapping = {
+                'subdomain': 'Domain',
+                'domain': 'Domain',
+                'rootdomain': 'Domain',
+                'ip': 'IP',
+                'port': 'Port',
+                'http_endpoint': 'Http_endpoint',
+                'httpendpoint': 'Http_endpoint',
+                'endpoint': 'Http_endpoint',        // 关键：Endpoint 映射到 Http_endpoint
+                'api_endpoint': 'Api_endpoint',
+                'apiendpoint': 'Api_endpoint',
+                'vuln': 'Vulnerability',
+                'vulnerability': 'Vulnerability',
+                'icp_record': 'Icp_record',
+                'icprecord': 'Icp_record',
+                'wildcard_result': 'Domain',
+                'dir_entry': 'Dir_entry',
+                'direntry': 'Dir_entry',
+                'file': 'File',
+                'secret': 'Secret',
+                'bypass_result': 'Bypass_result',
+                'bypassresult': 'Bypass_result',
+                'weak_credential': 'Weak_credential',
+                'weakcredential': 'Weak_credential',
+                'asset': 'Asset',
+                'scan_run': 'Scan_run',
+                'scanrun': 'Scan_run',
+                'batch': 'Batch'
+            };
+
+            if (mapping[lower] && nodes.find(n => n.type === mapping[lower])) {
+                return mapping[lower];
+            }
+
+            // 精确匹配
+            const exactMatch = nodes.find(n => n.type.toLowerCase() === lower);
+            if (exactMatch) return exactMatch.type;
+
+            // 模糊匹配（去除下划线）
+            const fuzzyMatch = nodes.find(n =>
+                n.type.toLowerCase().replace('_', '') === lower.replace('_', '')
+            );
+            return fuzzyMatch ? fuzzyMatch.type : null;
+        }
+
+        function buildLayers(nodes, links) {
+            /**
+             * 基于依赖关系的分层：
+             * 1. 数据节点 → 工具层 → 数据节点（基本流程）
+             * 2. 如果工具有 dependencies，它必须在依赖的工具之后
+             */
+
+            const layers = {};
+            let layerIdx = 0;
+            const assigned = new Set();
+            const nodeMap = new Map(nodes.map(n => [n.id, n]));
+
+            // 辅助函数：获取读取某数据节点的工具
+            function getToolsReading(dataNodeId) {
+                return links
+                    .filter(l => l.source === dataNodeId && l.type === 'read' && l.target.startsWith('tool_'))
+                    .map(l => l.target)
+                    .filter(t => !assigned.has(t));
+            }
+
+            // 辅助函数：获取更新某数据节点的工具（update 类型）
+            function getToolsUpdating(dataNodeId) {
+                return links
+                    .filter(l => l.target === dataNodeId && l.type === 'update' && l.source.startsWith('tool_'))
+                    .map(l => l.source)
+                    .filter(t => !assigned.has(t));
+            }
+
+            // 辅助函数：获取工具输出的数据节点
+            function getToolOutputData(toolId) {
+                return links
+                    .filter(l => l.source === toolId && l.type === 'write')
+                    .map(l => l.target)
+                    .filter(d => !assigned.has(d));
+            }
+
+            // 辅助函数：检查工具的依赖是否都已分配
+            function areDependenciesSatisfied(toolId) {
+                const tool = nodeMap.get(toolId);
+                if (!tool || !tool.dependencies || tool.dependencies.length === 0) {
+                    return true;
+                }
+                // 检查所有依赖工具是否已分配
+                return tool.dependencies.every(dep => assigned.has(`tool_${dep}`));
+            }
+
+            // 第0层：Asset
+            layers[layerIdx] = ['Asset'];
+            assigned.add('Asset');
+            layerIdx++;
+
+            let currentDataNodes = ['Asset'];
+
+            while (currentDataNodes.length > 0) {
+                // 先处理更新工具
+                const updateTools = new Set();
+                currentDataNodes.forEach(dataNode => {
+                    getToolsUpdating(dataNode)
+                        .filter(t => areDependenciesSatisfied(t))
+                        .forEach(tool => updateTools.add(tool));
+                });
+
+                if (updateTools.size > 0) {
+                    layers[layerIdx] = Array.from(updateTools);
+                    updateTools.forEach(t => assigned.add(t));
+                    layerIdx++;
+                }
+
+                // 读取当前数据节点的工具，但要过滤掉依赖未满足的
+                const toolsThisLayer = new Set();
+                currentDataNodes.forEach(dataNode => {
+                    getToolsReading(dataNode)
+                        .filter(t => areDependenciesSatisfied(t))
+                        .forEach(tool => toolsThisLayer.add(tool));
+                });
+
+                if (toolsThisLayer.size === 0 && updateTools.size === 0) break;
+
+                if (toolsThisLayer.size > 0) {
+                    layers[layerIdx] = Array.from(toolsThisLayer);
+                    toolsThisLayer.forEach(t => assigned.add(t));
+                    layerIdx++;
+                }
+
+                // 收集输出的数据节点
+                const nextDataNodes = new Set();
+                const allTools = [...updateTools, ...toolsThisLayer];
+                allTools.forEach(tool => {
+                    getToolOutputData(tool).forEach(data => nextDataNodes.add(data));
+                });
+
+                if (nextDataNodes.size === 0) break;
+
+                layers[layerIdx] = Array.from(nextDataNodes);
+                nextDataNodes.forEach(d => assigned.add(d));
+                layerIdx++;
+
+                currentDataNodes = Array.from(nextDataNodes);
+            }
+
+            // 处理未分配的节点
+            const unassigned = nodes.filter(n => !assigned.has(n.id)).map(n => n.id);
+            if (unassigned.length > 0) {
+                layers[layerIdx] = unassigned;
+            }
+
+            return layers;
+        }
+
+        function layoutNodes(nodes, layers, width, height) {
+            const layerCount = Object.keys(layers).length;
+            const maxNodesInLayer = Math.max(...Object.values(layers).map(arr => arr.length));
+
+            // 固定间距 - 确保清晰可见
+            const layerWidth = 220;  // 每层之间固定 220px
+            const nodeGap = 80;      // 每个节点之间固定 80px
+
+            Object.entries(layers).forEach(([idx, ids]) => {
+                const x = parseInt(idx) * layerWidth + 100;
+                const layerHeight = ids.length * nodeGap;
+                const startY = (height - layerHeight) / 2; // 垂直居中
+
+                ids.forEach((id, i) => {
+                    const node = nodes.find(n => n.id === id);
+                    if (node) {
+                        node.x = x;
+                        node.y = startY + i * nodeGap;
+                    }
+                });
+            });
+
+            // 未分配的节点放到最右边
+            const unmapped = nodes.filter(n => !n.x);
+            const rightX = layerCount * layerWidth + 100;
+            unmapped.forEach((n, i) => {
+                n.x = rightX;
+                n.y = 100 + i * nodeGap;
+            });
+        }
+    </script>
+</body>
+</html>

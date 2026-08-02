@@ -1,0 +1,69 @@
+# GraphPT 字典配置文件
+# 定义不同扫描强度的字典选项
+
+profiles:
+  quick:
+    desc: "快速扫描 - 高频词汇，适合快速侦察"
+    dns_subdomains: "SecLists/Discovery/DNS/subdomains-top1million-5000.txt"
+    web_dirs: "SecLists/Discovery/Web-Content/common.txt"
+    web_files: "SecLists/Discovery/Web-Content/raft-small-files.txt"
+    passwords: "SecLists/Passwords/Common-Credentials/top-20-common-SSH-passwords.txt"
+    usernames: "top-usernames.txt"
+
+  standard:
+    desc: "标准扫描 - 平衡覆盖率和时间"
+    dns_subdomains: "SecLists/Discovery/DNS/bitquark-subdomains-top100000.txt"
+    web_dirs: "SecLists/Discovery/Web-Content/raft-medium-directories.txt"
+    web_files: "SecLists/Discovery/Web-Content/raft-medium-files.txt"
+    passwords: "SecLists/Passwords/Common-Credentials/10k-most-common.txt"
+    usernames: "top-usernames.txt"
+
+  deep:
+    desc: "深度扫描 - 最大覆盖，耗时长"
+    dns_subdomains: "SecLists/Discovery/DNS/dns-Jhaddix.txt"
+    web_dirs: "web_dirs.txt"  # 当前的 127 万字典
+    web_files: "web_files.txt"
+    passwords: "SecLists/Passwords/Common-Credentials/10k-most-common.txt"
+    usernames: "top-usernames.txt"
+
+# 字典统计信息（用于 UI 显示）
+stats:
+  "SecLists/Discovery/DNS/subdomains-top1million-5000.txt":
+    lines: 5000
+    size_kb: 34
+  "SecLists/Discovery/DNS/bitquark-subdomains-top100000.txt":
+    lines: 100000
+    size_kb: 1490
+  "SecLists/Discovery/DNS/dns-Jhaddix.txt":
+    lines: 2171687
+    size_kb: 28001
+  "SecLists/Discovery/Web-Content/common.txt":
+    lines: 4751
+    size_kb: 42
+  "SecLists/Discovery/Web-Content/raft-medium-directories.txt":
+    lines: 29999
+    size_kb: 273
+  "web_dirs.txt":
+    lines: 1269713
+    size_kb: 17027
+  "SecLists/Discovery/Web-Content/raft-small-files.txt":
+    lines: 11424
+    size_kb: 156
+  "SecLists/Discovery/Web-Content/raft-medium-files.txt":
+    lines: 17129
+    size_kb: 235
+  "web_files.txt":
+    lines: 132248
+    size_kb: 3574
+  "SecLists/Passwords/Common-Credentials/top-20-common-SSH-passwords.txt":
+    lines: 22
+    size_kb: 0.2
+  "SecLists/Passwords/Common-Credentials/10k-most-common.txt":
+    lines: 10000
+    size_kb: 81
+  "top-usernames.txt":
+    lines: 99
+    size_kb: 0.7
+  "top-passwords.txt":
+    lines: 161
+    size_kb: 1.4
