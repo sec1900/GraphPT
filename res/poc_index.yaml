@@ -1,0 +1,58 @@
+# 指纹 → POC/模板映射：observer_ward / AI 分类器识别出 product 后，
+# nuclei 定向扫对应 tags（替代全量盲扫）。未命中的 product 走盲扫兜底。
+# tags 使用 nuclei-templates 的标准 tag 名；res/poc/ 厂商目录对应 POC 模板。
+mappings:
+  wordpress:
+    tags: [wordpress]
+  weblogic:
+    tags: [weblogic]
+  tomcat:
+    tags: [tomcat]
+  jboss:
+    tags: [jboss]
+  springboot:
+    tags: [springboot, spring]
+  spring:
+    tags: [springboot, spring]
+  druid:
+    tags: [druid]
+  swagger:
+    tags: [swagger, api]
+  vue:
+    tags: [vue]
+  hikvision:
+    tags: [hikvision, camera]
+  dahua:
+    tags: [dahua, camera]
+  yonyou:
+    tags: [yonyou]
+  zhiyuan:
+    tags: [zhiyuan, seeyon]
+  weaver:
+    tags: [weaver, cnvd]
+  tongda:
+    tags: [tongda, oa]
+  kingdee:
+    tags: [kingdee]
+  lanlin:
+    tags: [lanling]
+  xinhu:
+    tags: [xinhu, oa]
+  wanhu:
+    tags: [wanhu, oa]
+  jeecg:
+    tags: [jeecg]
+  jinhe:
+    tags: [jinhe, oa]
+  meite:
+    tags: [meite]
+  fanwei:
+    tags: [weaver]
+  hongjing:
+    tags: [hongjing]
+  hongfan:
+    tags: [hongfan]
+  changjietong:
+    tags: [changjietong]
+  hanwang:
+    tags: [hanwang]

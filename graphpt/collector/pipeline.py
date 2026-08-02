@@ -423,6 +423,19 @@ def _transform_join_params_body(params: Any) -> str:
 _register_transform("join_params_body", _transform_join_params_body)
 
 
+def _transform_poc_tags(product: Any) -> str:
+    """指纹→POC：product → "-tags a,b"（nuclei 定向扫厂商模板）。
+
+    命中 → 精准扫；未命中/无 product → 空串（全量盲扫兜底）。
+    消费 res/poc_index.yaml（observer_ward/AI 分类器产出的 product）。
+    """
+    from graphpt.collector.poc_index import match_poc_tags
+    return match_poc_tags(str(product or ""))
+
+
+_register_transform("poc_tags", _transform_poc_tags)
+
+
 def _transform_nuclei_tags(tech: Any) -> str:
     """指纹驱动：端点 tech[] 切词匹配 nuclei tag。
 
@@ -1684,6 +1697,12 @@ class PipelineExecutor:
             if key == "data":
                 val = ctx.get("data", "")
                 return f'--data "{val}"' if val else ""
+
+            # OOB 会话：{oob_args} → "-interactsh-url x -interactsh-token y"
+            # （扫描启动拉起会话；无会话 → 空串，nuclei 不带 OOB 参数）
+            if key == "oob_args":
+                from graphpt.collector.oob_session import oob_args_string
+                return oob_args_string(ctx.get("asset_id", "default"))
 
             # nuclei severity 分级：{severity} → ctx 优先（按资产传参），
             # env GRAPHPT_NUCLEI_SEVERITY 兜底（默认空 = 全量不回归）

@@ -957,6 +957,16 @@ def run_full_scan(asset_id: str, *,
     except Exception:
         pass
 
+    # OOB 会话：拉起 interactsh（盲 SSRF/XXE/RCE 模板自动带 OOB payload 域）。
+    # 失败静默降级（无会话 → nuclei 不带 OOB 参数，行为与现状一致）
+    try:
+        from graphpt.collector.oob_session import start as _oob_start
+        _oob = _oob_start(asset_id)
+        if _oob.get("ok"):
+            _scan_log(f"oob_session_started domain={_oob.get('domain', '')}")
+    except Exception:
+        pass
+
     with _SCAN_STATE_LOCK:
         _SCAN_STATE[asset_id] = {
             "status": "scanning", "layer": start_layer,
@@ -1241,7 +1251,15 @@ def run_full_scan(asset_id: str, *,
 
 def _notify_completion(asset_id: str, status: str, round_num: int,
                       total_findings: int, total_errors: int) -> None:
-    """扫描完成时写 Redis 通知（TTL 1h），前端可轮询获取。"""
+    """扫描完成时写 Redis 通知（TTL 1h），前端可轮询获取。
+
+    所有结束路径（done/aborted/crashed）都经过这里 — OOB 会话在此回收。
+    """
+    try:
+        from graphpt.collector.oob_session import stop as _oob_stop
+        _oob_stop(asset_id)
+    except Exception:
+        pass
     try:
         _r = _redis_client()
         _r.ping()

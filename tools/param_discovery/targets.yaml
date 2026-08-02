@@ -1,0 +1,23 @@
+selectors:
+  param_discovery:
+    desc: "参数枚举 — 取已分类为 api 的端点（隐藏参数是注入/越权的新攻击面）"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a, a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category = 'api'
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category = 'api'
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category = 'api'
+        RETURN ep
+      }
+      WITH DISTINCT ep
+      WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+      RETURN ep.url AS url
+    mapping:
+      url: "{urls_file}"
