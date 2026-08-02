@@ -69,3 +69,14 @@ brutespray-output/
 todo.txt
 *.todo
 _watch_scan.py
+
+# 基础设施二进制（memurai/neo4j 运行时，CLAUDE.md: 基础设施不是扫描工具）
+infra/
+
+# 大字典目录（2.7G 本地资源，官网可下载）
+res/wordlists/SecLists/
+
+# 扫描生成物
+brutespray-checkpoint.json
+brutespray-checkpoint.jsonl
+*.checkpoint.jsonl
