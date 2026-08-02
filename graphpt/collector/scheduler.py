@@ -125,8 +125,10 @@ def _auto_tune() -> dict[str, int]:
     if env_layers:
         layer_workers = int(env_layers)
     else:
-        # 层线程数 = 并发数，但不少于 2、不多于 CPU 核心的一半
-        layer_workers = max(2, min(concurrency, max(2, cpu_cores // 2)))
+        # 层线程数 = 7（GraphPT 当前有 7 层: 0-6）
+        # GraphPT 核心设计：各层独立推进，Layer 1 卡住不影响 Layer 2 执行
+        # 默认允许所有层并行，避免层级阻塞
+        layer_workers = 7
     _log.info("auto_tune_layer_workers=%d", layer_workers)
 
     # 写入环境变量，下游 os.getenv() 全部自动生效
@@ -349,20 +351,32 @@ def _tool_result_findings(r: dict[str, Any]) -> int:
     )
 
 
-def _count_targets(tool: str, asset_id: str) -> int:
+def _count_targets(tool: str, asset_id: str, force_rescan: bool = False) -> int:
     """探测某工具当前有多少待处理目标（直接查 Neo4j）。
 
     注意: 此计数为近似值（直接从 targets.yaml 的 Cypher 算），
     实际派发由 advance_once → _query_targets 决定。
     轻微误差不影响调度正确性（ScanRun 去重拦住重复派发）。
+
+    force_rescan: True 时移除 ScanRun 检查，与 _query_targets 逻辑保持一致。
     """
     try:
         from graphpt.collector.pipeline import _load_target_selectors
+        import re
 
         cfg = _load_target_selectors().get(tool, {})
         query = str(cfg.get("query") or "").strip()
         if not query:
             return 1  # 无 targets.yaml 配置 → 跑一次
+
+        # Force Rescan 模式：移除 ScanRun 检查（与 pipeline._query_targets 逻辑一致）
+        if force_rescan:
+            query = re.sub(
+                r"\s*AND NOT EXISTS \{\s*MATCH \(sr:ScanRun\)[^}]*\}",
+                "",
+                query,
+                flags=re.IGNORECASE
+            )
 
         from graphpt.collector.neo4j_client import get_graph_writer
         w = get_graph_writer()
@@ -691,11 +705,13 @@ def clear_scan_state(asset_id: str) -> None:
 
 
 def _run_one_tool(tool: str, asset_id: str, *,
-                   command: str | None = None) -> dict[str, Any]:
+                   command: str | None = None,
+                   force_rescan: bool = False) -> dict[str, Any]:
     """直接执行单个工具（不经过 Celery）。
     复用 PipelineExecutor 的完整流程：选目标 → 跑工具 → adapter → 入图 → 标记已扫。
 
     command 为 None 时使用 tool.yaml 默认命令；传入则覆盖（fallback 机制）。
+    force_rescan: True 时忽略 ScanRun 记录，强制重新扫描所有目标。
     ScanAborted 和 pipeline 层抛出的 "scan aborted" RuntimeError 均不被吞掉，
     向上传播以便 run_scan_layer / run_full_scan 停止推进。
     """
@@ -707,7 +723,7 @@ def _run_one_tool(tool: str, asset_id: str, *,
         if _is_aborted(asset_id):
             raise ScanAborted(f"scan aborted before {tool}")
         result = _run_single_tool_pipeline(tool, asset_id=asset_id, stage_name=tool,
-                                           command=command)
+                                           command=command, force_rescan=force_rescan)
     except ScanAborted:
         raise  # F2: 不吞中止信号，向上传播
     except RuntimeError as exc:
@@ -724,7 +740,8 @@ def _run_one_tool(tool: str, asset_id: str, *,
 
 
 def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
-                   max_workers: int | None = None) -> dict[str, Any]:
+                   max_workers: int | None = None,
+                   force_rescan: bool = False) -> dict[str, Any]:
     """执行单层所有有目标工具（同层并行）。
 
     对层内每个 tool，先 _count_targets 判断有无待处理目标，
@@ -732,6 +749,8 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
     所有工具完成后返回汇总结果。
 
     ScanAborted 时取消剩余 future、清状态并向上传播（F2）。
+
+    force_rescan: True 时忽略 ScanRun 记录，强制重新扫描所有目标。
 
     spec: _DEPENDENCY_LAYERS 中的一层，含 layer/node/tools。
     """
@@ -749,7 +768,7 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
     ready: list[str] = []
     current_round = _SCAN_STATE.get(asset_id, {}).get("round", 0)
     for tool in tools:
-        if current_round <= 1 or _count_targets(tool, asset_id) > 0:
+        if current_round <= 1 or _count_targets(tool, asset_id, force_rescan=force_rescan) > 0:
             ready.append(tool)
 
     if not ready:
@@ -776,7 +795,7 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
             st = _SCAN_STATE.get(asset_id, {})
             st["tool"] = tool
         try:
-            return _run_one_tool(tool, asset_id)
+            return _run_one_tool(tool, asset_id, force_rescan=force_rescan)
         except ScanAborted:
             raise  # F2: 向上传播，外层处理
         finally:
@@ -871,12 +890,12 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
     }
 
 
-def _any_tool_has_targets(asset_id: str) -> bool:
+def _any_tool_has_targets(asset_id: str, force_rescan: bool = False) -> bool:
     """检查所有层的所有工具是否还有未扫描目标。返回 True 表示需要继续推进。"""
     for spec in _DEPENDENCY_LAYERS:
         for tool in spec["tools"]:
             try:
-                if _count_targets(tool, asset_id) > 0:
+                if _count_targets(tool, asset_id, force_rescan=force_rescan) > 0:
                     return True
             except Exception:
                 pass  # 个别工具的查询可能失败，不影响整体判断
@@ -885,7 +904,8 @@ def _any_tool_has_targets(asset_id: str) -> bool:
 
 def run_full_scan(asset_id: str, *,
                   start_layer: int = 0,
-                  max_workers: int | None = None) -> dict[str, Any]:
+                  max_workers: int | None = None,
+                  force_rescan: bool = False) -> dict[str, Any]:
     """执行完整攻击链——所有层并行独立推进，不互相阻塞。
 
     核心设计变更（v2）：
@@ -893,8 +913,9 @@ def run_full_scan(asset_id: str, *,
       - 每层循环：查目标 → 跑工具 → 标记结果。无目标时该层休眠。
       - 整体退出条件：所有层连续 N 次检查均无目标，或所有层的线程全部空闲。
       - 中止信号（scan:abort:asset_id）在所有层线程中独立检查。
+      - force_rescan: True 时忽略 ScanRun 记录，强制重新扫描所有目标。
     """
-    _log.info("full_scan_start asset=%s", asset_id)
+    _log.info("full_scan_start asset=%s force_rescan=%s", asset_id, force_rescan)
 
     _scan_log_path = os.environ.get("GRAPHPT_SCAN_LOG", "")
     def _scan_log(msg: str) -> None:
@@ -906,6 +927,13 @@ def run_full_scan(asset_id: str, *,
             except Exception:
                 pass
     _scan_log(f"full_scan_start asset={asset_id}")
+
+    # 模板过期检查（低成本：读版本文件，超龄打警告不阻塞）
+    try:
+        from graphpt.collector.template_health import check_templates
+        check_templates(_scan_log)
+    except Exception:
+        pass
 
     with _SCAN_STATE_LOCK:
         _SCAN_STATE[asset_id] = {
@@ -971,8 +999,11 @@ def run_full_scan(asset_id: str, *,
             ready = []
             for tool in tools:
                 try:
-                    if _count_targets(tool, asset_id) > 0:
+                    count = _count_targets(tool, asset_id, force_rescan=force_rescan)
+                    if count > 0:
                         ready.append(tool)
+                        _log.debug("layer_%d_target_check tool=%s count=%d force_rescan=%s",
+                                   layer_num, tool, count, force_rescan)
                 except Exception:
                     pass
 
@@ -1013,7 +1044,7 @@ def run_full_scan(asset_id: str, *,
 
             sub_spec = {"layer": layer_num, "node": spec.get("node", ""), "tools": ready}
             try:
-                result = run_scan_layer(sub_spec, asset_id, max_workers=max_workers)
+                result = run_scan_layer(sub_spec, asset_id, max_workers=max_workers, force_rescan=force_rescan)
             except ScanAborted:
                 raise
             except Exception as exc:
@@ -1034,7 +1065,7 @@ def run_full_scan(asset_id: str, *,
                 if not fb_cmd:
                     continue
                 try:
-                    if _count_targets(tool_name, asset_id) <= 0:
+                    if _count_targets(tool_name, asset_id, force_rescan=force_rescan) <= 0:
                         continue  # 全部扫完，无需 fallback
                 except Exception:
                     continue
@@ -1095,6 +1126,12 @@ def run_full_scan(asset_id: str, *,
             _MONITOR_INTERVAL = int(os.getenv("GRAPHPT_SCAN_MONITOR_INTERVAL", "15"))
             _GLOBAL_DRY_EXIT = int(os.getenv("GRAPHPT_GLOBAL_DRY_ROUNDS", "6"))
             while layer_futures:
+                # 定期同步 _active_layers 到全局状态（供前端显示）
+                with _active_lock:
+                    with _SCAN_STATE_LOCK:
+                        st = _SCAN_STATE.get(asset_id, {})
+                        st["active_layers"] = dict(_active_layers)
+
                 if _is_aborted(asset_id):
                     _log.info("full_scan_aborted asset=%s", asset_id)
                     aborted = True
@@ -1120,7 +1157,7 @@ def run_full_scan(asset_id: str, *,
                 # 工具正在执行，即使暂时无未认领目标也不能判定为全链干枯。
                 _any_has_targets = False
                 try:
-                    _any_has_targets = _any_tool_has_targets(asset_id)
+                    _any_has_targets = _any_tool_has_targets(asset_id, force_rescan=force_rescan)
                 except Exception:
                     pass
 
