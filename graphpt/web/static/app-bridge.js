@@ -3122,6 +3122,13 @@ async function showScanConfig() {
     document.getElementById('scan-config-timeout').value = strategy.timeout || 30;
     document.getElementById('scan-config-force-rescan').checked = strategy.force_rescan || false;
 
+    // 填充认证配置（认证态扫描）
+    const auth = _scanConfigData.config?.auth || {};
+    document.getElementById('auth-enabled').checked = !!auth.enabled;
+    document.getElementById('auth-type').value = auth.type || 'cookie';
+    document.getElementById('auth-header-name').value = auth.header_name || 'Authorization';
+    document.getElementById('auth-value').value = auth.value || '';
+
     // 显示模态框
     document.getElementById('scan-config-overlay').style.display = 'flex';
   } catch (err) {
@@ -3247,6 +3254,13 @@ async function saveScanConfig() {
     const timeout = parseInt(document.getElementById('scan-config-timeout').value);
     const forceRescan = document.getElementById('scan-config-force-rescan').checked;
 
+    const auth = {
+      enabled: document.getElementById('auth-enabled').checked,
+      type: document.getElementById('auth-type').value,
+      header_name: document.getElementById('auth-header-name').value || 'Authorization',
+      value: document.getElementById('auth-value').value.trim()
+    };
+
     const payload = {
       asset_id: assetId,
       profile: profile,
@@ -3254,7 +3268,8 @@ async function saveScanConfig() {
         max_threads: threads,
         timeout: timeout,
         force_rescan: forceRescan
-      }
+      },
+      auth: auth
     };
 
     const res = await fetch(aq(`${API}/scan/config`, assetId), {

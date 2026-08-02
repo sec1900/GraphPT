@@ -459,6 +459,33 @@
       <p style="font-size:11px;color:var(--muted);margin-top:8px">💡 Switch profiles to use different wordlist sizes. Custom wordlist selection coming soon.</p>
     </div>
 
+    <!-- Authentication (认证态扫描) -->
+    <div style="margin-bottom:20px">
+      <label style="display:block;font-weight:600;margin-bottom:8px;font-size:13px">Authentication <span style="font-weight:400;color:var(--muted)">(认证态扫描)</span></label>
+      <div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:12px">
+        <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px;cursor:pointer">
+          <input type="checkbox" id="auth-enabled"> 启用认证（{auth_headers} 注入 httpx/nuclei/katana/ffuf）
+        </label>
+        <div style="display:grid;grid-template-columns:1fr 2fr;gap:12px;margin-bottom:10px">
+          <div>
+            <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:4px">Type</label>
+            <select id="auth-type" style="width:100%;padding:6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">
+              <option value="cookie">Cookie</option>
+              <option value="header">Header</option>
+              <option value="basic">Basic Auth</option>
+            </select>
+          </div>
+          <div>
+            <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:4px">Header Name (仅 header 类型)</label>
+            <input type="text" id="auth-header-name" value="Authorization" style="width:100%;padding:6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">
+          </div>
+        </div>
+        <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:4px">Value（Cookie 值 / Header 值 / Basic 的 user:pass）</label>
+        <input type="text" id="auth-value" placeholder="session=abc123" style="width:100%;padding:6px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px">
+        <p style="font-size:11px;color:var(--muted);margin-top:8px">💡 可用 <code>python tools/browser_login/browser_login.py --url &lt;login_url&gt; --asset &lt;id&gt; --user ... --pass ...</code> 自动登录导出 Cookie</p>
+      </div>
+    </div>
+
     <!-- Scan Strategy -->
     <div style="margin-bottom:20px">
       <label style="display:block;font-weight:600;margin-bottom:8px;font-size:13px">Scan Strategy</label>
