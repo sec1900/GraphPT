@@ -139,6 +139,14 @@ methodology: |
   回调到达是强证据：比响应差异判断可靠，写 finding 时把 interaction 的
   protocol/full_id/raw_request 一并写入 detail 作为取证。
 
+  ### 漏洞记录（与采集链单一事实源）
+
+  - 确认的漏洞用 **save_vulnerability** 写入图（Neo4j，与 nuclei/traffic_analyzer
+    同一状态机），不要用 db_write(table=findings) — 那是 sqlite 会话记录，不入图
+  - 验证通过后调用 **confirm_vulnerability** 置 confirmed（url+vuln_type+title 定位）
+  - 发现的密钥/Token 用 **save_secret**（只存脱敏预览，勿把明文写进对话/日志）
+  - 写图前先查重：graph_query 查该 url+type 是否已有 Vulnerability
+
   ### 重要约束
 
   - 所有查询必须通过 asset_id 限定范围
