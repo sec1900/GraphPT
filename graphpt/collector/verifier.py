@@ -146,6 +146,10 @@ def verify_candidate(
         for name, payload in _INJECTION_PAYLOADS:
             inj_url, inj_body = _inject_param(url, req_body, payload)
             status, body, _ = _replay(method, inj_url, req_headers, inj_body)
+            if status == 0:
+                # 请求失败（超时/断连/WAF 拦截）不是"注入差异"证据 — 跳过该 payload
+                _check(name, False, f"请求失败 (status=0)，不算差异")
+                continue
             fp = _response_fingerprint(status, body)
             if _body_has_sql_error(body):
                 _check(name, True, f"SQL 错误特征出现 (status={status})")
