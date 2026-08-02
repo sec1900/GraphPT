@@ -42,16 +42,33 @@ _DEFAULT_ATTACK_INSTRUCTION = """## 执行模式：单阶段 Attack
 """
 
 
-def _get_tool_schemas() -> list[dict[str, Any]]:
-    """返回所有已注册工具（除 Task 外）的 schema。"""
+def _get_tool_schemas(asset_id: str = "") -> list[dict[str, Any]]:
+    """返回所有已注册工具（除 Task 外）的 schema。
+
+    传入 asset_id 时，对图查询/写入类工具动态注入"当前目标资产"到
+    description — 真实测试发现 Agent 会误用 default（工具描述里
+    没有当前资产信息，LLM 倾向选默认值）。
+    """
     from graphpt.tools.defs import init_builtin_tools
 
     init_builtin_tools()
-    return [
+    schemas = [
         t.to_function_schema()
         for t, _ in _TOOL_REGISTRY.values()
         if t.name not in _EXCLUDED_TOOLS
     ]
+    if asset_id:
+        scoped = {"graph_summary", "graph_query", "graph_attack_paths",
+                  "save_vulnerability", "confirm_vulnerability"}
+        for s in schemas:
+            name = s.get("function", {}).get("name", "")
+            if name in scoped:
+                desc = s["function"].get("description", "")
+                s["function"]["description"] = (
+                    f"[当前目标资产 ID: {asset_id} — 本工具的所有 asset_id 参数"
+                    f"必须传这个 ID，禁止用 default] {desc}"
+                )
+    return schemas
 
 
 # ---- 系统提示构建 ----
@@ -116,10 +133,15 @@ def run_graph_agent(
     ai_config = build_ai_config(settings)
 
     system_prompt = _build_system_prompt(asset_id)
-    tools = _get_tool_schemas()
+    tools = _get_tool_schemas(asset_id)
 
     if not user_prompt:
-        user_prompt = f"对资产 {asset_id} 发起渗透测试。先查询图数据库了解已有攻击面，然后主动尝试利用发现的漏洞和弱点。"
+        user_prompt = (
+            f"对资产 {asset_id} 发起渗透测试。先查询图数据库了解已有攻击面，"
+            f"然后主动尝试利用发现的漏洞和弱点。\n"
+            f"重要：所有图查询工具的 asset_id 参数必须传 {asset_id}（禁止用 default）——"
+            f"该资产的数据都在这个 ID 下。"
+        )
 
     result = run_agent_loop(
         ai_config=ai_config,

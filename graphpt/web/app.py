@@ -4253,7 +4253,7 @@ def _cleanup_orphaned_sessions() -> int:
             _update_agent_session_on_disk(sid, {"status": "orphaned", "error": "Backend restarted — agent process lost"})
             cleaned += 1
     if cleaned:
-        _log.info("orphaned_agent_sessions_cleaned", extra={"count": cleaned})
+        _web_log.info("orphaned_agent_sessions_cleaned", extra={"count": cleaned})
     return cleaned
 
 
