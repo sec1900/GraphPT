@@ -24,6 +24,21 @@ _LOGIN_TITLE_HINTS = re.compile(
 )
 
 
+def classify_by_url(url: str) -> dict[str, Any]:
+    """纯 URL 启发式分类（属性缺失端点的兜底，零请求）。"""
+    url_l = (url or "").lower()
+    if any(x in url_l for x in (".js", ".css", ".png", ".jpg", ".jpeg", ".gif",
+                                ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map")):
+        return {"category": "static", "requires_auth": False}
+    if re.search(r"/api/|/v\d+/|\.json$|\.php\?", url_l) or url_l.endswith((".json", ".xml")):
+        return {"category": "api", "requires_auth": False}
+    if re.search(r"/login|/signin|/auth/|/admin|/console|/manage", url_l):
+        return {"category": "protected", "requires_auth": True}
+    if url_l.endswith((".bak", ".sql", ".env", ".zip", ".tar", ".gz", ".log")):
+        return {"category": "static", "requires_auth": False}
+    return {"category": "page", "requires_auth": False}
+
+
 def classify_by_attributes(status_code: int, content_type: str, title: str) -> dict[str, Any]:
     """纯属性分类 → {category, requires_auth, rule_classified}。"""
     ct = str(content_type or "").lower()
@@ -55,7 +70,6 @@ def offline_classify(asset_id: str = "default", *, limit: int = 0) -> dict[str, 
         MATCH (e:HTTPEndpoint)
         WHERE e.asset_id = $aid
           AND (e.category IS NULL OR e.category = '')
-          AND e.status_code IS NOT NULL AND e.status_code > 0
         RETURN e.id AS eid, e.url AS url, e.status_code AS sc,
                e.content_type AS ct, e.title AS title, e.tech AS tech
     """
@@ -65,9 +79,13 @@ def offline_classify(asset_id: str = "default", *, limit: int = 0) -> dict[str, 
     with writer._driver.session() as s:
         rows = s.run(query, aid=asset_id, limit=limit).data()
         for row in rows:
-            result = classify_by_attributes(
-                int(row["sc"] or 0), str(row["ct"] or ""), str(row["title"] or "")
-            )
+            sc = int(row["sc"] or 0)
+            if sc > 0:
+                # 有属性：属性分类
+                result = classify_by_attributes(sc, str(row["ct"] or ""), str(row["title"] or ""))
+            else:
+                # 属性缺失（探测失败的存量端点）：URL 启发式兜底，零请求
+                result = classify_by_url(str(row["url"] or ""))
             category = result["category"]
             s.run(
                 """

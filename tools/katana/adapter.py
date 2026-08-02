@@ -132,6 +132,23 @@ class KatanaAdapter(BaseAdapter):
             method = (req.get("method") or obj.get("method") or "GET").upper()
             status_code = resp.get("status_code", obj.get("status_code", 0)) or 0
             resp_headers = resp.get("headers", {}) or {}
+
+            # 成对流量采集：katana 明细格式带完整请求/响应 → traffic_store
+            # （信号层的输入扩大 — 真实测试暴露：只有 httpx/nuclei/mitm 有流量）
+            try:
+                from graphpt.collector.traffic_store import save_traffic_pair
+                save_traffic_pair(
+                    method=method, url=url,
+                    asset_id=ctx.get("asset_id", ""), source="katana",
+                    req_headers=req.get("headers") or {},
+                    req_body=req.get("body") or "",
+                    resp_status=status_code,
+                    resp_headers=resp_headers,
+                    resp_body=resp.get("body") or "",
+                    req_reconstructed=False,
+                )
+            except Exception:
+                pass
             # katana header key 为 Content-Type（大写连字符），做大小写兼容查找
             ct = (
                 resp_headers.get("Content-Type")

@@ -816,6 +816,17 @@ class GraphWriter:
                     ep_id=endpoint_id,
                     parent_id=parent_id,
                 )
+            # 内容失效：端点属性变化（status/title/body_hash/cert）→ 失效 httpx 的
+            # ScanRun — 新能力（分类/参数）自动重扫该端点，不再需要手动 Force。
+            # 真实测试暴露：旧端点带旧标记，分类属性新增后永不重分类。
+            if changed_fields:
+                try:
+                    session.run(
+                        "MATCH (sr:ScanRun {tool: 'httpx', target: $url}) DELETE sr",
+                        url=normalized,
+                    )
+                except Exception:
+                    pass
             return {"id": endpoint_id}
 
     def write_vulnerability(
