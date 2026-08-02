@@ -832,12 +832,16 @@ class GraphWriter:
         evidence: str = "",
         url: str = "",
         source: str = "",
+        status: str = "candidate",
         asset_id: str = "",
         _session: Any | None = None) -> dict[str, Any]:
         """写入 Vulnerability 节点，关联到 HTTPEndpoint 和 Subdomain。
 
         Subdomain 通过 Asset→RootDomain→Subdomain 完整链连接，
         不再创建孤儿子域名（修复 severity dashboard 查询丢失漏洞）。
+
+        status: candidate（未验证，流量信号/模板命中）→ confirmed（人工/AI 验证）。
+        ON MATCH 时 status 只在非空时覆盖 — 已 confirmed 的不会被后续写入降级。
         """
         import hashlib
 
@@ -873,9 +877,11 @@ class GraphWriter:
                     v.detail = $detail, v.impact = $impact,
                     v.remediation = $remediation, v.tags = $tags,
                     v.evidence = $evidence, v.url = $vuln_url,
+                    v.status = $status,
                     v.sources = [$source], v.asset_id = $asset_id,
                     v.first_seen = $now, v.last_seen = $now, v.is_new = true
-                  ON MATCH SET v.last_seen = $now
+                  ON MATCH SET v.last_seen = $now,
+                    v.status = CASE WHEN $status <> '' THEN $status ELSE v.status END
                 WITH v, coalesce(v.sources, []) AS _cur
                 SET v.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
                 WITH v
@@ -903,6 +909,7 @@ class GraphWriter:
                 tags=tags, evidence=evidence,
                 vuln_url=url, source=source, ep_id=endpoint_id,
                 host=host, root_domain=root_domain,
+                status=status or "candidate",
                 asset_id=asset_id, now=now,
             )
             return {"id": vuln_id}
