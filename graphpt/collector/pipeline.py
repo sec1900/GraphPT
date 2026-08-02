@@ -959,6 +959,9 @@ class PipelineExecutor:
 
         base = _base_tool(tool)  # "httpx:subdomain" → "httpx"
 
+        import time as _time  # 监控循环依赖（_tool_log_path 提取后局部 import 不再覆盖此处）
+        import hashlib as _hashlib
+
         bin_path = _find_tool(base)
         if not bin_path:
             return {"stage": index, "name": stage_name, "tool": tool, "status": "error",
