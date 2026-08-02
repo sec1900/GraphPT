@@ -1,6 +1,6 @@
 selectors:
   sqlmap:
-    desc: "SQLi 检测 — 只对已分类为 API 且含 query 参数的端点测试（路径≠参数；POST body 参数 v2）"
+    desc: "SQLi 检测 — 已分类为 API 且含 query 参数的端点（GET 注入）"
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
@@ -27,3 +27,34 @@ selectors:
       RETURN ep.url AS url
     mapping:
       url: "{url}"
+  sqlmap:post:
+    desc: "SQLi 检测 — 已分类为 API 且含 POST body 参数的端点（--data 注入）"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a, a) {
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category = 'api'
+          AND ep.params_body IS NOT NULL
+          AND size(ep.params_body) > 0
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category = 'api'
+          AND ep.params_body IS NOT NULL
+          AND size(ep.params_body) > 0
+        RETURN ep
+        UNION
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category = 'api'
+          AND ep.params_body IS NOT NULL
+          AND size(ep.params_body) > 0
+        RETURN ep
+      }
+      WITH DISTINCT ep
+      WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+      RETURN ep.url AS url, ep.params_body AS params_body
+    mapping:
+      url: "{url}"
+      params_body: "{data}"
+    transform:
+      data: join_params_body

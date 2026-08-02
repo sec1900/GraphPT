@@ -404,6 +404,21 @@ def _transform_join_tech(tech: Any) -> str:
 _register_transform("join_tech", _transform_join_tech)
 
 
+def _transform_join_params_body(params: Any) -> str:
+    """params_body 名字列表 → sqlmap --data 表单串（空值参数）。
+
+    ["file", "user"] → "file=&user="（sqlmap 对空值参数 fuzz）。
+    """
+    if isinstance(params, list):
+        return "&".join(f"{str(p).strip()}=" for p in params if str(p).strip())
+    if isinstance(params, str):
+        return "&".join(f"{p.strip()}=" for p in params.split(",") if p.strip())
+    return ""
+
+
+_register_transform("join_params_body", _transform_join_params_body)
+
+
 def _transform_nuclei_tags(tech: Any) -> str:
     """指纹驱动：端点 tech[] 切词匹配 nuclei tag。
 
@@ -1651,6 +1666,12 @@ class PipelineExecutor:
                 from graphpt.collector.scan_config import get_scan_config
                 asset_id = ctx.get("asset_id", "default")
                 return get_scan_config(asset_id).auth_headers_string()
+
+            # sqlmap POST body 参数：{data} → ctx 有 data 时输出 --data "xxx"，
+            # 无 data（GET query 模式）→ 空串
+            if key == "data":
+                val = ctx.get("data", "")
+                return f'--data "{val}"' if val else ""
 
             # 普通占位符
             val = ctx.get(key)
