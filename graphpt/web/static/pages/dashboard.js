@@ -20,8 +20,38 @@ export async function loadDashboard() {
   await loadAllCards();
   loadErrors();
   loadSeverityChart();
+  loadSignalStats();
   startSystemResourcesPolling();
   startRunningTasksPolling();
+}
+
+/**
+ * 信号健康度（误报率反哺的反馈面）— /api/signal-stats 排行渲染。
+ */
+async function loadSignalStats() {
+  const tbody = document.getElementById('dash-signal-stats');
+  if (!tbody) return;
+  try {
+    const res = await fetch(API + '/signal-stats');
+    const json = await res.json();
+    if (!json.ok || !Array.isArray(json.data) || !json.data.length) {
+      tbody.innerHTML = '<tr><td style="color:var(--muted);padding:4px">暂无信号统计（扫描验证后产生）</td></tr>';
+      return;
+    }
+    const rows = json.data.slice(0, 8)
+      .map(s => {
+        const fp = Math.min(100, Math.round((s.fp_rate || 0) * 100));
+        const color = fp >= 80 ? '#e05c5c' : fp >= 50 ? '#d9a03c' : '#4caf7d';
+        const bar = `<div style="background:var(--bg);border-radius:2px;height:4px;margin-top:2px;overflow:hidden"><div style="width:${fp}%;height:100%;background:${color}"></div></div>`;
+        return `<tr><td style="padding:3px 2px">${esc(s.source || '?')}:${esc(s.vuln_type || '?')}</td>
+          <td style="padding:3px 2px;text-align:right;font-size:9px;color:var(--muted)">${fp}% (${s.total})</td>
+          <td style="padding:3px 2px;width:80px">${bar}</td></tr>`;
+      })
+      .join('');
+    tbody.innerHTML = rows;
+  } catch (e) {
+    tbody.innerHTML = '<tr><td style="color:var(--muted);padding:4px">—</td></tr>';
+  }
 }
 
 /**
