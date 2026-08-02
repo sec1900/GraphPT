@@ -56,3 +56,40 @@ mappings:
     tags: [changjietong]
   hanwang:
     tags: [hanwang]
+
+# ---- 云攻击面（实战方法论：云环境优先）----
+# product 未命中时，这些 tags 由 Agent/手动快速轮启用
+  mongo:
+    tags: [nosqli, mongodb]
+  mongodb:
+    tags: [nosqli, mongodb]
+  couchdb:
+    tags: [nosqli, couchdb]
+  elasticsearch:
+    tags: [elasticsearch, nosqli]
+  grafana:
+    tags: [grafana]
+  gitlab:
+    tags: [gitlab]
+  aws:
+    tags: [aws, s3]
+  s3:
+    tags: [aws, s3]
+  lambda:
+    tags: [aws, lambda]
+  cognito:
+    tags: [aws, cognito]
+  sqs:
+    tags: [aws, sqs]
+  # 头注入（UA/Referer/X-Forwarded-For 等 — 常被忽略的注入点）
+  header:
+    tags: [header-injection, header]
+  nginx:
+    tags: [nginx, misconfig]
+  openresty:
+    tags: [nginx, misconfig]
+  # 通用云/API 网关
+  api-gateway:
+    tags: [aws, apigateway]
+  waf:
+    tags: [waf-detect]

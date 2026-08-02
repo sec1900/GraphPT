@@ -198,6 +198,24 @@ def _signal_records(url: str, method: str, req_body: str, resp_body: str,
     except Exception:
         pass
 
+    # 头注入候选信号：响应头包含请求头反射（UA/Referer/XFF 等 —
+    # 实战方法论：头参数是常被忽略的注入点，UA SQLi 全线打）。
+    try:
+        _headers_l = headers_text.lower()
+        if any(_headers_l.count(h) >= 1 for h in ("user-agent", "referer", "x-forwarded-for", "x-requested-with")):
+            # 请求头名出现在响应头里 = 反射证据
+            reflected = [h for h in ("user-agent", "referer", "x-forwarded-for", "x-requested-with")
+                         if h in _headers_l]
+            signals.append({
+                "signal_type": "header_reflection",
+                "vuln_type": "info-leak",
+                "title": f"请求头反射（{','.join(reflected)}）— 头注入候选",
+                "confidence": 0.5,
+                "evidence": f"reflected_headers={reflected}",
+            })
+    except Exception:
+        pass
+
     # 敏感路径
     for pat in _SENSITIVE_PATH_PATTERNS:
         if re.search(pat, url_l):

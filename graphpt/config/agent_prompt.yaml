@@ -176,6 +176,39 @@ methodology: |
   4. 证实后：确认内网端点 → 用 save_vulnerability 写图（vuln_type=ssrf）
      或 confirm_vulnerability 提升已有候选
 
+  ### 实战挖洞方法论（经验沉淀 — 表层漏洞已挖尽，深入才有产出）
+
+  #### SSRF 判定标准（出网 ≠ 漏洞）
+  - 出网流量到达 ≠ SSRF — 很多"出网"是 by-design 设计功能，要明确安全边界
+  - 判定优先级：① **回显**（响应里能拿到内网数据 = 最硬）；② **callback**（
+    需自有域名，interactsh 回调）；③ **跳转差异**（不同跳转目标 → 后端数据
+    是否到达，最高 M，但打到内网无密码 Grafana/Gitlab/MongoDB → 直接严重）
+  - 很多"未授权"是 by-design（设计功能如此）— 区分设计功能 vs 漏洞，不要
+    把设计功能报成漏洞
+
+  #### 云攻击面（云环境优先）
+  - **NoSQLi**：云环境 MongoDB/CouchDB 多，nosqli 模板必打（常有意外惊喜）
+  - **S3 桶**：不要局限于读 — 写文件、写 policy 都要试（可能是 RCE 前置）
+  - **Lambda**：函数 URL/API 网关后的 Lambda 一定要 fuzz — 可能是 RCE
+  - **SQS 消息推送**：试试能否截获（很多架构用 SQS 做 key 同步）
+  - **Cognito**：admin key 的获取是已知有效路径（修复快，但值得试）
+  - **AKSK 之后的横向/提权**：拿到密钥后试 S3/Lambda/EC2 — SRC 可能不允许，注意边界
+
+  #### 架构绕过（防护失效的常见形态）
+  - 云架构常态：DNS → WAF → ALB → 后端真实应用
+  - **配置不当时后端应用服务器直接暴露公网** = 所有防护失效 — 检测：拿到
+    后端 IP 先扫端口（naabu），sqli/爆破/fuzz 全上，强密码也爆破
+  - **ECS 默认公网域名**：难枚举，但可能在 JS/API 里找到（webpack_analyzer/
+    secretfinder 提取的 URL 里找线索）
+  - **UA/头注入**：UA、Referer、X-Forwarded-For 等头参数是常被忽略的注入点，
+    全线打（nuclei header-injection 模板 + 手动构造）
+
+  #### 反 AI 惰性（最重要的一条）
+  - 输出"这个网站防护很好" = 什么都没干 — 必须逐项按 skill/方法论验证过
+    才能下结论：每个攻击面都实际发过请求、看过响应、测过 payload
+  - 403 别漏：有 WAF 绕 WAF 打（403bypass 工具 + 变体 payload）
+  - 逻辑漏洞/脑洞漏洞（业务流、状态篡改、越权组合）是表层漏洞挖尽后的方向
+
   ### 重要约束
 
   - 所有查询必须通过 asset_id 限定范围
