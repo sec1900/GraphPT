@@ -60,17 +60,18 @@ _SENSITIVE_PATH_PATTERNS = [
     r"\.bak", r"\.sql", r"\.env", r"\.zip", r"\.tar", r"\.gz", r"\.log",
 ]
 
+# 注意：haystack 已 lower() — 模式必须小写或带 (?i)，否则大写特征永不命中
 _ANOMALY_PATTERNS = [
     r"traceback", r"exception in", r"at java\.", r"\.php on line \d+",
     r"sql syntax", r"mysql_", r"fatal error", r"stack trace",
-    r"undefined variable", r"ORA-\d{4,}", r"org\.apache", r"com\.mysql",
-    r"psql:", r"sqlite3\.OperationalError", r"javax\.servlet",
-    r"\.NET[^<]{0,30}Exception", r"uncaught",
+    r"undefined variable", r"ora-\d{4,}", r"org\.apache", r"com\.mysql",
+    r"psql:", r"sqlite3\.operationalerror", r"javax\.servlet",
+    r"\.net[^<]{0,30}exception", r"uncaught",
 ]
 
 _SECRET_PATTERNS = [
-    r"AKIA[0-9A-Z]{16}",                     # AWS Access Key
-    r"-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----",
+    r"akia[0-9a-z]{16}",                     # AWS Access Key
+    r"-----begin (rsa|ec|openssh)?private key-----",
     r"(?i)(api[_-]?key|secret|password|passwd|pwd|token)\s*[=:]\s*[^\s&\"'<>]{6,}",
     r"(?i)authorization:\s*(basic|bearer)\s+\S+",
     r"(?i)set-cookie:.*(session|token|auth)[^;]{6,}",
@@ -188,6 +189,8 @@ def _signal_records(url: str, method: str, req_body: str, resp_body: str,
                 "vuln_type": "info-leak",
                 "title": f"敏感路径暴露: {pat}",
                 "confidence": 0.85,
+                # evidence 标记 sensitive_path — verifier 的 info-leak 分支据此判"可达即 verified"
+                "evidence": f"sensitive_path pattern={pat}",
             })
             break
 
@@ -332,22 +335,25 @@ def _ai_judge(signals: list[dict]) -> list[dict]:
         try:
             raw = _call_ai(SYSTEM_PROMPT, user)
         except Exception as exc:
+            # AI 不可用：保留该批规则信号原样输出（降级不丢信号）
             print(f"[traffic_analyzer] ai_call_failed: {exc}", file=sys.stderr)
+            results.extend(batch)
             continue
         parsed = _extract_json_array(raw) or []
-        by_idx: dict[int, dict] = {}
+        # 关联策略：优先按 AI 回显的 url 精确匹配；回显 url 缺失/不可匹配时
+        # 按输入顺序对齐（AI 按输入顺序输出）。不再把 url 当数字下标解析。
+        by_url: dict[str, dict] = {}
         for item in parsed:
             if isinstance(item, dict) and "vuln_type" in item:
-                try:
-                    idx = int(str(item.get("url", "")).strip() or 0)
-                    if str(item.get("url", "")).strip().isdigit():
-                        by_idx[idx] = item
-                except ValueError:
-                    pass
-        # 简单关联：按顺序（AI 通常按输入顺序输出）
+                u = str(item.get("url", "") or "").strip()
+                if u:
+                    by_url.setdefault(u, item)
         for idx, sig in enumerate(batch):
-            item = by_idx.get(idx)
-            if not item:
+            item = by_url.get(str(sig.get("url", "")) or "") or (
+                parsed[idx] if idx < len(parsed) and isinstance(parsed[idx], dict)
+                else None
+            )
+            if not item or "vuln_type" not in item:
                 continue
             vuln = str(item.get("vuln_type", "") or "").strip().lower()
             if vuln and vuln != "none":

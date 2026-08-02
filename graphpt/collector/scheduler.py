@@ -307,14 +307,29 @@ def _build_dependency_layers() -> list[dict[str, Any]]:
             layer = _NODE_LAYER_ORDER.get(node_type)
             if layer is None:
                 continue  # 未知节点类型跳过
-            # 某些工具有多个 use_on → 不同层注册不同别名
-            full_name = tool_name
-            if len(use_on) > 1 and node_type != list(use_on.keys())[0]:
-                # 多 use_on 工具：第二项起加别名（如 httpx → httpx:port）
-                # 但如果 rule 里已经有 command 覆盖，用别名区分
-                pass
-            layer_tools.setdefault(layer, set()).add(full_name)
+            layer_tools.setdefault(layer, set()).add(tool_name)
             layer_nodes.setdefault(layer, node_type)
+
+        # 冒号别名选择器（tool:alias，如 sqlmap:post）注册到 base tool 所在层 —
+        # 否则别名工具只存在于 targets.yaml，调度器层永远派发不到
+        targets_file = yaml_file.parent / "targets.yaml"
+        if targets_file.is_file():
+            try:
+                tdata = _yaml.safe_load(targets_file.read_text(encoding="utf-8")) or {}
+            except Exception:
+                tdata = {}
+            selectors = tdata.get("selectors", {}) if isinstance(tdata, dict) else {}
+            if isinstance(selectors, dict):
+                for sel_name in selectors:
+                    if ":" not in sel_name:
+                        continue
+                    base_name, suffix = sel_name.split(":", 1)
+                    if base_name != tool_name or not suffix:
+                        continue
+                    for ln, tools in layer_tools.items():
+                        if tool_name in tools:
+                            layer_tools[ln].add(sel_name)
+                            break
 
     # 按层号排序，构建 layers 列表
     layers = []
@@ -371,8 +386,15 @@ def _count_targets(tool: str, asset_id: str, force_rescan: bool = False) -> int:
 
         # Force Rescan 模式：移除 ScanRun 检查（与 pipeline._query_targets 逻辑一致）
         if force_rescan:
+            # 兼容 AND / WHERE 两种 NOT EXISTS 写法（否则半数工具强制重扫静默失效）
             query = re.sub(
-                r"\s*AND NOT EXISTS \{\s*MATCH \(sr:ScanRun\)[^}]*\}",
+                r"\s*AND\s+NOT EXISTS \{\s*MATCH \(sr:ScanRun\)[^}]*\}",
+                "",
+                query,
+                flags=re.IGNORECASE
+            )
+            query = re.sub(
+                r"\s*WHERE\s+NOT EXISTS \{\s*MATCH \(sr:ScanRun\)[^}]*\}",
                 "",
                 query,
                 flags=re.IGNORECASE

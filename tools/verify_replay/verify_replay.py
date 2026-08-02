@@ -39,11 +39,11 @@ def _load_candidates(urls: list[str]) -> list[dict]:
                 """
                 MATCH (v:Vulnerability)
                 WHERE v.url IN $urls AND coalesce(v.status, 'candidate') = 'candidate'
+                OPTIONAL MATCH (v)<-[:MAY_BE_VULNERABLE_TO]-(ep:HTTPEndpoint)
                 RETURN v.id AS vid, v.type AS vuln_type, v.title AS title,
                        v.severity AS severity, v.detail AS detail,
                        v.evidence AS evidence, v.url AS url,
-                       CASE WHEN v.url STARTS WITH 'ep:' THEN 'GET'
-                            ELSE 'GET' END AS method
+                       coalesce(ep.method, 'GET') AS method
                 """,
                 urls=urls,
             ).data()
@@ -93,10 +93,12 @@ def main() -> int:
         if not url:
             continue
         traffic = _load_traffic(url)
+        # method 优先图内端点，其次流量记录，最后 GET（POST 候选 identity 须一致）
+        method = str(cand.get("method") or (traffic or {}).get("method") or "GET")
         result = verify_candidate(
             url=url,
             vuln_type=str(cand.get("vuln_type", "") or ""),
-            method=str(cand.get("method", "GET") or "GET"),
+            method=method,
             evidence=str(cand.get("evidence", "") or ""),
             detail=str(cand.get("detail", "") or ""),
             traffic=traffic,

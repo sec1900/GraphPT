@@ -75,21 +75,28 @@ def _auto_fill_and_submit(page, username: str, password: str) -> bool:
         return False
 
 
-def _wait_for_login_cookies(context, initial_names: set[str], timeout_s: int) -> list[dict]:
-    """轮询等待新的会话类 Cookie 出现（手动/自动模式通用）。"""
+def _wait_for_login_cookies(context, initial: dict[str, str], timeout_s: int) -> list[dict]:
+    """轮询等待登录态 Cookie（手动/自动模式通用）。
+
+    检测两件事：新出现的 Cookie 名，或**同名 Cookie 值变化**
+    （很多站点登录前已有同名 session/CSRF cookie，登录后仅值变化）。
+    """
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         cookies = context.cookies()
         new_session = [
             c for c in cookies
-            if c["name"] not in initial_names
+            if (c["name"] not in initial or c["value"] != initial.get(c["name"], ""))
             and any(h in c["name"].lower() for h in _SESSION_KEY_HINTS)
         ]
         if new_session:
             return new_session
         time.sleep(2)
-    # 超时：有新增 cookie 也算（宽松）
-    return [c for c in context.cookies() if c["name"] not in initial_names]
+    # 超时：宽松兜底（任意新增/值变化的 cookie）
+    return [
+        c for c in context.cookies()
+        if c["name"] not in initial or c["value"] != initial.get(c["name"], "")
+    ]
 
 
 def main() -> int:
@@ -131,7 +138,7 @@ def main() -> int:
             browser.close()
             return 1
 
-        initial_names = {c["name"] for c in context.cookies()}
+        initial = {c["name"]: c["value"] for c in context.cookies()}
 
         if args.manual:
             print(f"[login] 手动模式：请在浏览器中完成登录（超时 {args.timeout}s）...")
@@ -146,7 +153,7 @@ def main() -> int:
             browser.close()
             return 1
 
-        session_cookies = _wait_for_login_cookies(context, initial_names, args.timeout)
+        session_cookies = _wait_for_login_cookies(context, initial, args.timeout)
         browser.close()
 
         if not session_cookies:

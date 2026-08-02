@@ -80,10 +80,12 @@ function renderVulnerabilityRows(rows) {
     const arrowId = rowId + '-arrow';
     const vStatus = v.status || 'candidate';
     // 确认/驳回按钮（仅 candidate/verified 可操作；已 confirmed/dismissed 显示只读）
+    // v.id 是外部数据 — 内联 onclick 用 encodeURIComponent 防引号逃逸（XSS）
+    const idEnc = encodeURIComponent(v.id || '');
     const actions = vStatus === 'confirmed' || vStatus === 'dismissed'
       ? '<span style="font-size:11px;color:var(--muted)">终态</span>'
-      : `<button class="btn ok small" onclick="event.stopPropagation();Vulnerabilities.setVulnStatus('${esc(v.id)}','confirm',this)">✓ 确认</button>
-         <button class="btn outline small" onclick="event.stopPropagation();Vulnerabilities.setVulnStatus('${esc(v.id)}','dismiss',this)">✗ 驳回</button>`;
+      : `<button class="btn ok small" onclick="event.stopPropagation();Vulnerabilities.setVulnStatus('${idEnc}','confirm',this)">✓ 确认</button>
+         <button class="btn outline small" onclick="event.stopPropagation();Vulnerabilities.setVulnStatus('${idEnc}','dismiss',this)">✗ 驳回</button>`;
     return `<tr id="${rowId}" onclick="Vulnerabilities.vulnToggle('${rowId}','${detailId}')" style="cursor:pointer">
       <td style="width:24px;text-align:center;color:var(--muted);font-size:10px" id="${arrowId}">▶</td>
       <td>${severityBadge(v.severity)}</td>
@@ -93,7 +95,7 @@ function renderVulnerabilityRows(rows) {
         ${detail ? '<div style="color:var(--muted);font-size:12px;margin-top:4px">' + esc(detail.substring(0,200)) + (detail.length>200?'...':'') + '</div>' : ''}
       </td>
       <td>
-        ${url ? '<a href="' + esc(url) + '" target="_blank" style="color:var(--accent);text-decoration:none" onclick="event.stopPropagation()">' + esc(url) + '</a>' : '<span style="color:var(--muted)">-</span>'}
+        ${isSafeUrl(url) ? '<a href="' + esc(url) + '" target="_blank" style="color:var(--accent);text-decoration:none" onclick="event.stopPropagation()">' + esc(url) + '</a>' : '<span style="color:var(--muted)">-</span>'}
         <div style="font-size:11px;color:var(--muted)">${v.status_code ? statusBadge(v.status_code) : ''} ${esc(v.endpoint_title || '')}</div>
       </td>
       <td>${sourceTags}</td>
@@ -121,6 +123,7 @@ function vulnStatusBadge(status) {
 
 async function setVulnStatus(id, action, btn) {
   if (!id) return;
+  id = decodeURIComponent(id);
   try {
     const res = await fetch(`${API}/vulnerabilities/${encodeURIComponent(id)}/${action}`, { method: 'POST' });
     const json = await res.json();
@@ -130,6 +133,12 @@ async function setVulnStatus(id, action, btn) {
   } catch (e) {
     toast(e.message, false);
   }
+}
+
+// 仅放行 http/https 链接（防 javascript: 等协议注入）
+function isSafeUrl(u) {
+  if (!u) return false;
+  return /^https?:\/\//i.test(u);
 }
 
 function severityBadge(severity) {

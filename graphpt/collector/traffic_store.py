@@ -204,8 +204,12 @@ def query_traffic(
         clauses.append("asset_id = ?")
         params.append(asset_id)
     if url_pattern:
-        clauses.append("url LIKE ?")
-        params.append(f"%{url_pattern}%")
+        # 转义 LIKE 元字符（%/_ 是通配符 — URL 常含 %20/%2F 或下划线，
+        # 不转义会误匹配其他端点的流量记录）
+        escaped = (str(url_pattern).replace("\\", "\\\\")
+                   .replace("%", "\\%").replace("_", "\\_"))
+        clauses.append("url LIKE ? ESCAPE '\\'")
+        params.append(f"%{escaped}%")
     if since_ts:
         clauses.append("ts >= ?")
         params.append(since_ts)

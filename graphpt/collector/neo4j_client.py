@@ -877,7 +877,7 @@ class GraphWriter:
                     v.detail = $detail, v.impact = $impact,
                     v.remediation = $remediation, v.tags = $tags,
                     v.evidence = $evidence, v.url = $vuln_url,
-                    v.status = $status,
+                    v.status = CASE WHEN $status <> '' THEN $status ELSE 'candidate' END,
                     v.sources = [$source], v.asset_id = $asset_id,
                     v.first_seen = $now, v.last_seen = $now, v.is_new = true
                   ON MATCH SET v.last_seen = $now,
@@ -909,7 +909,7 @@ class GraphWriter:
                 tags=tags, evidence=evidence,
                 vuln_url=url, source=source, ep_id=endpoint_id,
                 host=host, root_domain=root_domain,
-                status=status or "candidate",
+                status=status or "",  # 空串：ON MATCH 不覆盖（防降级），ON CREATE 默认 candidate
                 asset_id=asset_id, now=now,
             )
             return {"id": vuln_id}

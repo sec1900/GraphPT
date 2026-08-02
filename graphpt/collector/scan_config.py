@@ -124,6 +124,8 @@ class ScanConfig:
         value = auth.get("value", "")
         if not value:
             return ""
+        # 清洗双引号 — 命令经 _split_command 按双引号切分，值含 " 会碎片化参数
+        value = value.replace('"', "%22").replace("\n", " ").replace("\r", " ")
         atype = auth.get("type", "cookie")
         if atype == "cookie":
             return f'-H "Cookie: {value}"'
