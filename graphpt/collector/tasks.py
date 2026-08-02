@@ -145,7 +145,7 @@ def _seed_asset_from_targets(asset_id: str) -> dict[str, int]:
     for domain in (targets.get("domains") or []):
         d = str(domain).strip().strip(".").lower()
         if d:
-            r = writer.write_subdomain(d, asset_id, root_domain=d, source="targets.yaml")
+            r = writer.write_domain(d, asset_id, source="targets.yaml")
             if r.get("created"):
                 counts["domains"] += 1
 
@@ -153,9 +153,7 @@ def _seed_asset_from_targets(asset_id: str) -> dict[str, int]:
         s = str(sub).strip().strip(".").lower()
         if not s:
             continue
-        parts = s.split(".")
-        root = ".".join(parts[-2:]) if len(parts) >= 2 else s
-        r = writer.write_subdomain(s, asset_id, root_domain=root, source="targets.yaml")
+        r = writer.write_domain(s, asset_id, source="targets.yaml")
         if r.get("created"):
             counts["subdomains"] += 1
 
@@ -197,9 +195,7 @@ def _seed_asset_from_targets(asset_id: str) -> dict[str, int]:
             writer.write_ip(host, asset_id=asset_id, source="targets.yaml")
             counts["ips"] += 1
         except ValueError:
-            parts = host.split(".")
-            root = ".".join(parts[-2:]) if len(parts) >= 2 else host
-            writer.write_subdomain(host, asset_id, root_domain=root, source="targets.yaml")
+            writer.write_domain(host, asset_id, source="targets.yaml")
             counts["urls"] += 1
 
     return counts
@@ -213,16 +209,24 @@ def _run_single_tool_pipeline(
     stage_name: str = "",
     params: dict[str, str] | None = None,
     command: str | None = None,
+    force_rescan: bool = False,
 ) -> dict:
-    """通过 PipelineExecutor 运行单工具任务，避免任务层维护第二套扫描逻辑。"""
+    """通过 PipelineExecutor 运行单工具任务，避免任务层维护第二套扫描逻辑。
+
+    force_rescan: True 时忽略 ScanRun 记录，强制重新扫描所有目标。
+    """
     from graphpt.collector.pipeline import PipelineExecutor, _tool_command
     target_overrides = {tool: targets} if targets else None
+
+    # 将 force_rescan 传递到 executor 的 context
+    ctx = {"force_rescan": force_rescan} if force_rescan else {}
 
     executor = PipelineExecutor(
         {"stages": [{"name": stage_name or tool, "tool": tool, "command": command or _tool_command(tool)}]},
         asset_id=asset_id,
         params=params,
         target_overrides=target_overrides,
+        ctx=ctx,
     )
     result = executor.execute()
     log_path = executor.ctx.get("_last_tool_log", "")
@@ -344,7 +348,7 @@ def passive_recon(self, asset_id: str | None = None):
         subs = _query_crtsh(domain)
         crt_found += len(subs)
         for sub in subs:
-            r = writer.write_subdomain(sub, asset_id, root_domain=domain, source="crt.sh")
+            r = writer.write_domain(sub, asset_id, source="crt.sh")
             if r.get("created"):
                 crt_written += 1
         crt_detail[domain] = len(subs)

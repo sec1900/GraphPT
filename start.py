@@ -1,8 +1,11 @@
 """GraphPT 服务启动器 — 启动 Web 服务器。"""
-import subprocess, sys, time, os, socket
+import subprocess, sys, time, os, socket, argparse
 from pathlib import Path
 
-PROJECT = Path(__file__).parent
+PROJECT = Path(__file__).resolve().parent
+# 确保项目根在 sys.path 上，支持双击运行和任意 CWD 启动
+if str(PROJECT) not in sys.path:
+    sys.path.insert(0, str(PROJECT))
 
 
 def port_in_use(port: int) -> bool:
@@ -16,8 +19,12 @@ def port_in_use(port: int) -> bool:
         return True
 
 
-def run_service(name: str, cmd: list[str], cwd: str, port: int = 0):
-    """运行服务。如果端口已被占用（说明已有一个实例在跑），则跳过。崩溃后等待几秒自动重启。"""
+def run_service(name: str, cmd: list[str], cwd: str, port: int = 0, debug: bool = False):
+    """运行服务。如果端口已被占用（说明已有一个实例在跑），则跳过。崩溃后等待几秒自动重启。
+
+    Args:
+        debug: True 时不自动重启，遇到错误直接退出
+    """
     while True:
         if port and port_in_use(port):
             print(f"[{name}] Port {port} already in use. Assuming another instance is running.")
@@ -36,9 +43,147 @@ def run_service(name: str, cmd: list[str], cwd: str, port: int = 0):
             return
         except Exception as e:
             print(f"[{name}] Error: {e}")
+            if debug:
+                import traceback
+                traceback.print_exc()
+                return
+
+        if debug:
+            print(f"[{name}] Debug mode: not restarting")
+            return
 
         print(f"[{name}] Restarting in 5s...")
         time.sleep(5)
+
+
+def _wait_for_port(host: str, port: int, timeout: float = 30) -> bool:
+    """轮询等待端口可用，返回 True 表示成功。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1)
+            s.connect((host, port))
+            s.close()
+            return True
+        except OSError:
+            time.sleep(0.3)
+    return False
+
+
+def _start_redis() -> bool:
+    """自动启动 Redis（优先项目自带的 Memurai）。已运行则跳过。"""
+    # 先检查是否已在运行
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1)
+        s.connect(("127.0.0.1", 6379))
+        s.close()
+        print("[OK] Redis is already running (localhost:6379)")
+        return True
+    except OSError:
+        pass
+
+    # 找可执行文件：优先项目自带 Memurai，其次 PATH 里的 redis-server
+    candidates = []
+    memurai_exe = PROJECT / "infra" / "memurai" / "memurai.exe"
+    if memurai_exe.exists():
+        candidates.append(("Memurai (bundled)", str(memurai_exe), str(memurai_exe.parent)))
+    candidates.append(("System redis-server", "redis-server", str(PROJECT)))
+
+    for label, exe, cwd in candidates:
+        print(f"[init] Starting {label}: {exe} ...")
+        try:
+            # 不在控制台窗口里显示 Redis 的输出（STARTF_USESHOWWINDOW）
+            si = None
+            if os.name == "nt":
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                si.wShowWindow = subprocess.SW_HIDE
+            subprocess.Popen([exe], cwd=cwd, startupinfo=si,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            print(f"       {exe} not found, trying next...")
+            continue
+        except Exception as exc:
+            print(f"       failed to start: {exc}")
+            continue
+
+        if _wait_for_port("127.0.0.1", 6379):
+            print(f"[OK] Redis started ({label})")
+            return True
+        else:
+            print(f"[X]  Redis ({label}) started but port didn't respond in time")
+
+    return False
+
+
+def _start_neo4j() -> bool:
+    """自动启动 Neo4j（项目自带的 infra/neo4j）。已运行则跳过。"""
+    # 先检查是否已在运行
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1)
+        s.connect(("127.0.0.1", 7687))
+        s.close()
+        print("[OK] Neo4j is already running (bolt://localhost:7687)")
+        return True
+    except OSError:
+        pass
+
+    neo4j_dir = PROJECT / "infra" / "neo4j"
+    if not neo4j_dir.exists():
+        print("[X]  Neo4j not found at infra/neo4j/")
+        return False
+
+    if os.name == "nt":
+        neo4j_bat = neo4j_dir / "bin" / "neo4j.bat"
+        if neo4j_bat.exists():
+            cmd = [str(neo4j_bat), "console"]
+        else:
+            print("[X]  Neo4j batch file not found")
+            return False
+    else:
+        neo4j_bin = neo4j_dir / "bin" / "neo4j"
+        cmd = [str(neo4j_bin), "start"]
+
+    print(f"[init] Starting Neo4j: {' '.join(cmd)} ...")
+    try:
+        subprocess.Popen(cmd, cwd=str(PROJECT),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as exc:
+        print(f"[X]  Failed to start Neo4j: {exc}")
+        return False
+
+    # Neo4j 启动比较慢，给 60s
+    if _wait_for_port("127.0.0.1", 7687, timeout=60):
+        print("[OK] Neo4j started")
+        return True
+    else:
+        print("[X]  Neo4j process launched but bolt://7687 not responding after 60s")
+        return False
+
+
+def _check_dependencies():
+    """检查并自动启动必需服务（Neo4j + Redis）。启动失败则报错退出。"""
+    missing = []
+
+    if not _start_neo4j():
+        missing.append("Neo4j")
+        print("[X] Neo4j could not be started")
+        print("    Manual: infra\\neo4j\\bin\\neo4j.bat console")
+
+    if not _start_redis():
+        missing.append("Redis/Memurai")
+        print("[X] Redis/Memurai could not be started")
+        print("    Manual: infra\\memurai\\memurai.exe  or  redis-server")
+
+    if missing:
+        print(f"\n[ERROR] Failed to start: {', '.join(missing)}")
+        print("GraphPT cannot start without them.")
+        if sys.stdin and sys.stdin.isatty():
+            input("\nPress Enter to exit...")
+        sys.exit(1)
 
 
 def _clean_redis_on_startup():
@@ -60,32 +205,50 @@ def _clean_redis_on_startup():
         if removed:
             print(f"[init] Cleaned {removed} stale keys from Redis (scheduler + scan:resume)")
     except Exception:
-        pass  # Redis 未启动时静默跳过
+        pass  # 已在 _check_dependencies 检查过
 
 
 def main():
     from concurrent.futures import ThreadPoolExecutor
 
-    _clean_redis_on_startup()
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='GraphPT Service Launcher')
+    parser.add_argument('--debug', action='store_true',
+                        help='Debug mode: skip dependency checks, show verbose errors, no auto-restart')
+    parser.add_argument('--port', type=int, default=8080,
+                        help='Web server port (default: 8080)')
+    parser.add_argument('--host', type=str, default='0.0.0.0',
+                        help='Web server host (default: 0.0.0.0)')
+    args = parser.parse_args()
+
+    print("GraphPT Services Starting...")
+    print(f"Project: {PROJECT}")
+    print(f"Python:  {sys.executable}")
+    if args.debug:
+        print(f"Mode:    DEBUG (no checks, no restart)")
+    print()
+
+    # 检查依赖服务（Neo4j + Redis）- debug 模式跳过
+    if not args.debug:
+        _check_dependencies()
+        _clean_redis_on_startup()
+    else:
+        print("[DEBUG] Skipping dependency checks and Redis cleanup")
+        print()
 
     services = [
         {
             "name": "web-server",
             "cmd": [
                 sys.executable, "-m", "uvicorn", "graphpt.web.app:web_app",
-                "--host", "0.0.0.0", "--port", "8080",
+                "--host", args.host, "--port", str(args.port),
             ],
-            "port": 8080,
+            "port": args.port,
         },
     ]
 
-    print("GraphPT Services Starting...")
-    print(f"Project: {PROJECT}")
-    print(f"Python:  {sys.executable}")
-    print()
-
     with ThreadPoolExecutor(max_workers=len(services)) as pool:
-        futures = [pool.submit(run_service, s["name"], s["cmd"], str(PROJECT), s.get("port", 0))
+        futures = [pool.submit(run_service, s["name"], s["cmd"], str(PROJECT), s.get("port", 0), args.debug)
                    for s in services]
         try:
             for f in futures:

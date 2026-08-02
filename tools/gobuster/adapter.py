@@ -6,7 +6,9 @@ from typing import Any
 
 
 class GobusterAdapter(BaseAdapter):
-    """gobuster 多模式输出适配器 → DirEntry / Subdomain / IP / Port / HTTPEndpoint。
+    """gobuster 多模式输出适配器 → HTTPEndpoint / Subdomain / IP / Port。
+
+    废弃 DirEntry，统一使用 HTTPEndpoint。
 
     支持三种使用场景：
       - dir 模式: 目录爆破文本输出
@@ -22,7 +24,8 @@ class GobusterAdapter(BaseAdapter):
 
     # ---- 目录爆破解析（原 DirectoryTextAdapter 内联） ----
 
-    def _parse_dir_entries(self, text: str, endpoint_id: str, source: str) -> list[dict[str, Any]]:
+    def _parse_dir_entries(self, text: str, target_url: str, asset_id: str, source: str) -> list[dict[str, Any]]:
+        """解析目录爆破结果，输出 HTTPEndpoint"""
         findings: list[dict[str, Any]] = []
         for line in text.strip().splitlines():
             line = line.strip()
@@ -49,14 +52,21 @@ class GobusterAdapter(BaseAdapter):
                 elif "/" in p and not p.startswith("http"):
                     ct = p
 
+            # 构造完整 URL
+            from urllib.parse import urljoin
+            url = urljoin(target_url, path) if target_url else ""
+            if not url:
+                continue
+
             findings.append({
-                "type": "dir_entry",
-                "parent_id": endpoint_id,
-                "path": path,
+                "type": "http_endpoint",  # 改为 http_endpoint
+                "url": url,
                 "method": "GET",
                 "status_code": status_code,
                 "content_type": ct,
-                "size": size,
+                "content_length": size,
+                "crawl_status": "success",
+                "asset_id": asset_id,
                 "source": source,
             })
         return findings
@@ -124,8 +134,8 @@ class GobusterAdapter(BaseAdapter):
         unique: list[dict[str, Any]] = []
         for finding in findings:
             ftype = str(finding.get("type") or "")
-            if ftype == "dir_entry":
-                identity = str(finding.get("parent_id", "")) + str(finding.get("path", ""))
+            if ftype == "http_endpoint":
+                identity = str(finding.get("url", ""))
             elif ftype == "port":
                 identity = f"{finding.get('parent_id', '')}:{finding.get('port', '')}/{finding.get('protocol', '')}"
             elif ftype == "ip":
@@ -151,11 +161,9 @@ class GobusterAdapter(BaseAdapter):
         if domain and "." not in host:
             host = f"{host}.{domain}"
 
-        root_domain = self._root_for_host(host, ctx)
         findings: list[dict[str, Any]] = [{
-            "type": "subdomain",
+            "type": "domain",
             "value": host,
-            "root_domain": root_domain,
             "source": "gobuster",
             "asset_id": ctx.get("asset_id", ""),
         }]
@@ -163,7 +171,7 @@ class GobusterAdapter(BaseAdapter):
             findings.append({
                 "type": "ip",
                 "value": ip,
-                "parent_id": f"sub:{host}",
+                "parent_id": f"domain:{host}",
                 "source": "gobuster",
                 "asset_id": ctx.get("asset_id", ""),
             })
@@ -191,12 +199,12 @@ class GobusterAdapter(BaseAdapter):
         parent_id = ""
         if "." in host:
             findings.append({
-                "type": "subdomain",
+                "type": "domain",
                 "value": host,
-                "root_domain": self._root_for_host(host, ctx),
                 "source": "gobuster",
                 "asset_id": ctx.get("asset_id", ""),
             })
+            parent_id = f"domain:{host}"
             if ip:
                 findings.append({
                     "type": "ip",
@@ -234,11 +242,12 @@ class GobusterAdapter(BaseAdapter):
     def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:
         text = raw_output.decode("utf-8", errors="replace") if isinstance(raw_output, bytes) else raw_output
 
-        endpoint_id = ctx.get("parent_id", "") or _endpoint_id_from_url(str(ctx.get("target_url") or ""))
+        target_url = str(ctx.get("target_url") or "")
+        asset_id = ctx.get("asset_id", "")
         source = ctx.get("tool_name") or self.tool_name
 
         # 1) 目录爆破入口
-        findings = self._parse_dir_entries(text, endpoint_id, source)
+        findings = self._parse_dir_entries(text, target_url, asset_id, source)
 
         # 2) DNS / VHOST 覆盖行
         for line in text.strip().splitlines():

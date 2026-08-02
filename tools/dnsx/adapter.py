@@ -6,7 +6,7 @@ from typing import Any
 
 
 class DnsxAdapter(BaseAdapter):
-    """dnsx JSON 输出适配器 → IP + CNAME Finding。"""
+    """dnsx JSON 输出适配器 → IP + CNAME Finding（统一 Domain 节点）。"""
 
     tool_name = "dnsx"
 
@@ -47,12 +47,12 @@ class DnsxAdapter(BaseAdapter):
                     findings.append({
                         "type": "ip",
                         "value": ip_value,
-                        "parent_id": f"sub:{host}",
+                        "parent_id": f"domain:{host}",  # 改为 domain: 前缀
                         "source": "dnsx",
                         "asset_id": asset_id,
                     })
 
-            # CNAME 记录 → 存到 Subdomain 节点
+            # CNAME 记录 → 存到 Domain 节点
             cnames = obj.get("cname") or obj.get("CNAME") or []
             if isinstance(cnames, str):
                 cnames = [cnames]
@@ -62,7 +62,7 @@ class DnsxAdapter(BaseAdapter):
                     if not cn_val:
                         continue
                     findings.append({
-                        "type": "subdomain",
+                        "type": "domain",
                         "value": host,
                         "cname": cn_val,
                         "source": "dnsx",

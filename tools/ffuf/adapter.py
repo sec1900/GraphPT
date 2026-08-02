@@ -7,7 +7,10 @@ from typing import Any
 
 
 class FfufAdapter(BaseAdapter):
-    """ffuf JSONL 输出适配器 → DirEntry Finding。"""
+    """ffuf JSONL 输出适配器 → HTTPEndpoint Finding。
+
+    废弃 DirEntry，统一使用 HTTPEndpoint 存储发现的路径。
+    """
 
     tool_name = "ffuf"
 
@@ -93,23 +96,35 @@ class FfufAdapter(BaseAdapter):
 
     def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:
         text = raw_output.decode("utf-8", errors="replace") if isinstance(raw_output, bytes) else raw_output
-        endpoint_id = ctx.get("parent_id", "") or _endpoint_id_from_url(str(ctx.get("target_url") or ""))
+        asset_id = ctx.get("asset_id", "")
         findings: list[dict[str, Any]] = []
 
         for obj in self._iter_records(text):
             path = self._path_from_record(obj)
             if not path:
                 continue
-            parent_id = endpoint_id or _endpoint_id_from_url(str(obj.get("url") or obj.get("URL") or ""))
+
+            # 构造完整 URL
+            url = str(obj.get("url") or obj.get("URL") or "").strip()
+            if not url:
+                # 如果没有完整 URL，从 target_url 和 path 拼接
+                target_url = str(ctx.get("target_url") or "")
+                if target_url:
+                    from urllib.parse import urljoin
+                    url = urljoin(target_url, path)
+
+            if not url:
+                continue
 
             findings.append({
-                "type": "dir_entry",
-                "parent_id": parent_id,
-                "path": path,
+                "type": "http_endpoint",  # 改为 http_endpoint
+                "url": url,
                 "method": obj.get("method", "GET"),
                 "status_code": self._int_field(obj, "status", "status_code"),
                 "content_type": obj.get("content-type") or obj.get("content_type") or "",
-                "size": self._int_field(obj, "length", "content_length", "size"),
+                "content_length": self._int_field(obj, "length", "content_length", "size"),
+                "crawl_status": "success",
+                "asset_id": asset_id,
                 "source": "ffuf",
             })
         return findings

@@ -7,7 +7,7 @@ from typing import Any
 
 
 class CrtAdapter(BaseAdapter):
-    """crt.sh JSON 输出适配器 → 子域名 Finding。"""
+    """crt.sh JSON 输出适配器 → Domain Finding（统一节点模型）。"""
 
     tool_name = "crt"
 
@@ -15,7 +15,6 @@ class CrtAdapter(BaseAdapter):
         import json as _json
 
         text = raw_output.decode("utf-8", errors="replace") if isinstance(raw_output, bytes) else raw_output
-        root_domain = ctx.get("root_domain", "")
         asset_id = ctx.get("asset_id", "")
         findings: list[dict[str, Any]] = []
 
@@ -33,9 +32,8 @@ class CrtAdapter(BaseAdapter):
                 if sub and sub not in seen:
                     seen.add(sub)
                     findings.append({
-                        "type": "subdomain",
+                        "type": "domain",
                         "value": sub,
-                        "root_domain": root_domain or ".".join(sub.split(".")[-2:]),
                         "source": "crt",
                         "asset_id": asset_id,
                     })

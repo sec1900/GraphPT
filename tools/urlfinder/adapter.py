@@ -8,7 +8,7 @@ from urllib.parse import urlsplit as _urlsplit
 
 
 class UrlfinderAdapter(BaseAdapter):
-    """urlfinder JSONL 输出适配器 → Subdomain / HTTPEndpoint / File Finding。
+    """urlfinder JSONL 输出适配器 → Domain / HTTPEndpoint / File Finding（统一 Domain 节点）。
 
     urlfinder 纯被动收集历史 URL（Wayback/CommonCrawl/OTX），不实际抓取目标，
     因此产出的 HTTPEndpoint 标记 crawl_status="not_fetched"，供后续 httpx/katana 探测。
@@ -16,9 +16,9 @@ class UrlfinderAdapter(BaseAdapter):
     每行 JSON: {"url":"https://x.example.com/a","input":"example.com","source":"waybackarchive"}
 
     入图策略（findings 按列表顺序写入，故父节点先于子节点产出）：
-      1. 每个 URL 的 host → subdomain finding（确保 Subdomain 接入资产图）
+      1. 每个 URL 的 host → domain finding（确保 Domain 接入资产图）
       2. .js/.css/.json/.xml/.map → 先产出该 host 根 HTTPEndpoint（File 的父），再产出 file
-      3. 其余 URL → http_endpoint，parent_id=sub:<host>，crawl_status=not_fetched
+      3. 其余 URL → http_endpoint，parent_id=domain:<host>，crawl_status=not_fetched
     """
 
     tool_name = "urlfinder"
@@ -69,20 +69,17 @@ class UrlfinderAdapter(BaseAdapter):
 
             scheme = parts.scheme or "http"
 
-            # 1) host → subdomain（先于端点/文件产出，保证父节点存在）
+            # 1) host → domain（先于端点/文件产出，保证父节点存在）
             if host not in seen_hosts:
                 seen_hosts.add(host)
-                labels = host.split(".")
-                root = ".".join(labels[-2:]) if len(labels) >= 2 else host
                 findings.append({
-                    "type": "subdomain",
+                    "type": "domain",
                     "value": host,
-                    "root_domain": root,
                     "source": "urlfinder",
                     "asset_id": asset_id,
                 })
 
-            sub_id = f"sub:{host}"
+            domain_id = f"domain:{host}"
             path_lower = (parts.path or "").lower()
 
             # 2) 静态资源（图片/字体/媒体）→ 跳过
@@ -100,7 +97,7 @@ class UrlfinderAdapter(BaseAdapter):
                         "type": "http_endpoint",
                         "url": root_url,
                         "method": "GET",
-                        "parent_id": sub_id,
+                        "parent_id": domain_id,
                         "crawl_status": "not_fetched",
                         "source": "urlfinder",
                         "asset_id": asset_id,

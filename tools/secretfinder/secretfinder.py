@@ -251,13 +251,12 @@ def _extract_js_assets(content: str, js_url: str) -> list[dict]:
             continue
 
         host = (urlsplit(url).hostname or "").strip(".").lower()
-        # 绝对 URL 的 host 属于目标根域 → 子域名
+        # 绝对 URL 的 host 属于目标根域 → 域名
         if host and host != js_host and host.endswith("." + root) and host not in seen_hosts:
             seen_hosts.add(host)
             findings.append({
-                "type": "subdomain",
+                "type": "domain",
                 "value": host,
-                "root_domain": root,
                 "source_url": js_url,
             })
 
