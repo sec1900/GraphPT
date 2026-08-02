@@ -1,5 +1,5 @@
 desc: "Web 爬虫"
-command: "{bin} -list {urls_file} -jsonl -silent -jc -kf all -fx -headless -rate-limit 10 {auth_headers}"
+command: "{bin} -list {urls_file} -jsonl -silent -jc -kf all -fx -headless -d 3 -timeout 10 -c 10 -s breadth-first -e private-ips -rate-limit 10 {auth_headers}"
 use_on:
   Endpoint:
     desc: "爬取 Endpoint 链接、JS 和接口，批量模式"
