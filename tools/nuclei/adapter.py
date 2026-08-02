@@ -1,10 +1,42 @@
-"""nuclei adapter — 工具输出解析器。"""
+"""nuclei adapter — 工具输出解析器。
+
+nuclei JSONL 输出 → Vulnerability Finding。
+启用 -irr 时 JSONL 每行携带完整 raw 请求/响应（request/response 字段），
+成对写入 traffic_store —— 扫描链中唯一能拿到"原始全量请求+响应"的工具
+（httpx 受工具能力限制只能重建+预览）。
+"""
+
 from graphpt.collector.adapter import BaseAdapter, register_adapter
+from graphpt.collector.traffic_store import save_traffic_pair
 import json
 import re
 from typing import Any
-import re
 
+
+def _parse_raw_http(raw: str) -> tuple[dict[str, str], str]:
+    """解析 raw HTTP 文本（请求行/状态行 + 头 + 体）→ (headers, body)。
+
+    兼容 \r\n 与 \n 换行；nuclei -irr 输出的 request/response 字段即此格式。
+    """
+    if not raw:
+        return {}, ""
+    raw = str(raw)
+    header_end = raw.find("\r\n\r\n")
+    newline = "\r\n"
+    if header_end == -1:
+        header_end = raw.find("\n\n")
+        newline = "\n"
+        if header_end == -1:
+            return {}, raw  # 无头体分隔 → 整段当 body
+    header_section = raw[:header_end]
+    body = raw[header_end + len(newline) * 2:]
+    headers: dict[str, str] = {}
+    for line in header_section.split(newline)[1:]:  # 跳过请求行/状态行
+        if ":" in line:
+            key, _, value = line.partition(":")
+            if key.strip():
+                headers[key.strip()] = value.strip()
+    return headers, body
 
 
 class NucleiAdapter(BaseAdapter):
@@ -76,6 +108,30 @@ class NucleiAdapter(BaseAdapter):
             if key in seen:
                 continue
             seen.add(key)
+
+            # -irr 全量成对存储：request/response 字段是完整 raw HTTP
+            # （仅当 request 是 raw 请求行而非 curl 命令时）
+            try:
+                raw_req = str(obj.get("request", "") or "")
+                raw_resp = str(obj.get("response", "") or "")
+                if raw_req.startswith(("GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "HEAD ", "OPTIONS ")):
+                    req_headers, req_body = _parse_raw_http(raw_req)
+                    resp_headers, resp_body = _parse_raw_http(raw_resp)
+                    resp_status = 0
+                    try:
+                        resp_status = int(re.match(r"HTTP/\S+\s+(\d+)", raw_resp or "").group(1))
+                    except (AttributeError, ValueError):
+                        pass
+                    save_traffic_pair(
+                        method=method, url=endpoint_url,
+                        asset_id=asset_id, source="nuclei",
+                        req_headers=req_headers, req_body=req_body,
+                        resp_status=resp_status,
+                        resp_headers=resp_headers, resp_body=resp_body,
+                        req_reconstructed=False,  # nuclei -irr 是原始全量
+                    )
+            except Exception:
+                pass  # 流量存储失败不影响漏洞入图
 
             findings.append({
                 "type": "vulnerability",

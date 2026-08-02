@@ -1,0 +1,7 @@
+desc: "AI 补分类 — 对规则无法分类的端点做长尾兜底分类（置信度闸门，7 天重试窗口）"
+command: "python {tool_dir}/classifier.py -list {urls_file} --batch 40 --confidence 0.7"
+use_on:
+  HTTPEndpoint:
+    desc: "未分类端点 AI 补分类（批量，classifier.py 自查询图属性）"
+    params:
+      urls_file: "{urls_file}"

@@ -1,24 +1,47 @@
 selectors:
   nuclei:
-    desc: 漏洞扫描 — 全量端点批量盲扫
+    desc: 漏洞扫描 — 分类闸门（page/api/cms/login/upload + 未分类兼容）+ DirEntry 定向 + 指纹 tags 分流
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-        RETURN ep
+        WHERE ep.status_code > 0
+          AND (ep.category IS NULL OR ep.category IN ['page', 'api', 'cms', 'login', 'upload'])
+        RETURN ep.url AS url, coalesce(ep.tech, []) AS tech
         UNION
         MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-        RETURN ep
+        WHERE ep.status_code > 0
+          AND (ep.category IS NULL OR ep.category IN ['page', 'api', 'cms', 'login', 'upload'])
+        RETURN ep.url AS url, coalesce(ep.tech, []) AS tech
         UNION
         MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
-        RETURN ep
+        WHERE ep.status_code > 0
+          AND (ep.category IS NULL OR ep.category IN ['page', 'api', 'cms', 'login', 'upload'])
+        RETURN ep.url AS url, coalesce(ep.tech, []) AS tech
+        UNION
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:EXPOSES_PATH]->(d:DirEntry)
+        WHERE NOT (d.status_code IN [404, 301, 302]) AND d.path IS NOT NULL
+        RETURN CASE WHEN ep.url ENDS WITH '/'
+                    THEN substring(ep.url, 0, size(ep.url) - 1) + d.path
+                    ELSE ep.url + d.path END AS url,
+               [] AS tech
+        UNION
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:EXPOSES_PATH]->(d:DirEntry)
+        WHERE NOT (d.status_code IN [404, 301, 302]) AND d.path IS NOT NULL
+        RETURN CASE WHEN ep.url ENDS WITH '/'
+                    THEN substring(ep.url, 0, size(ep.url) - 1) + d.path
+                    ELSE ep.url + d.path END AS url,
+               [] AS tech
       }
-      WITH DISTINCT ep
-      WHERE ep.status_code > 0
-        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
-      RETURN ep.url AS url
+      WITH DISTINCT url, tech
+      WHERE url IS NOT NULL AND url <> ''
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = url }
+      RETURN url, tech
     mapping:
       url: "{urls_file}"
+      tech: "{tech}"
+    transform:
+      tech: nuclei_tags
   nuclei:takeover:
     desc: "子域名接管检测 — 对所有子域名扫描 takeover 模板"
     query: |

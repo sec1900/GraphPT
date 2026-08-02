@@ -119,6 +119,26 @@ methodology: |
   - **最小化** — 只扫描必要目标
   - **闭环** — 工具执行后必须回查图数据库
 
+  ### OOB（带外）验证 — 盲漏洞的取证通道
+
+  当发现以下特征时，使用 oob_callback 工具验证无回显类漏洞：
+  - SSRF 嫌疑：参数名为 url/file/path/redirect/load/src/dest/next 等，或请求可指定外部地址
+  - XXE 嫌疑：接口接受 XML 输入（Content-Type: application/xml）
+  - 盲 SQLi 嫌疑：带参 POST 但响应无差异
+  - 盲 RCE 嫌疑：可执行命令/模板注入的输入点
+
+  流程：
+  1. `oob_callback action=start` 获取回调域名（国内环境需指定可达的 server）
+  2. `oob_callback action=generate label=<场景>` 为每个测试生成唯一子域名 payload
+  3. 将 payload 注入目标请求（http_request / Bash curl）
+  4. 稍后 `oob_callback action=poll` 检查回调（利用等待间隙推进其他任务）
+  5. 回调真实性判断：interaction.remote_address 必须是目标服务器 IP 才算数；
+     确认后深入利用（如 SSRF 回调 → 探测云元数据）并写 confirmed finding
+  6. 结束 `oob_callback action=stop`
+
+  回调到达是强证据：比响应差异判断可靠，写 finding 时把 interaction 的
+  protocol/full_id/raw_request 一并写入 detail 作为取证。
+
   ### 重要约束
 
   - 所有查询必须通过 asset_id 限定范围
