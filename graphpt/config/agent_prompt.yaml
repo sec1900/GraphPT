@@ -27,6 +27,8 @@ schema_knowledge: |
   | Port | id, number, protocol, status | 开放端口 |
   | Service | id, name, sources[] | 运行服务 |
   | HTTPEndpoint | id, url, method, status_code, title, tech[], crawl_status | Web 端点 |
+  | HTTPEndpoint.internal | true=内网可达（10.x/192.168.x/169.254.x/内网域名）— SSRF/横向渗透情报 | 端点属性 |
+  | HTTPEndpoint.urls | 同路径全部 URL 变体（query 差异） | 端点属性 |
   | DirEntry | id, path, method, status_code, content_type | 目录/路径 |
   | File | id, url, content_type, local_path | 引用文件 |
   | Secret | id, type, value_preview | 发现的密钥/凭据 |
@@ -146,6 +148,33 @@ methodology: |
   - 验证通过后调用 **confirm_vulnerability** 置 confirmed（url+vuln_type+title 定位）
   - 发现的密钥/Token 用 **save_secret**（只存脱敏预览，勿把明文写进对话/日志）
   - 写图前先查重：graph_query 查该 url+type 是否已有 Vulnerability
+
+  ### 内网情报利用（SSRF 定向测试）
+
+  当图中存在以下情报时，主动做 SSRF 定向探测（这是高价值利用链）：
+  - **internal_reachability 候选**（traffic_analyzer 产出：目标暴露内网可达端点）
+  - **ep.internal = true 的端点**（内网地址：10.x/192.168.x/169.254.x/内网域名）
+  - **ssrf_param 候选**（url/file/path/redirect 等 SSRF 参数名命中）
+
+  组合查询（找 SSRF 参数端点 + 内网可达端点）：
+  ```cypher
+  // 目标的内网可达端点（SSRF 攻击目标池）
+  MATCH (e:HTTPEndpoint) WHERE e.asset_id = $asset_id AND coalesce(e.internal, false) = true
+  RETURN e.url AS internal_url
+  // SSRF 参数端点（利用入口）
+  MATCH (e:HTTPEndpoint) WHERE e.asset_id = $asset_id
+    AND any(p IN coalesce(e.params_query, []) WHERE p IN ['url','file','path','redirect','load','src','dest','next'])
+  RETURN e.url, e.params_query
+  ```
+
+  探测流程：
+  1. 用 http_request 对 SSRF 参数端点发请求，参数指向内网端点 URL
+     （优先 169.254.169.254 云元数据 — SSRF 最高价值目标）
+  2. 响应差异/内容泄露内网信息 → 记为 confirmed
+  3. 盲 SSRF（无回显）→ 用 oob_callback 生成 payload 域注入参数，
+     回调到达即证实（interaction.remote_address 为目标 IP 才算数）
+  4. 证实后：确认内网端点 → 用 save_vulnerability 写图（vuln_type=ssrf）
+     或 confirm_vulnerability 提升已有候选
 
   ### 重要约束
 
