@@ -19,6 +19,10 @@ class KatanaAdapter(BaseAdapter):
 
     tool_name = "katana"
 
+    # SPA 壳检测基准：host → 首个 HTML 响应长度（同 host 后续 HTML
+    # 长度差 <10% 判为壳路径，不写 HTTPEndpoint）
+    _shell_baselines: dict[str, int] = {}
+
     # 接口路径关键词
     _API_PATH_KEYWORDS = (
         "/api/", "/rest/", "/graphql", "/gateway/", "/service/", "/services/",
@@ -186,16 +190,38 @@ class KatanaAdapter(BaseAdapter):
             if url_no_q.endswith(self._STATIC_EXTS):
                 continue
 
-            # 其余 URL → http_endpoint（保留原逻辑） + api_endpoint（新增，全量记录）
-            findings.append({
-                "type": "http_endpoint",
-                "parent_id": current_endpoint_id,
-                "url": url,
-                "method": method,
-                "status_code": status_code,
-                "content_length": content_length,
-                "source": "katana",
-            })
+            # SPA 壳过滤：同 host HTML 与基准响应长度相似（<10% 差）
+            # → 壳路径（前端路由服务器端返回同一 index.html），不写
+            # HTTPEndpoint（避免 SPA 路由虚端点膨胀 — mlws 4625 路径
+            # 的主要来源）；api_endpoint 仍全量记录（带 from_js/params 语义）。
+            # 404 路径服务器端不存在，同样不写端点。
+            is_shell = status_code == 404
+            if not is_shell and ct and "html" in ct.lower() and content_length > 0:
+                from urllib.parse import urlsplit as _us
+                try:
+                    _host = _us(url).hostname or ""
+                except ValueError:
+                    _host = ""
+                if _host:
+                    _base = self._shell_baselines.get(_host)
+                    if _base is None:
+                        self._shell_baselines[_host] = content_length
+                    else:
+                        _diff = abs(content_length - _base) / max(_base, 1)
+                        if _diff < 0.1:
+                            is_shell = True
+
+            # 其余 URL → http_endpoint（非壳/非 404）+ api_endpoint（全量记录）
+            if not is_shell:
+                findings.append({
+                    "type": "http_endpoint",
+                    "parent_id": current_endpoint_id,
+                    "url": url,
+                    "method": method,
+                    "status_code": status_code,
+                    "content_length": content_length,
+                    "source": "katana",
+                })
 
             params, param_source = self._extract_param_names(url, req.get("raw", "") or "")
             signals = self._classify_signals(url, method, ct, params, from_js)
