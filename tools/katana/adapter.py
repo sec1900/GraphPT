@@ -222,6 +222,24 @@ class KatanaAdapter(BaseAdapter):
                     "content_length": content_length,
                     "source": "katana",
                 })
+            else:
+                # 壳/404 路径降级为 DirEntry — 路径情报不丢（可能是已下线接口、
+                # 方法不符的真实路径、前端路由的客户端逻辑入口），只不冒充端点。
+                # 原则：能与其他漏洞结合的信息一律不过滤，只降级存储。
+                try:
+                    from urllib.parse import urlsplit as _us
+                    _path = _us(url).path or "/"
+                except ValueError:
+                    _path = url
+                findings.append({
+                    "type": "dir_entry",
+                    "url": url,
+                    "path": _path,
+                    "parent_id": current_endpoint_id,
+                    "status_code": status_code,
+                    "method": method,
+                    "source": "katana",
+                })
 
             params, param_source = self._extract_param_names(url, req.get("raw", "") or "")
             signals = self._classify_signals(url, method, ct, params, from_js)

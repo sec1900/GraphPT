@@ -246,6 +246,14 @@ class HttpxAdapter(BaseAdapter):
             )
             category = classification.get("category", "")
             params_detail = classification.get("params", [])
+            # 内网标记（SSRF 情报）：目标可达的私网地址显性入图，供信号层/Agent
+            # 识别"目标可触达内网 X" — 渗透测试视角内网是攻击面不是噪音
+            try:
+                from urllib.parse import urlsplit as _us
+                from graphpt.common.asset_identity import is_private_host
+                internal = is_private_host(_us(url).hostname or "")
+            except Exception:
+                internal = False
 
             findings.append({
                 "type": "http_endpoint",
@@ -269,6 +277,7 @@ class HttpxAdapter(BaseAdapter):
                 # product 指纹由 observer_ward / AI 分类器写入，httpx 不产出
                 "category": category,
                 "requires_auth": bool(classification.get("requires_auth", False)),
+                "internal": internal,
                 "params_detail": params_detail,
                 "js_urls": classification.get("js_urls", []),
                 "rule_classified": bool(category),

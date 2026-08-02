@@ -178,6 +178,28 @@ def normalize_host_port(raw: str) -> str:
     return format_host_port(host, port)
 
 
+_PRIVATE_IP_PREFIXES = ("10.", "192.168.", "127.", "169.254.", "0.")
+_PRIVATE_DOMAIN_SUFFIXES = (".local", ".internal", ".lan", ".intranet", ".corp")
+
+
+def is_private_host(host: str) -> bool:
+    """判断 host 是否私网/内网地址。
+
+    渗透测试视角：目标可达的内网地址（SSRF 情报）不是要排除的噪音，
+    而是要显性标记的攻击面 — 此函数供 internal 标记使用。
+    """
+    h = str(host or "").strip().lower().rstrip(".")
+    if not h:
+        return False
+    try:
+        ip = ipaddress.ip_address(h)
+        return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified
+    except ValueError:
+        pass
+    # 172.16-31.x（ipaddress 已覆盖 private）; 域名后缀内网特征
+    return any(h.endswith(sfx) for sfx in _PRIVATE_DOMAIN_SUFFIXES)
+
+
 def format_host_port(host: str, port: int) -> str:
     normalized_host = normalize_host_label(host, strip_www=False)
     if not normalized_host:

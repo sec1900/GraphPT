@@ -45,10 +45,13 @@ def main() -> None:
     http_endpoints = [f for f in findings if f["type"] == "http_endpoint"]
     api_endpoints = [f for f in findings if f["type"] == "api_endpoint"]
     files = [f for f in findings if f["type"] == "file"]
+    dir_entries = [f for f in findings if f["type"] == "dir_entry"]
 
     ep_urls = {f["url"] for f in http_endpoints}
+    dir_urls = {f["url"] for f in dir_entries}
     print(f"http_endpoint: {sorted(ep_urls)}")
     print(f"api_endpoint: {len(api_endpoints)} 条（全量保留）")
+    print(f"dir_entry（壳/404 降级）: {sorted(dir_urls)}")
     print(f"file: {len(files)} 条")
 
     # 断言：壳路径 /admin /login 和 404 /missing 不产 http_endpoint
@@ -61,6 +64,9 @@ def main() -> None:
     assert "http://other-test.local/api/x" in ep_urls, "独立 host 不应误判壳"
     # api_endpoint 全量（含壳路径 — 保留 JS/路由的接口语义）
     assert len(api_endpoints) >= 4, f"api_endpoint 应全量: {len(api_endpoints)}"
+    # 壳/404 路径情报不丢（降级 DirEntry — 不冒充端点但保留路径）
+    assert f"{base}/admin" in dir_urls, "壳路径应降级 DirEntry（情报保留）"
+    assert f"{base}/missing" in dir_urls, "404 路径应降级 DirEntry（情报保留）"
     # 静态资源走 File（回归：js/css）
     findings2 = KatanaAdapter().parse(
         _katana_line(f"{base}/app.js", 200, 500, "text/javascript"), asset_id="test-spa")

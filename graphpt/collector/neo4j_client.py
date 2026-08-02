@@ -630,6 +630,7 @@ class GraphWriter:
         category: str = "",
         product: str = "",
         requires_auth: bool = False,
+        internal: bool = False,
         params_detail: list[dict[str, Any]] | None = None,
         js_urls: list[str] | None = None,
         classified_at: str = "",
@@ -722,6 +723,7 @@ class GraphWriter:
                     e.response_file = $response_file,
                     e.base_path = $base_path, e.urls = [$url],
                     e.category = $category, e.product = $product,
+                    e.internal = $internal,
                     e.requires_auth = $requires_auth,
                     e.params_query = $params_query, e.params_body = $params_body,
                     e.js_urls = $js_urls,
@@ -803,6 +805,7 @@ class GraphWriter:
                 product=product,
                 base_path=base_path,
                 requires_auth=bool(requires_auth),
+                internal=bool(internal),
                 params_query=[str(p.get("name")) for p in (params_detail or [])
                               if isinstance(p, dict) and p.get("in") == "query" and str(p.get("name", "")).strip()],
                 params_body=[str(p.get("name")) for p in (params_detail or [])
