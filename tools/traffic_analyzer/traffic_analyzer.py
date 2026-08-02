@@ -374,9 +374,27 @@ def main() -> int:
         outputs = [s for s in outputs
                    if (s.get("url"), s.get("signal_type")) not in judged_keys] + judged
 
+    # 误报率反哺：历史验证结果（SignalStat）调整信号置信度，
+    # 高误报类型（fp_rate >= 0.8）直接跳过，中误报降权 — 系统自我进化
+    from graphpt.collector.signal_stats import adjust_confidence
+    kept: list[dict] = []
+    dropped_by_stats = 0
     for out in outputs:
         out.pop("_traffic", None)
         out["vuln_type"] = out.get("vuln_type", "unknown")
+        adjusted, dropped = adjust_confidence(out.get("vuln_type", "unknown"),
+                                              float(out.get("confidence", 0.5) or 0.5))
+        if dropped:
+            dropped_by_stats += 1
+            continue
+        if adjusted != out.get("confidence"):
+            out["confidence"] = adjusted
+            out["note"] = out.get("note", "") + f"[反哺] 历史误报率降权"
+        kept.append(out)
+    if dropped_by_stats:
+        print(f"[traffic_analyzer] fp_feedback_dropped: {dropped_by_stats} 条高误报类型信号",
+              file=sys.stderr)
+    for out in kept:
         print(json.dumps(out, ensure_ascii=False))
     return 0
 

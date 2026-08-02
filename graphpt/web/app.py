@@ -2393,6 +2393,16 @@ async def list_vulnerabilities(
         return _json_error(exc)
 
 
+@web_app.get("/api/signal-stats")
+async def signal_stats():
+    """信号误报率统计（验证结果反哺信号规则的反馈面）。按误报率降序。"""
+    try:
+        from graphpt.collector.signal_stats import stats_report
+        return {"ok": True, "data": stats_report()}
+    except Exception as exc:
+        return _json_error(exc)
+
+
 @web_app.post("/api/vulnerabilities/{vuln_id}/confirm")
 async def confirm_vulnerability(vuln_id: str):
     """人工确认漏洞：candidate/verified → confirmed（验证闭环的最终闸门）。

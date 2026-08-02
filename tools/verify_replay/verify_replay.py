@@ -87,6 +87,7 @@ def main() -> int:
         return 0
 
     stats = {"verified": 0, "dismissed": 0, "candidate": 0}
+    per_type: dict[str, dict[str, int]] = {}
     for cand in candidates:
         url = str(cand.get("url", "") or "")
         if not url:
@@ -102,6 +103,10 @@ def main() -> int:
         )
         new_status = str(result.get("status", "candidate") or "candidate")
         stats[new_status] = stats.get(new_status, 0) + 1
+        if new_status in ("verified", "dismissed"):
+            vt = str(cand.get("vuln_type", "") or "unknown")
+            entry = per_type.setdefault(vt, {"verified": 0, "dismissed": 0})
+            entry[new_status] = entry.get(new_status, 0) + 1
 
         out = {
             "url": url,
@@ -117,6 +122,17 @@ def main() -> int:
         print(json.dumps(out, ensure_ascii=False))
 
     print(f"[verify_replay] stats: {json.dumps(stats, ensure_ascii=False)}", file=sys.stderr)
+
+    # 误报率反哺：本轮验证结果按 vuln_type 累加 → SignalStat
+    # （traffic_analyzer 下次生成信号时消费；不依赖 adapter 写回图的时序）
+    try:
+        from graphpt.collector.signal_stats import update_from_counts
+        result = update_from_counts(per_type)
+        if result.get("ok"):
+            print(f"[verify_replay] signal_stats_updated: {json.dumps(per_type, ensure_ascii=False)}",
+                  file=sys.stderr)
+    except Exception as exc:
+        print(f"[verify_replay] signal_stats_update_failed: {exc}", file=sys.stderr)
     return 0
 
 
