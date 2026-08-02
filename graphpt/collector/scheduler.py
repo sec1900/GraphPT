@@ -1260,6 +1260,15 @@ def _notify_completion(asset_id: str, status: str, round_num: int,
         _oob_stop(asset_id)
     except Exception:
         pass
+    # 自动报告（扫描完成生成 markdown 落盘，失败不阻塞）
+    try:
+        from graphpt.reporter.auto_report import generate_report_for_asset
+        report_path = generate_report_for_asset(asset_id)
+        if report_path:
+            import logging
+            logging.getLogger("graphpt.scheduler").info("auto_report_generated path=%s", report_path)
+    except Exception:
+        pass
     try:
         _r = _redis_client()
         _r.ping()
