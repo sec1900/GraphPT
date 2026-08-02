@@ -3339,6 +3339,16 @@ async def scan_config_update(body: dict | None = None):
             for key, path in body["wordlists"].items():
                 config.update_wordlist(key, path)
 
+        # 更新认证态扫描配置（cookie/header/basic）
+        if "auth" in body:
+            auth = body["auth"]
+            config.set_auth(
+                enabled=bool(auth.get("enabled", False)),
+                auth_type=str(auth.get("type", "cookie") or "cookie"),
+                value=str(auth.get("value", "") or ""),
+                header_name=str(auth.get("header_name", "Authorization") or "Authorization"),
+            )
+
         # 更新工具启用状态
         if "tools_enabled" in body:
             config.config.setdefault("tools_enabled", {}).update(body["tools_enabled"])

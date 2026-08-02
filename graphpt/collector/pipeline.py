@@ -520,6 +520,8 @@ class PipelineExecutor:
         self.stages: list[dict[str, Any]] = pipeline_def.get("stages", [])
         self.asset_id = asset_id
         self.ctx: dict[str, Any] = dict(params or {})
+        # 命令模板解析需要按资产取配置（wordlist/auth）— 注入 asset_id
+        self.ctx.setdefault("asset_id", asset_id)
         # 合并传入的 ctx（例如 force_rescan）
         if ctx:
             self.ctx.update(ctx)
@@ -1642,6 +1644,13 @@ class PipelineExecutor:
                 from graphpt.collector.scan_config import resolve_wordlist_placeholder
                 asset_id = ctx.get("asset_id", "default")
                 return resolve_wordlist_placeholder(asset_id, key)
+
+            # 认证态扫描：{auth_headers} → 资产级认证配置的 -H 参数串
+            # （未启用/无值 → 空串，命令留空与无认证行为一致）
+            if key == "auth_headers":
+                from graphpt.collector.scan_config import get_scan_config
+                asset_id = ctx.get("asset_id", "default")
+                return get_scan_config(asset_id).auth_headers_string()
 
             # 普通占位符
             val = ctx.get(key)
