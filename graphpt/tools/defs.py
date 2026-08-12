@@ -106,8 +106,10 @@ _BUILTIN_TOOLS: list[tuple[ToolDef, ToolExecutor]] = [
             "- findings: upsert finding。若 finding_id 匹配或 finding_title+canonical_target+category 匹配已有记录则 UPDATE,否则 INSERT 新记录。\n"
             "  record: {finding_id?, finding_title, canonical_target?, category?, status?, triage_score?, detail?, severity?, confidence?}\n"
             "  status ∈ new/investigating/confirmed/dismissed\n"
-            "- credentials: 新增凭据。record: {target, username, password, credential_type, source, notes}\n"
-            "  credential_type ∈ password/token/api_key/ssh_key/cookie/hash/other (默认 password)"
+            "- credentials: 新增凭据。record: {target, username, password, credential_type, source, notes, role_label, auth_cookie_string, auth_headers, jwt_payload, session_json}\n"
+            "  credential_type ∈ password/token/api_key/ssh_key/cookie/hash/session/other (默认 password)\n"
+            "  role_label 角色(admin/user)；auth_cookie_string 完整 Cookie 串；auth_headers 认证头数组；\n"
+            "  jwt_payload JWT 解码 payload；session_json 完整会话协议 JSON (vibe-pentest sessions 兼容)"
         ),
         parameters={
             "type": "object",

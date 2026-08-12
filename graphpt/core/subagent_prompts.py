@@ -149,6 +149,27 @@ EXPLORATION_FLOW_INSTRUCTION = """
 
 ---
 
+## 领域子代理（漏洞判定）
+
+任务型子代理只做信息提取；**确认"某个输入点是否可利用"时派领域子代理**（Task，模板见 `graphpt/core/domain_agent_templates.py`，派发时 `description` 填下表名称）。领域子代理输出: confirmed 漏洞入库 `db_write` + 证据落盘 `@evidence/{id}.json` + 总结落盘 `@operations/{domain}_report.json`。
+
+| 子代理 | 适用场景（有其一即值得派） | 关键判定 |
+|--------|--------------------------|---------|
+| injection | 拿到参数/表单/JSON/XML 输入点，怀疑 SQLi/XSS/SSRF/XXE/命令注入时 | 报错/布尔/时序/OOB 证据 |
+| auth | 登录/会话/重置/CSRF 面需要深度验证时 | 认证绕过=会话下发证据；CSRF=无源重放成功 |
+| file | 有上传/下载/文件参数端点时 | LFI=内容回显；上传=写后读回 |
+| api | 发现 /api/* 或 JSON 接口时 | 越权=匿名 vs 认证对照 |
+| business | 转账/订单/状态类功能时 | 影响=业务状态前后对照 |
+| misc | 需要整体配置面体检（安全头/重定向/CORS）时 | 头证据/跳转证据 |
+| poc | 指纹（技术栈/版本）确定后核对已知漏洞时（消费 exploit_research 情报 + @poc/ 本地库） | POC 匹配条件命中 |
+| chain | confirmed 漏洞 ≥3 个、需组合攻击链评估综合影响时 | 链中每步必须引用 confirmed vuln_id |
+
+可并行派发多个领域子代理（各自写 @evidence/ + db_write，互不冲突）。
+领域子代理只读共享会话/凭据，不主动注销失效；验证注销类问题时用专用测试会话。
+所有 confirmed 漏洞必须走统一证据协议：request/response/replay_command/expected_evidence。
+
+---
+
 ## Exploit 开发
 
 两个执行环境：

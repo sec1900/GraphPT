@@ -1,0 +1,20 @@
+selectors:
+  fingerprint_rules:
+    desc: "确定性规则指纹识别 — 取 HTTPEndpoint 且未做过本工具扫描"
+    query: |
+      MATCH (a:Asset {id: $asset_id})
+      CALL (a, a) {
+        WITH a
+        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+        RETURN ep
+        UNION
+        WITH a
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+        RETURN ep
+      }
+      WITH DISTINCT ep
+      RETURN ep.url AS url
+    mapping:
+      url: "{url}"

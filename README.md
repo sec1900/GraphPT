@@ -258,7 +258,7 @@ vis-network 渲染 Neo4j 图：
 
 ## 工具系统
 
-### 工具目录（26 个）
+### 工具目录（28 个）
 
 | 工具 | 功能 | 消费节点 |
 |------|------|----------|
@@ -287,6 +287,8 @@ vis-network 渲染 Neo4j 图：
 | `interactsh` | Interactsh OOB 客户端 | Vulnerability |
 | `brutespray` | 弱口令爆破（40+ 协议） | Credential |
 | `403bypass` | 403 绕过（16 种技术） | HTTPEndpoint |
+| `fingerprint_rules` | 确定性规则指纹（favicon mmh3/关键词/正则/WAF 检测，与 observer_ward 互补） | Endpoint |
+| `api_prescan` | API 预扫描（常见 API 路径 + OpenAPI/Swagger/GraphQL 识别 + 敏感参数） | Endpoint |
 | `test_adapter` | 适配器测试工具 | RootDomain |
 
 ### 工具三要素
@@ -415,7 +417,7 @@ GraphPT/
 │   ├── common/                 # 共享工具（Redis/路径/日志）
 │   ├── catalog/                # 节点类型注册表
 │   └── reporter/               # 报告生成
-├── tools/                      # 26 个安全工具
+├── tools/                      # 28 个安全工具
 │   └── <name>/
 │       ├── tool.yaml           # desc + command + use_on
 │       ├── targets.yaml        # Cypher 目标选择器
@@ -428,7 +430,10 @@ GraphPT/
 │   ├── logs/                   # 工具日志（按工具分目录）
 │   └── tmp/                    # 临时文件
 ├── res/                        # 静态资源
-│   ├── wordlists/              # 字典文件
+│   ├── wordlists/              # 字典文件（web_dirs/admin_paths/api_endpoints 等，占位符 {wordlist:xxx} 引用）
+│   ├── fingerprints_rules/     # 确定性指纹规则库（favicon/关键词/正则/WAF 检测，fingerprint_rules 工具消费）
+│   ├── poc/                    # POC 模板（厂商目录 + vibe_public 精选库，注册进 pocs 表）
+│   ├── skills/                 # 技能库（141 个，@skill/<name> 读取）
 │   └── fingerprints_ehole.json
 ├── docs/                       # 文档 + 截图
 ├── scripts/                    # 迁移脚本

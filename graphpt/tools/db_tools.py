@@ -143,7 +143,8 @@ def _query_credentials(
         ensure_task_row(conn, task_id)
         query = (
             "SELECT id, source, username, password_enc, credential_type,"
-            " target, notes, status, created_at_utc"
+            " target, notes, status, role_label, auth_cookie_string,"
+            " auth_headers_json, jwt_payload_json, session_json, created_at_utc"
             " FROM credentials WHERE task_id = ?"
         )
         params: list[Any] = [task_id]
@@ -180,6 +181,13 @@ def _query_credentials(
                         d["http_header_hint"] = {"Authorization": f"Bearer {secret}"}
             else:
                 d["password"] = ""
+            # 会话协议 JSON 字段反序列化
+            for jkey in ("auth_headers_json", "jwt_payload_json", "session_json"):
+                raw = d.get(jkey)
+                try:
+                    d[jkey] = json.loads(raw) if raw else ([] if jkey == "auth_headers_json" else ({} if jkey == "session_json" else ""))
+                except (TypeError, ValueError):
+                    d[jkey] = []
             creds.append(d)
         return {"credentials": creds, "count": len(creds), "success": True}
     finally:
@@ -445,6 +453,16 @@ def _insert_credential(
     cred_type = str(args.get("credential_type", "password")).strip()
     source = str(args.get("source", "")).strip()
     notes = str(args.get("notes", "")).strip()
+    # 会话协议扩展字段（vibe-pentest sessions 兼容）
+    role_label = str(args.get("role_label", "")).strip()
+    auth_cookie_string = str(args.get("auth_cookie_string", "")).strip()
+    auth_headers = args.get("auth_headers") or []
+    jwt_payload = args.get("jwt_payload") or ""
+    session_json = args.get("session_json") or {}
+    if not isinstance(auth_headers, list):
+        auth_headers = [auth_headers] if auth_headers else []
+    if not isinstance(session_json, dict):
+        session_json = {}
 
     now = _now_utc()
     conn = open_db(db_file)
@@ -452,9 +470,15 @@ def _insert_credential(
         ensure_task_row(conn, task_id)
         cur = conn.execute(
             "INSERT INTO credentials(task_id, source, username, password_enc, credential_type,"
-            " target, notes, status, created_at_utc, updated_at_utc)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, 'found', ?, ?)",
-            (task_id, source, username, password, cred_type, target, notes, now, now),
+            " target, notes, status, role_label, auth_cookie_string, auth_headers_json,"
+            " jwt_payload_json, session_json, created_at_utc, updated_at_utc)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, 'found', ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, source, username, password, cred_type, target, notes,
+             role_label, auth_cookie_string,
+             json.dumps(auth_headers, ensure_ascii=False),
+             jwt_payload if isinstance(jwt_payload, str) else json.dumps(jwt_payload, ensure_ascii=False),
+             json.dumps(session_json, ensure_ascii=False),
+             now, now),
         )
         conn.commit()
         cred_id = int(cur.lastrowid or 0)

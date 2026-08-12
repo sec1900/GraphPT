@@ -234,3 +234,188 @@ def verify_candidate(
     if status > 0:
         return {"status": "verified", "evidence": f"重放可复现 (status={status})", "checks": checks}
     return {"status": "candidate", "evidence": "重放失败，保持候选", "checks": checks}
+
+
+# ──────────────────────────────────────────────
+# 已确认漏洞批量复查（移植自 vibe-pentest verify_findings.py 方法论）
+# ──────────────────────────────────────────────
+
+# 空响应/错误页特征
+_EMPTY_BODY_PATTERNS = [
+    r"^\s*$",
+    r"<title>404 Not Found</title>",
+    r"<title>500 Internal Server Error</title>",
+    r"<title>Error</title>",
+    r"whitelabel error page",
+    r"exception of type",
+    r"java\.lang\.NullPointerException",
+    r"stack trace",
+]
+
+# 类型专属证据特征: vuln_type -> (响应判定函数, 是否必须命中才 verified)
+_TYPE_CHECKS: dict[str, tuple[callable, bool]] = {}
+
+
+def _type_check_sqli(body: str) -> bool:
+    return _body_has_sql_error(body)
+
+
+def _type_check_xss(body: str, detail: str) -> bool:
+    """响应中必须存在未转义的脚本类 payload 片段（从 detail 提取）。"""
+    for frag in ("<script", "<img src=x onerror", "onload=", "alert("):
+        if frag in detail and frag in body:
+            return True
+    return False
+
+
+def _type_check_lfi(body: str) -> bool:
+    for frag in ("<?xml", "<web-app", "db.password", "DB_CONNECTION", "jdbc:"):
+        if frag.lower() in body.lower():
+            return True
+    return False
+
+
+def _type_check_redirect(headers: dict[str, str]) -> bool:
+    loc = headers.get("Location", headers.get("location", ""))
+    return bool(loc and loc.lower().startswith(("http://", "https://")))
+
+
+def review_confirmed_findings(
+    db_file: str,
+    task_id: int | None = None,
+    limit: int = 200,
+) -> dict:
+    """批量复查已确认漏洞（verify_findings 模式）。
+
+    对 status='confirmed' 的 findings 逐条重放：
+      1. 状态码异常（0=网络失败 / 404 / 500）
+      2. 响应体质量（空响应、错误页特征）
+      3. 类型专属证据特征（sqli 必须 SQL 报错、xss 必须未转义回显等）
+      4. 需要人工语义判断的（idor/ssrf 盲/权限类）→ needs_review
+
+    不修改任何数据；输出复查报告 dict。
+    """
+    from graphpt.db.conn import open_db  # 局部导入避免循环依赖
+
+    conn = open_db(db_file)
+    items: list[dict] = []
+    try:
+        sql = (
+            "SELECT id, title, detail, severity, vuln_type, canonical_target, "
+            "http_method, entry_point, param_name FROM findings "
+            "WHERE status = 'confirmed'"
+        )
+        params: list = []
+        if task_id is not None:
+            sql += " AND task_id = ?"
+            params.append(task_id)
+        sql += " ORDER BY severity DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
+
+    verified, needs_review, rejected = [], [], []
+    for row in rows:
+        fid = row["id"]
+        vuln_type = (row["vuln_type"] or "").lower()
+        target = row["canonical_target"] or ""
+        method = row["http_method"] or "GET"
+        entry = row["entry_point"] or ""
+        # 重放 URL: entry_point 可能是路径（/api/x）或完整 URL
+        url = entry if entry.startswith("http") else f"{target.rstrip('/')}{entry}"
+        if not url.startswith("http"):
+            url = target
+
+        status, body, headers = _replay(method, url)
+        item = {
+            "finding_id": fid,
+            "title": row["title"],
+            "vuln_type": vuln_type,
+            "target_url": url,
+            "method": method,
+            "status_code": status,
+            "body_len": len(body),
+            "reason": "",
+        }
+
+        # 1. 状态码异常
+        if status <= 0:
+            item["reason"] = "重放网络失败（目标不可达/超时）"
+            item["verdict"] = "rejected"
+            rejected.append(item)
+            continue
+        if status in (404, 500) or status >= 400:
+            item["reason"] = f"重放返回 {status}（原漏洞路径可能已失效或变化）"
+            item["verdict"] = "needs_review"
+            needs_review.append(item)
+            continue
+
+        # 2. 响应体质量
+        import re as _re
+        if _re.search(r"^\s*$", body):
+            item["reason"] = "响应体为空"
+            item["verdict"] = "needs_review"
+            needs_review.append(item)
+            continue
+        for pat in _EMPTY_BODY_PATTERNS[1:]:
+            if _re.search(pat, body, _re.I):
+                item["reason"] = f"错误页特征: {pat}"
+                item["verdict"] = "needs_review"
+                needs_review.append(item)
+                break
+        else:
+            # 3. 类型专属证据特征
+            detail = row["detail"] or ""
+            if vuln_type == "sqli":
+                ok = _type_check_sqli(body) or ("sql" in body.lower() or "error" in body.lower() and "syntax" in body.lower())
+                item["verdict"] = "verified" if ok else "needs_review"
+                item["reason"] = "SQL 错误特征命中" if ok else "无 SQL 报错特征（行为差异型需人工确认）"
+            elif vuln_type.startswith("xss"):
+                ok = _type_check_xss(body, detail)
+                item["verdict"] = "verified" if ok else "needs_review"
+                item["reason"] = "payload 未转义回显" if ok else "响应未见未转义 payload（可能被转义/需浏览器确认）"
+            elif vuln_type in ("lfi", "dir_traversal", "file_upload", "information_disclosure"):
+                ok = _type_check_lfi(body)
+                item["verdict"] = "verified" if ok else "needs_review"
+                item["reason"] = "文件/配置内容特征命中" if ok else "未见文件内容特征（需人工确认响应内容）"
+            elif vuln_type in ("open_redirect", "url_redirect"):
+                ok = _type_check_redirect(headers)
+                item["verdict"] = "verified" if ok else "needs_review"
+                item["reason"] = "Location 头可控" if ok else "无 Location 跳转证据"
+            elif vuln_type in ("idor", "ssrf", "auth_bypass", "business_logic", "workflow_bypass"):
+                item["verdict"] = "needs_review"
+                item["reason"] = "权限/业务语义需人工确认（自动重放仅验证可达性）"
+            else:
+                item["verdict"] = "verified"
+                item["reason"] = f"重放可复现 (status={status})"
+
+            (verified if item["verdict"] == "verified" else needs_review).append(item)
+
+    return {
+        "checked": len(rows),
+        "verified": len(verified),
+        "needs_review": len(needs_review),
+        "rejected": len(rejected),
+        "items": verified + needs_review + rejected,
+    }
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="已确认漏洞批量复查（verify_findings 模式）")
+    parser.add_argument("--db", default="data/db/graphpt.db", help="SQLite DB 路径")
+    parser.add_argument("--task-id", type=int, default=None, help="仅复查指定任务")
+    parser.add_argument("--limit", type=int, default=200)
+    parser.add_argument("--output", default="", help="复查报告输出路径（默认打印）")
+    args = parser.parse_args()
+
+    report = review_confirmed_findings(args.db, task_id=args.task_id, limit=args.limit)
+    text = json.dumps(report, ensure_ascii=False, indent=2)
+    if args.output:
+        Path(args.output).write_text(text, encoding="utf-8")
+        print(f"[+] 复查报告已写入: {args.output}")
+    else:
+        print(text)

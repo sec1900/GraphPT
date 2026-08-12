@@ -6,6 +6,7 @@ profiles:
     desc: "快速扫描 - 高频词汇，适合快速侦察"
     dns_subdomains: "SecLists/Discovery/DNS/subdomains-top1million-5000.txt"
     web_dirs: "SecLists/Discovery/Web-Content/common.txt"
+    admin_paths: "admin_paths.txt"
     web_files: "SecLists/Discovery/Web-Content/raft-small-files.txt"
     passwords: "SecLists/Passwords/Common-Credentials/top-20-common-SSH-passwords.txt"
     usernames: "top-usernames.txt"
@@ -14,6 +15,7 @@ profiles:
     desc: "标准扫描 - 平衡覆盖率和时间"
     dns_subdomains: "SecLists/Discovery/DNS/bitquark-subdomains-top100000.txt"
     web_dirs: "SecLists/Discovery/Web-Content/raft-medium-directories.txt"
+    admin_paths: "admin_paths.txt"
     web_files: "SecLists/Discovery/Web-Content/raft-medium-files.txt"
     passwords: "SecLists/Passwords/Common-Credentials/10k-most-common.txt"
     usernames: "top-usernames.txt"
@@ -22,6 +24,7 @@ profiles:
     desc: "深度扫描 - 最大覆盖，耗时长"
     dns_subdomains: "SecLists/Discovery/DNS/dns-Jhaddix.txt"
     web_dirs: "web_dirs.txt"  # 当前的 127 万字典
+    admin_paths: "admin_paths.txt"
     web_files: "web_files.txt"
     passwords: "SecLists/Passwords/Common-Credentials/10k-most-common.txt"
     usernames: "top-usernames.txt"

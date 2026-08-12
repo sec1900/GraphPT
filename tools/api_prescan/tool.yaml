@@ -1,0 +1,8 @@
+desc: "API 预扫描（常见 API 路径探测 + OpenAPI/Swagger/GraphQL 识别 + 敏感参数提取）"
+command: "python {tool_dir}/run_api_prescan.py --target {url} --workspace data/api_scan"
+use_on:
+  Endpoint:
+    desc: "对 Web 入口做 API 路径发现与敏感参数提取，输出写 findings"
+    command: "python {tool_dir}/run_api_prescan.py --target {url} --workspace data/api_scan"
+    params:
+      url: "{url}"

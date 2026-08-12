@@ -1,0 +1,1462 @@
+import argparse
+import inspect
+import json
+import os
+import re
+import shlex
+import socket
+import ssl
+import sys
+import random
+import time
+import urllib.parse
+from typing import Dict, List, Tuple
+
+try:
+    import httpx
+except ImportError:
+    print("Missing dependency: httpx. Install it with `pip install httpx`.", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    from charset_normalizer import from_bytes as charset_from_bytes
+except ImportError:
+    charset_from_bytes = None
+
+try:
+    import chardet
+except ImportError:
+    chardet = None
+
+METRIC_KEYS = [
+    "dns_lookup",
+    "tcp_connect",
+    "tls_handshake",
+    "pretransfer",
+    "ttfb",
+    "total",
+    "speed_download",
+    "size_download",
+    "http_code",
+    "redirects",
+]
+
+
+def parse_headers(raw: str) -> List[Tuple[str, str]]:
+    if not raw:
+        return []
+    raw = raw.strip()
+    if not raw:
+        return []
+    headers: List[Tuple[str, str]] = []
+    parsed = None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        for key, value in parsed.items():
+            headers.append((str(key).strip(), str(value).strip()))
+        return headers
+    if isinstance(parsed, list):
+        for item in parsed:
+            if isinstance(item, str) and ":" in item:
+                key, value = item.split(":", 1)
+                headers.append((key.strip(), value.strip()))
+        if headers:
+            return headers
+
+    # PowerShell may strip quotes from JSON-like arguments, turning
+    # {"Content-Type":"application/json"} into {Content-Type:application/json}.
+    text = raw[1:-1].strip() if raw.startswith("{") and raw.endswith("}") else raw
+    parts = re.split(
+        r"[;\r\n]+|,\s*(?=[!#$%&'*+\-.^_`|~0-9A-Za-z]+\s*:)",
+        text,
+    )
+    for line in parts:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip().strip("\"'")
+        value = value.strip().strip("\"'")
+        if key:
+            headers.append((key, value))
+    return headers
+
+
+def parse_form_fields(raw: str) -> List[Tuple[str, str]]:
+    if not raw or not raw.strip():
+        raise ValueError("--form requires a JSON object")
+
+    text = raw.strip()
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+
+    if parsed is None and text.startswith("{") and text.endswith("}"):
+        # PowerShell may strip quotes from JSON-like native command arguments.
+        parsed = {}
+        inner = text[1:-1].strip()
+        parts = re.split(
+            r",\s*(?=[!#$%&'*+\-.^_`|~0-9A-Za-z]+\s*:)",
+            inner,
+        )
+        for part in parts:
+            if ":" not in part:
+                raise ValueError("--form must be a JSON object")
+            key, value = part.split(":", 1)
+            key = key.strip().strip("\"'")
+            value = value.strip().strip("\"'")
+            if not key:
+                raise ValueError("--form contains an empty field name")
+            parsed[key] = value
+
+    if not isinstance(parsed, dict):
+        raise ValueError("--form must be a JSON object")
+
+    fields: List[Tuple[str, str]] = []
+    for key, value in parsed.items():
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if isinstance(item, (dict, list)):
+                raise ValueError(f"--form field {key!r} must contain scalar values")
+            if item is None:
+                item_text = ""
+            elif isinstance(item, bool):
+                item_text = "true" if item else "false"
+            else:
+                item_text = str(item)
+            fields.append((str(key), item_text))
+    return fields
+
+
+def parse_cookies(raw: str) -> Dict[str, str]:
+    cookies: Dict[str, str] = {}
+    if not raw:
+        return cookies
+    for part in raw.split(";"):
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name = name.strip()
+        if not name:
+            continue
+        cookies[name] = value.strip()
+    return cookies
+
+
+def parse_additional_options(raw: str) -> Dict[str, str]:
+    options: Dict[str, str] = {}
+    if not raw:
+        return options
+    try:
+        tokens = shlex.split(raw)
+    except ValueError:
+        tokens = raw.split()
+    for token in tokens:
+        if "=" in token:
+            key, value = token.split("=", 1)
+            options[key.strip()] = value.strip()
+        else:
+            options[token.strip()] = "true"
+    return options
+
+
+def str_to_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def load_http_test_config(config_path: str) -> Dict[str, object]:
+    if not config_path:
+        return {}
+    path = os.path.expanduser(config_path)
+    if not os.path.isabs(path):
+        path = os.path.abspath(path)
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8-sig") as fh:
+            loaded = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Failed to load config {path}: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Config {path} must contain a JSON object")
+    return loaded
+
+
+def default_config_path() -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(os.path.join(script_dir, "..", "config", "http_test.json"))
+
+
+def expand_config_value(value) -> str:
+    if value is None:
+        return ""
+    return os.path.expandvars(str(value)).strip()
+
+
+def has_url_scheme(value: str) -> bool:
+    return "://" in (value or "")
+
+
+def build_proxy_url(
+    tunnel: str,
+    scheme: str = "http",
+    username: str = "",
+    password: str = "",
+) -> str:
+    tunnel = expand_config_value(tunnel)
+    if not tunnel:
+        return ""
+    if has_url_scheme(tunnel):
+        return tunnel
+    scheme = expand_config_value(scheme) or "http"
+    username = expand_config_value(username)
+    password = expand_config_value(password)
+    auth = ""
+    if username:
+        auth = urllib.parse.quote(username, safe="")
+        if password:
+            auth = f"{auth}:{urllib.parse.quote(password, safe='')}"
+        auth = f"{auth}@"
+    return f"{scheme}://{auth}{tunnel}/"
+
+
+def read_proxy_pool_file(path: str, base_dir: str = "") -> List[str]:
+    if not path:
+        return []
+    expanded = os.path.expanduser(os.path.expandvars(path))
+    if not os.path.isabs(expanded) and base_dir:
+        expanded = os.path.join(base_dir, expanded)
+    if not os.path.isfile(expanded):
+        raise FileNotFoundError(f"Proxy pool file not found: {expanded}")
+    items = []
+    with open(expanded, "r", encoding="utf-8-sig") as fh:
+        for line in fh:
+            item = line.strip()
+            if not item or item.startswith("#"):
+                continue
+            items.append(item)
+    return items
+
+
+def normalize_proxy_pool_item(item, scheme: str, username: str, password: str) -> str:
+    if isinstance(item, str):
+        value = expand_config_value(item)
+        if not value:
+            return ""
+        if has_url_scheme(value):
+            return value
+        return build_proxy_url(value, scheme, username, password)
+    if isinstance(item, dict):
+        enabled = item.get("enabled", True)
+        if not str_to_bool(enabled):
+            return ""
+        url = item.get("url") or item.get("all") or item.get("http") or item.get("https")
+        if url:
+            return expand_config_value(url)
+        item_scheme = expand_config_value(item.get("scheme")) or scheme
+        tunnel = expand_config_value(item.get("tunnel") or item.get("host"))
+        port = expand_config_value(item.get("port"))
+        if tunnel and port and ":" not in tunnel:
+            tunnel = f"{tunnel}:{port}"
+        item_username = expand_config_value(item.get("username") or item.get("user")) or username
+        item_password = expand_config_value(item.get("password") or item.get("pwd")) or password
+        return build_proxy_url(tunnel, item_scheme, item_username, item_password)
+    return ""
+
+
+def resolve_config_proxy_pool(config: Dict[str, object], config_path: str = "") -> Tuple[List[str], str]:
+    raw_proxy = config.get("proxy", "")
+    if not isinstance(raw_proxy, dict):
+        return [], "single"
+    if not str_to_bool(raw_proxy.get("enabled", True)):
+        return [], "single"
+    if str(raw_proxy.get("mode", "")).strip().lower() != "pool":
+        return [], "single"
+
+    pool = raw_proxy.get("pool", {})
+    if not isinstance(pool, dict):
+        pool = {}
+    source = pool or raw_proxy
+    scheme = expand_config_value(source.get("scheme") or raw_proxy.get("scheme")) or "http"
+    username = expand_config_value(source.get("username") or source.get("user") or raw_proxy.get("username") or raw_proxy.get("user"))
+    password = expand_config_value(source.get("password") or source.get("pwd") or raw_proxy.get("password") or raw_proxy.get("pwd"))
+    strategy = expand_config_value(source.get("strategy")) or "random"
+    strategy = strategy.lower()
+    if strategy not in {"round_robin", "random"}:
+        strategy = "random"
+
+    items = []
+    raw_items = source.get("items") or raw_proxy.get("items") or []
+    if isinstance(raw_items, list):
+        items.extend(raw_items)
+    elif isinstance(raw_items, str):
+        items.extend(part.strip() for part in raw_items.split(",") if part.strip())
+
+    file_path = source.get("file") or raw_proxy.get("file")
+    if file_path:
+        base_dir = os.path.dirname(os.path.abspath(config_path)) if config_path else os.getcwd()
+        items.extend(read_proxy_pool_file(expand_config_value(file_path), base_dir))
+
+    proxies = []
+    for item in items:
+        proxy_url = normalize_proxy_pool_item(item, scheme, username, password)
+        if proxy_url:
+            proxies.append(proxy_url)
+    return proxies, strategy
+
+
+def choose_proxy_from_pool(proxies: List[str], strategy: str, run_index: int) -> Tuple[str, int]:
+    if not proxies:
+        return "", 0
+    if strategy == "random":
+        selected_index = random.randrange(len(proxies))
+    else:
+        selected_index = run_index % len(proxies)
+    return proxies[selected_index], selected_index
+
+
+def resolve_config_proxy(config: Dict[str, object]) -> str:
+    raw_proxy = config.get("proxy", "")
+    if isinstance(raw_proxy, str):
+        return expand_config_value(raw_proxy)
+    if isinstance(raw_proxy, dict):
+        enabled = raw_proxy.get("enabled", True)
+        if not str_to_bool(enabled):
+            return ""
+        if str(raw_proxy.get("mode", "")).strip().lower() == "pool":
+            return ""
+        url = raw_proxy.get("url") or raw_proxy.get("all") or raw_proxy.get("http") or raw_proxy.get("https")
+        if url:
+            return expand_config_value(url)
+
+        tunnel = expand_config_value(raw_proxy.get("tunnel") or raw_proxy.get("host"))
+        port = expand_config_value(raw_proxy.get("port"))
+        if tunnel and port and ":" not in tunnel:
+            tunnel = f"{tunnel}:{port}"
+        if not tunnel:
+            return ""
+
+        return build_proxy_url(
+            tunnel,
+            expand_config_value(raw_proxy.get("scheme")) or "http",
+            expand_config_value(raw_proxy.get("username") or raw_proxy.get("user")),
+            expand_config_value(raw_proxy.get("password") or raw_proxy.get("pwd")),
+        )
+    return ""
+
+
+def resolve_effective_proxy_from_config(
+    config_path: str = "",
+    cli_proxy: str = "",
+    no_proxy: bool = False,
+    pool_index: int = 0,
+) -> Tuple[str, str]:
+    """Resolve the same effective proxy behavior used by http_test.py.
+
+    Returns (proxy_url, mode), where mode is one of: disabled, none, single, pool.
+    """
+    if not config_path:
+        config_path = default_config_path()
+    config = load_http_test_config(config_path)
+    proxy_pool, proxy_pool_strategy = resolve_config_proxy_pool(config, config_path)
+    config_proxy = "" if proxy_pool else resolve_config_proxy(config)
+
+    if no_proxy:
+        return "", "disabled"
+
+    cli_proxy = (cli_proxy or "").strip()
+    if cli_proxy:
+        return cli_proxy, "single"
+    if proxy_pool:
+        proxy_url, _ = choose_proxy_from_pool(
+            proxy_pool,
+            proxy_pool_strategy,
+            max(0, pool_index),
+        )
+        return proxy_url, "pool"
+    if config_proxy:
+        return config_proxy, "single"
+    if (
+        isinstance(config.get("proxy"), dict)
+        and str(config["proxy"].get("mode", "")).strip().lower() == "pool"
+        and str_to_bool(config["proxy"].get("enabled", True))
+    ):
+        raise ValueError("proxy pool is enabled but empty")
+    return "", "none"
+
+
+def resolve_proxy_settings_from_config(
+    config_path: str = "",
+    cli_proxy: str = "",
+    no_proxy: bool = False,
+) -> Dict[str, object]:
+    """Resolve proxy settings for tools that can consume a whole proxy pool."""
+    if not config_path:
+        config_path = default_config_path()
+    config = load_http_test_config(config_path)
+
+    if no_proxy:
+        return {
+            "mode": "disabled",
+            "proxy": "",
+            "pool": [],
+            "strategy": "single",
+        }
+
+    cli_proxy = (cli_proxy or "").strip()
+    if cli_proxy:
+        return {
+            "mode": "single",
+            "proxy": cli_proxy,
+            "pool": [],
+            "strategy": "single",
+        }
+
+    proxy_pool, proxy_pool_strategy = resolve_config_proxy_pool(config, config_path)
+    if proxy_pool:
+        return {
+            "mode": "pool",
+            "proxy": "",
+            "pool": proxy_pool,
+            "strategy": proxy_pool_strategy,
+        }
+
+    config_proxy = resolve_config_proxy(config)
+    if config_proxy:
+        return {
+            "mode": "single",
+            "proxy": config_proxy,
+            "pool": [],
+            "strategy": "single",
+        }
+
+    if (
+        isinstance(config.get("proxy"), dict)
+        and str(config["proxy"].get("mode", "")).strip().lower() == "pool"
+        and str_to_bool(config["proxy"].get("enabled", True))
+    ):
+        raise ValueError("proxy pool is enabled but empty")
+
+    return {
+        "mode": "none",
+        "proxy": "",
+        "pool": [],
+        "strategy": "single",
+    }
+
+
+def mask_url_credentials(url: str) -> str:
+    if not url:
+        return url
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url
+    if not parts.username:
+        return url
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    netloc = f"{parts.username}:***@{host}"
+    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
+
+def smart_encode_url(url: str, safe_path="/:@&=%+,$-~", safe_query="/:@&=%+,$-~"):
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url
+    path = urllib.parse.quote(parts.path or "/", safe=safe_path)
+    query = urllib.parse.quote(parts.query, safe=safe_query)
+    fragment = urllib.parse.quote(parts.fragment, safe=safe_query)
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, query, fragment))
+
+
+def encode_form_data(data: str) -> str:
+    if not data:
+        return data
+
+    def find_key_value_pairs(text):
+        pairs = []
+        i = 0
+        text_len = len(text)
+
+        while i < text_len:
+            while i < text_len and text[i] in " \t\n\r":
+                i += 1
+            if i >= text_len:
+                break
+
+            key_start = i
+            while i < text_len and text[i] != "=":
+                i += 1
+
+            if i >= text_len:
+                remaining = text[key_start:].strip()
+                if remaining:
+                    pairs.append((None, remaining))
+                break
+
+            key = text[key_start:i].strip()
+            i += 1
+
+            if not key:
+                continue
+
+            value_start = i
+            value_end = text_len
+
+            j = value_start
+            while j < text_len:
+                if text[j] == "&":
+                    k = j + 1
+                    while k < text_len and text[k] in " \t\n\r":
+                        k += 1
+                    m = k
+                    while m < text_len and text[m] not in "=&":
+                        m += 1
+                    if m < text_len and text[m] == "=":
+                        value_end = j
+                        i = j + 1
+                        break
+                j += 1
+
+            value = text[value_start:value_end]
+            pairs.append((key, value))
+
+            if value_end < text_len:
+                i = value_end + 1
+            else:
+                break
+
+        return pairs
+
+    pairs = find_key_value_pairs(data)
+    parts = []
+
+    for key, value in pairs:
+        if key is None:
+            parts.append(urllib.parse.quote_plus(value, safe=""))
+        else:
+            encoded_value = urllib.parse.quote_plus(value, safe="")
+            parts.append(f"{key}={encoded_value}")
+
+    return "&".join(parts)
+
+
+def should_encode_form(headers: httpx.Headers, data: str) -> bool:
+    if not data:
+        return False
+    if not headers:
+        return False
+    content_type = headers.get("Content-Type")
+    if not content_type:
+        return False
+    return "application/x-www-form-urlencoded" in content_type.lower()
+
+
+def extract_charset_from_content_type(content_type: str) -> str:
+    if not content_type:
+        return ""
+    parts = content_type.split(";")
+    for part in parts[1:]:
+        lowered = part.strip().lower()
+        if lowered.startswith("charset="):
+            return part.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def extract_declared_charset_from_body(data: bytes) -> str:
+    if not data:
+        return ""
+    sample = data[:16384]
+    try:
+        sample_text = sample.decode("iso-8859-1", errors="ignore")
+    except UnicodeDecodeError:
+        return ""
+    for line in sample_text.splitlines():
+        lowered = line.lower()
+        if "content-type:" in lowered and "charset=" in lowered:
+            charset_index = lowered.index("charset=") + len("charset=")
+            remainder = line[charset_index:]
+            for separator in [";", " ", "\t"]:
+                remainder = remainder.split(separator)[0]
+            return remainder.strip().strip('"').strip("'")
+    meta_match = re.search(r'charset=["\']?([a-zA-Z0-9_\-.:]+)', sample_text, re.IGNORECASE)
+    if meta_match:
+        return meta_match.group(1)
+    return ""
+
+
+def decode_body_bytes(data: bytes, headers: httpx.Headers, user_encoding: str = ""):
+    attempts = []
+    if user_encoding:
+        attempts.append(("user", user_encoding))
+    header_declared = extract_charset_from_content_type(headers.get("Content-Type", "")) if headers else ""
+    if header_declared:
+        attempts.append(("header", header_declared))
+    body_declared = extract_declared_charset_from_body(data) if not header_declared else ""
+    if body_declared:
+        attempts.append(("body", body_declared))
+    for source, encoding in attempts:
+        enc = (encoding or "").strip()
+        if not enc:
+            continue
+        try:
+            return data.decode(enc), enc, source
+        except (LookupError, UnicodeDecodeError):
+            continue
+    if charset_from_bytes is not None and data:
+        best = charset_from_bytes(data).best()
+        if best and best.encoding:
+            try:
+                return data.decode(best.encoding), best.encoding, "detected"
+            except (LookupError, UnicodeDecodeError):
+                pass
+    if chardet is not None and data:
+        detection = chardet.detect(data)
+        encoding = detection.get("encoding")
+        if encoding:
+            try:
+                return data.decode(encoding), encoding, "detected"
+            except (LookupError, UnicodeDecodeError):
+                pass
+    try:
+        return data.decode("utf-8"), "utf-8", "fallback"
+    except UnicodeDecodeError:
+        return data.decode("utf-8", errors="replace"), "utf-8", "fallback"
+
+
+def prepare_body(
+    data: str,
+    headers: httpx.Headers,
+    debug: bool = False,
+    data_file: str = "",
+    form: str = "",
+):
+    meta = {
+        "source": "inline",
+        "mode": "none",
+        "length": 0,
+        "charset": None,
+        "encoded": False,
+    }
+    if form:
+        content_type = headers.get("Content-Type")
+        if content_type and "application/x-www-form-urlencoded" not in content_type.lower():
+            raise ValueError("--form requires Content-Type: application/x-www-form-urlencoded")
+        fields = parse_form_fields(form)
+        processed = urllib.parse.urlencode(fields, doseq=True)
+        headers["Content-Type"] = "application/x-www-form-urlencoded; charset=utf-8"
+        payload = processed.encode("utf-8")
+        meta["source"] = "form"
+        meta["mode"] = "form-urlencoded"
+        meta["charset"] = "utf-8"
+        meta["encoded"] = True
+        meta["length"] = len(payload)
+        return payload, meta
+    if data_file:
+        path = os.path.expanduser(data_file)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Body file not found: {path}")
+        with open(path, "rb") as fh:
+            payload = fh.read()
+        meta["source"] = path
+        meta["mode"] = "binary"
+        meta["length"] = len(payload)
+        return payload, meta
+    if not data:
+        return None, meta
+    if data.startswith("@"):
+        path = data[1:]
+        if path == "-":
+            payload = sys.stdin.buffer.read()
+            meta["source"] = "stdin"
+        else:
+            path = os.path.expanduser(path)
+            if not os.path.isfile(path):
+                raise FileNotFoundError(f"Body file not found: {path}")
+            with open(path, "rb") as fh:
+                payload = fh.read()
+            meta["source"] = path
+        meta["mode"] = "binary"
+        meta["length"] = len(payload)
+        return payload, meta
+    stripped = data.strip()
+    content_type = headers.get("Content-Type")
+    if not content_type:
+        guessed = ""
+        if stripped.startswith("{") or stripped.startswith("["):
+            guessed = "application/json"
+        elif "=" in stripped and "&" in stripped:
+            guessed = "application/x-www-form-urlencoded"
+        elif stripped.startswith("<"):
+            guessed = "application/xml"
+        if guessed:
+            headers["Content-Type"] = guessed
+            content_type = guessed
+    processed = data
+    if should_encode_form(headers, data):
+        processed = encode_form_data(data)
+        meta["mode"] = "form-urlencoded"
+        meta["encoded"] = True
+    else:
+        normalized = (headers.get("Content-Type") or "").lower()
+        if normalized.startswith("application/json"):
+            meta["mode"] = "json"
+        elif normalized.startswith("multipart/form-data"):
+            meta["mode"] = "multipart"
+        elif normalized.startswith("text/") or "xml" in normalized:
+            meta["mode"] = "text"
+        else:
+            meta["mode"] = "raw"
+    content_type = headers.get("Content-Type")
+    charset = extract_charset_from_content_type(content_type) if content_type else ""
+    if not charset and meta["mode"] in ("json", "text", "form-urlencoded"):
+        charset = "utf-8"
+        base = (content_type or "text/plain").split(";")[0].strip()
+        headers["Content-Type"] = f"{base}; charset={charset}"
+    elif not charset:
+        charset = "utf-8"
+    body_bytes = processed.encode(charset, errors="surrogatepass")
+    meta["charset"] = charset
+    meta["length"] = len(body_bytes)
+    if debug:
+        print("\n===== Debug: Body Encoding =====")
+        print(f"Mode: {meta['mode']}")
+        print(f"Charset: {charset}")
+        print(f"Length: {meta['length']} bytes")
+        print(f"Source: {meta['source']}")
+        if meta["encoded"]:
+            print("Form data was URL-encoded prior to sending.")
+    return body_bytes, meta
+
+
+def probe_connection(url: str, timeout: float, verify_tls: bool, skip: bool):
+    metrics = {}
+    if skip:
+        return metrics
+    parsed = urllib.parse.urlsplit(url)
+    host = parsed.hostname
+    if not host:
+        return metrics
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    dns_start = time.perf_counter()
+    try:
+        addr_info = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return metrics
+    dns_time = time.perf_counter() - dns_start
+    family, socktype, proto, _, sockaddr = addr_info[0]
+    sock = socket.socket(family, socktype, proto)
+    sock.settimeout(timeout or 30.0)
+    try:
+        connect_start = time.perf_counter()
+        sock.connect(sockaddr)
+        connect_time = time.perf_counter() - connect_start
+        tls_time = 0.0
+        if parsed.scheme == "https":
+            ctx = ssl.create_default_context()
+            if not verify_tls:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            try:
+                tls_start = time.perf_counter()
+                tls_sock = ctx.wrap_socket(sock, server_hostname=host, do_handshake_on_connect=False)
+                try:
+                    tls_sock.do_handshake()
+                    tls_time = time.perf_counter() - tls_start
+                finally:
+                    tls_sock.close()
+            except ssl.SSLError:
+                tls_time = 0.0
+        else:
+            sock.close()
+    except OSError:
+        sock.close()
+        return {"dns_lookup": dns_time}
+    metrics["dns_lookup"] = dns_time
+    metrics["tcp_connect"] = connect_time
+    metrics["tls_handshake"] = tls_time
+    metrics["pretransfer"] = dns_time + connect_time + tls_time
+    return metrics
+
+
+def format_metric_value(key: str, value):
+    if value is None:
+        return "n/a"
+    if key in {"http_code", "redirects", "size_download"}:
+        return str(int(value))
+    if key == "speed_download":
+        return f"{value:.2f} B/s"
+    return f"{value:.6f}s"
+
+
+def summarize(values):
+    if not values:
+        return None
+    count = len(values)
+    total = sum(values)
+    return min(values), total / count, max(values)
+
+
+def render_request_overview(
+    method: str,
+    url: str,
+    headers: httpx.Headers,
+    body_meta: Dict[str, str],
+    proxy: str = "",
+    trust_env: bool = False,
+):
+    items = list(headers.items())
+    print("\n===== Prepared Request =====")
+    print(f"Method: {method}")
+    print(f"URL: {url}")
+    print(f"Proxy: {mask_url_credentials(proxy) if proxy else '<disabled>'}")
+    print(f"Trust Env Proxy: {'true' if trust_env else 'false'}")
+    print(f"Headers ({len(items)} total):")
+    for key, value in items:
+        print(f"  {key}: {value}")
+    if body_meta["length"]:
+        charset = body_meta.get("charset") or "n/a"
+        print(f"Body: {body_meta['length']} bytes ({body_meta['mode']}, charset={charset}, source={body_meta['source']})")
+    else:
+        print("Body: <empty>")
+
+
+def compile_response_filter(pattern: str, ignore_case: bool):
+    flags = 0
+    if ignore_case:
+        flags |= re.IGNORECASE
+    try:
+        return re.compile(pattern, flags)
+    except re.error as exc:
+        print(f"Invalid response_filter regex: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
+def load_response_filter(pattern: str, pattern_file: str) -> str:
+    if not pattern_file:
+        return (pattern or "").strip()
+    path = os.path.expanduser(pattern_file)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Response filter file not found: {path}")
+    with open(path, "r", encoding="utf-8-sig") as fh:
+        return fh.read().strip()
+
+
+def truncate_utf8(text: str, max_bytes: int) -> Tuple[str, bool]:
+    if max_bytes <= 0 or not text:
+        return text, False
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return text, False
+    truncated = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    return truncated, True
+
+
+def cap_line_entries(entries: List[Tuple[int, str]], max_lines: int) -> Tuple[List[Tuple[int, str]], bool]:
+    if max_lines <= 0 or len(entries) <= max_lines:
+        return entries, False
+    return entries[:max_lines], True
+
+
+def expand_line_context(line_numbers: List[int], total_lines: int, context: int) -> List[int]:
+    if context <= 0:
+        return sorted(set(line_numbers))
+    included = set()
+    for num in line_numbers:
+        start = max(1, num - context)
+        end = min(total_lines, num + context)
+        for i in range(start, end + 1):
+            included.add(i)
+    return sorted(included)
+
+
+def format_line_entries(lines: List[str], indices: List[int], ellipsis_gaps: bool = True) -> str:
+    if not indices:
+        return ""
+    chunks = []
+    prev = None
+    for num in indices:
+        if ellipsis_gaps and prev is not None and num > prev + 1:
+            chunks.append("  ...")
+        chunks.append(f"  L{num}: {lines[num - 1]}")
+        prev = num
+    return "\n".join(chunks)
+
+
+def filter_body_by_lines(
+    lines: List[str],
+    compiled: "re.Pattern",
+    invert: bool,
+    context_lines: int,
+    max_lines: int,
+) -> Tuple[str, Dict[str, object]]:
+    matched_nums = []
+    for idx, line in enumerate(lines, start=1):
+        hit = compiled.search(line) is not None
+        if invert:
+            hit = not hit
+        if hit:
+            matched_nums.append(idx)
+    total = len(lines)
+    meta = {
+        "mode": "line",
+        "total_lines": total,
+        "matched_lines": len(matched_nums),
+        "invert": invert,
+        "truncated": False,
+        "byte_truncated": False,
+    }
+    if not matched_nums:
+        return "", meta
+    display_nums = expand_line_context(matched_nums, total, context_lines)
+    entries = [(n, lines[n - 1]) for n in display_nums]
+    entries, line_capped = cap_line_entries(entries, max_lines)
+    meta["truncated"] = line_capped
+    meta["display_lines"] = len(entries)
+    return format_line_entries(lines, [n for n, _ in entries], ellipsis_gaps=context_lines > 0), meta
+
+
+def filter_body_multiline(
+    text: str,
+    compiled: "re.Pattern",
+    invert: bool,
+    max_lines: int,
+    dotall: bool,
+) -> Tuple[str, Dict[str, object]]:
+    flags = compiled.flags
+    if dotall:
+        pattern = re.compile(compiled.pattern, flags | re.DOTALL | re.MULTILINE)
+    else:
+        pattern = re.compile(compiled.pattern, flags | re.MULTILINE)
+    matches = list(pattern.finditer(text))
+    if invert:
+        if matches:
+            return "", {"mode": "multiline" if not dotall else "full", "total_lines": text.count("\n") + (1 if text else 0), "matched_lines": 0, "invert": True, "truncated": False, "byte_truncated": False}
+        output = text
+        meta = {"mode": "multiline" if not dotall else "full", "matched_lines": 1, "invert": True, "truncated": False, "byte_truncated": False}
+        lines = text.splitlines()
+        if max_lines > 0 and len(lines) > max_lines:
+            output = "\n".join(lines[:max_lines])
+            meta["truncated"] = True
+        meta["total_lines"] = len(lines)
+        meta["display_lines"] = min(len(lines), max_lines) if max_lines > 0 else len(lines)
+        return output, meta
+    chunks = []
+    for match in matches:
+        snippet = match.group(0)
+        if "\n" in snippet:
+            snippet = snippet.replace("\n", "\\n")
+        start_line = text.count("\n", 0, match.start()) + 1
+        chunks.append((start_line, f"  @{start_line}: {snippet}"))
+    entries, line_capped = cap_line_entries(chunks, max_lines if max_lines > 0 else len(chunks))
+    meta = {
+        "mode": "multiline" if not dotall else "full",
+        "total_lines": text.count("\n") + (1 if text else 0),
+        "matched_lines": len(matches),
+        "invert": False,
+        "truncated": line_capped,
+        "byte_truncated": False,
+        "display_lines": len(entries),
+    }
+    return "\n".join(line for _, line in entries), meta
+
+
+def apply_body_limits_plain(text: str, max_lines: int) -> Tuple[str, Dict[str, object]]:
+    lines = text.splitlines()
+    meta = {
+        "mode": "plain",
+        "total_lines": len(lines),
+        "matched_lines": len(lines),
+        "invert": False,
+        "truncated": False,
+        "byte_truncated": False,
+        "display_lines": len(lines),
+    }
+    output = text
+    if max_lines > 0 and len(lines) > max_lines:
+        output = "\n".join(lines[:max_lines])
+        meta["truncated"] = True
+        meta["display_lines"] = max_lines
+    return output, meta
+
+
+def format_response_body_output(
+    decoded_body: str,
+    filter_pattern: str,
+    filter_mode: str,
+    filter_invert: bool,
+    filter_ignore_case: bool,
+    max_lines: int,
+    max_bytes: int,
+    preview_lines: int,
+    context_lines: int,
+    compiled_filter=None,
+) -> Tuple[str, Dict[str, object]]:
+    text = decoded_body.rstrip("\r\n")
+    if not text:
+        return "", {"mode": "empty", "total_lines": 0, "matched_lines": 0, "invert": filter_invert, "truncated": False, "byte_truncated": False, "display_lines": 0}
+
+    lines = text.splitlines()
+    mode = (filter_mode or "line").strip().lower()
+    if mode not in {"line", "multiline", "full"}:
+        mode = "line"
+
+    if filter_pattern:
+        compiled = compiled_filter or compile_response_filter(filter_pattern, filter_ignore_case)
+        if mode == "line":
+            output, meta = filter_body_by_lines(lines, compiled, filter_invert, context_lines, max_lines)
+        else:
+            output, meta = filter_body_multiline(text, compiled, filter_invert, max_lines, dotall=(mode == "full"))
+        meta["filter_pattern"] = filter_pattern
+        if not output and not filter_invert:
+            preview = min(max(preview_lines, 0), len(lines))
+            if preview > 0:
+                preview_text = format_line_entries(lines, list(range(1, preview + 1)), ellipsis_gaps=False)
+                preview_text, byte_truncated = truncate_utf8(preview_text, max_bytes)
+                return preview_text, {
+                    **meta,
+                    "preview": True,
+                    "matched_lines": 0,
+                    "display_lines": preview,
+                    "byte_truncated": byte_truncated,
+                }
+            return "", {**meta, "preview": False, "matched_lines": 0, "display_lines": 0}
+    else:
+        output, meta = apply_body_limits_plain(text, max_lines)
+
+    output, byte_truncated = truncate_utf8(output, max_bytes)
+    if byte_truncated:
+        meta["byte_truncated"] = True
+    return output, meta
+
+
+def print_response_body_summary(meta: Dict[str, object]):
+    mode = meta.get("mode")
+    if mode == "empty":
+        return
+    parts = [f"mode={mode}"]
+    if meta.get("filter_pattern"):
+        parts.append(f"pattern={meta['filter_pattern']!r}")
+    if meta.get("invert"):
+        parts.append("invert=true")
+    total = meta.get("total_lines")
+    matched = meta.get("matched_lines")
+    displayed = meta.get("display_lines")
+    if total is not None and matched is not None:
+        parts.append(f"matched {matched}/{total} lines")
+    if displayed is not None:
+        parts.append(f"showing {displayed}")
+    if meta.get("preview"):
+        parts.append("preview on zero match")
+    if meta.get("truncated"):
+        parts.append("line cap applied")
+    if meta.get("byte_truncated"):
+        parts.append("byte cap applied")
+    print(f"[body] {' | '.join(parts)}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Pure Python HTTP testing helper powered by httpx")
+    parser.add_argument("--url", required=True)
+    parser.add_argument("--method", default="GET")
+    body_group = parser.add_mutually_exclusive_group()
+    body_group.add_argument("--data", default="")
+    body_group.add_argument("--data-file", dest="data_file", default="")
+    body_group.add_argument("--form", default="")
+    parser.add_argument("--headers", default="", type=str)
+    parser.add_argument("--cookies", default="")
+    parser.add_argument("--user-agent", dest="user_agent", default="")
+    parser.add_argument("--proxy", default="")
+    parser.add_argument("--no-proxy", dest="no_proxy", action="store_true")
+    parser.add_argument("--config", default=default_config_path())
+    parser.add_argument("--timeout", default="")
+    parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--delay", default="0")
+    parser.add_argument("--additional-args", dest="additional_args", default="")
+    parser.add_argument("--action", default="")
+    parser.add_argument("--include-headers", dest="include_headers", action="store_true")
+    parser.add_argument("--no-include-headers", dest="include_headers", action="store_false")
+    parser.add_argument("--auto-encode-url", dest="auto_encode_url", action="store_true")
+    parser.add_argument("--no-auto-encode-url", dest="auto_encode_url", action="store_false")
+    parser.add_argument("--follow-redirects", dest="follow_redirects", action="store_true")
+    parser.add_argument("--allow-insecure", dest="allow_insecure", action="store_true")
+    parser.add_argument("--verbose-output", dest="verbose_output", action="store_true")
+    parser.add_argument("--show-command", dest="show_command", action="store_true")
+    parser.add_argument("--no-show-command", dest="show_command", action="store_false")
+    parser.add_argument("--show-summary", dest="show_summary", action="store_true")
+    parser.add_argument("--no-show-summary", dest="show_summary", action="store_false")
+    parser.add_argument("--debug", dest="debug", action="store_true")
+    parser.add_argument("--response-encoding", dest="response_encoding", default="")
+    parser.add_argument("--download", dest="download", default="")
+    response_filter_group = parser.add_mutually_exclusive_group()
+    response_filter_group.add_argument("--response-filter", dest="response_filter", default="")
+    response_filter_group.add_argument("--response-filter-file", dest="response_filter_file", default="")
+    parser.add_argument("--response-filter-mode", dest="response_filter_mode", default="line")
+    parser.add_argument("--response-filter-invert", dest="response_filter_invert", action="store_true")
+    parser.add_argument("--no-response-filter-invert", dest="response_filter_invert", action="store_false")
+    parser.add_argument("--response-filter-ignore-case", dest="response_filter_ignore_case", action="store_true")
+    parser.add_argument("--no-response-filter-ignore-case", dest="response_filter_ignore_case", action="store_false")
+    parser.add_argument("--response-max-lines", dest="response_max_lines", type=int, default=0)
+    parser.add_argument("--response-max-bytes", dest="response_max_bytes", type=int, default=0)
+    parser.add_argument("--response-preview-lines", dest="response_preview_lines", type=int, default=5)
+    parser.add_argument("--response-context-lines", dest="response_context_lines", type=int, default=0)
+    parser.set_defaults(
+        include_headers=True,
+        auto_encode_url=False,
+        follow_redirects=False,
+        allow_insecure=False,
+        verbose_output=False,
+        show_command=True,
+        show_summary=True,
+        debug=False,
+        response_filter_invert=False,
+        response_filter_ignore_case=False,
+    )
+    args = parser.parse_args()
+
+    try:
+        config = load_http_test_config(args.config)
+    except ValueError as exc:
+        print(f"Config preparation failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        proxy_pool, proxy_pool_strategy = resolve_config_proxy_pool(config, args.config)
+    except FileNotFoundError as exc:
+        print(f"Config preparation failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    config_proxy = "" if proxy_pool else resolve_config_proxy(config)
+    effective_proxy = ""
+    proxy_mode = "none"
+    if not args.no_proxy:
+        cli_proxy = (args.proxy or "").strip()
+        if cli_proxy:
+            effective_proxy = cli_proxy
+            proxy_mode = "single"
+            proxy_pool = []
+        elif proxy_pool:
+            proxy_mode = "pool"
+        elif config_proxy:
+            effective_proxy = config_proxy
+            proxy_mode = "single"
+        elif isinstance(config.get("proxy"), dict) and str(config["proxy"].get("mode", "")).strip().lower() == "pool" and str_to_bool(config["proxy"].get("enabled", True)):
+            print("Config preparation failed: proxy pool is enabled but empty", file=sys.stderr)
+            sys.exit(1)
+
+    try:
+        response_filter = load_response_filter(args.response_filter, args.response_filter_file)
+    except FileNotFoundError as exc:
+        print(f"Response filter preparation failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    response_max_lines = max(0, args.response_max_lines or 0)
+    response_max_bytes = max(0, args.response_max_bytes or 0)
+    response_preview_lines = max(0, args.response_preview_lines if args.response_preview_lines is not None else 5)
+    response_context_lines = max(0, args.response_context_lines or 0)
+    compiled_response_filter = None
+    if response_filter:
+        compiled_response_filter = compile_response_filter(
+            response_filter, args.response_filter_ignore_case
+        )
+
+    repeat = max(1, args.repeat)
+    try:
+        delay_between = float(args.delay or "0")
+        if delay_between < 0:
+            delay_between = 0.0
+    except ValueError:
+        delay_between = 0.0
+
+    prepared_url = smart_encode_url(args.url) if args.auto_encode_url else args.url
+    method = (args.method or "GET").upper()
+
+    headers_list = parse_headers(args.headers)
+    headers = httpx.Headers(headers_list)
+    if args.user_agent:
+        headers["User-Agent"] = args.user_agent
+
+    body_bytes = None
+    body_meta = {
+        "source": "inline",
+        "mode": "none",
+        "length": 0,
+        "charset": None,
+        "encoded": False,
+    }
+    try:
+        body_bytes, body_meta = prepare_body(
+            args.data,
+            headers,
+            args.debug,
+            args.data_file,
+            args.form,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"Body preparation failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    cookie_dict = parse_cookies(args.cookies)
+    cookie_jar = httpx.Cookies()
+    for name, value in cookie_dict.items():
+        cookie_jar.set(name, value)
+
+    additional_options = parse_additional_options(args.additional_args)
+
+    timeout_value = None
+    if args.timeout:
+        try:
+            timeout_value = float(args.timeout)
+        except ValueError:
+            timeout_value = None
+    timeout = httpx.Timeout(timeout_value or 60.0)
+
+    client_kwargs = {
+        "timeout": timeout,
+        "verify": not args.allow_insecure,
+        "follow_redirects": args.follow_redirects,
+        "cookies": cookie_jar,
+        "trust_env": False,
+    }
+    proxy_arg = "proxy" if "proxy" in inspect.signature(httpx.Client).parameters else "proxies"
+    if effective_proxy:
+        client_kwargs[proxy_arg] = effective_proxy
+    if "http2" in additional_options:
+        client_kwargs["http2"] = str_to_bool(additional_options["http2"])
+    if "cert" in additional_options:
+        client_kwargs["cert"] = additional_options["cert"]
+    if "verify" in additional_options:
+        value = additional_options["verify"]
+        lowered = value.strip().lower()
+        client_kwargs["verify"] = str_to_bool(value) if lowered in {"true", "false", "1", "0", "yes", "no", "on", "off"} else value
+    if "max_redirects" in additional_options:
+        try:
+            client_kwargs["max_redirects"] = int(additional_options["max_redirects"])
+        except ValueError:
+            pass
+    if "trust_env" in additional_options:
+        client_kwargs["trust_env"] = str_to_bool(additional_options["trust_env"])
+    if args.no_proxy:
+        client_kwargs["trust_env"] = False
+
+    overview_proxy = effective_proxy
+    overview_pool_index = 0
+    if proxy_mode == "pool":
+        overview_proxy, overview_pool_index = choose_proxy_from_pool(
+            proxy_pool, proxy_pool_strategy, 0
+        )
+    if args.show_command:
+        render_request_overview(
+            method,
+            prepared_url,
+            headers,
+            body_meta,
+            overview_proxy,
+            bool(client_kwargs.get("trust_env", False)),
+        )
+        if proxy_mode == "pool":
+            print(
+                f"Proxy Pool: {proxy_pool_strategy} "
+                f"{overview_pool_index + 1}/{len(proxy_pool)}"
+            )
+
+    aggregate = None
+    if args.show_summary:
+        aggregate = {key: [] for key in METRIC_KEYS}
+        aggregate["wall_time"] = []
+
+    exit_code = 0
+    verify_option = client_kwargs.get("verify", True)
+    verify_tls = verify_option if isinstance(verify_option, bool) else True
+    skip_probe = bool(effective_proxy or proxy_mode == "pool")
+
+    client = httpx.Client(**client_kwargs) if proxy_mode != "pool" else None
+    try:
+        for run_index in range(repeat):
+            if run_index > 0 and delay_between > 0:
+                time.sleep(delay_between)
+
+            run_client = client
+            run_proxy = effective_proxy
+            run_proxy_index = 0
+            if proxy_mode == "pool":
+                run_proxy, run_proxy_index = choose_proxy_from_pool(
+                    proxy_pool, proxy_pool_strategy, run_index
+                )
+                run_client_kwargs = dict(client_kwargs)
+                run_client_kwargs[proxy_arg] = run_proxy
+                run_client = httpx.Client(**run_client_kwargs)
+
+            metrics = {key: None for key in METRIC_KEYS}
+            probe_metrics = probe_connection(prepared_url, timeout_value or 60.0, verify_tls, skip_probe)
+            metrics.update(probe_metrics)
+
+            start = time.perf_counter()
+            first_byte_time = None
+            body_buffer = bytearray()
+
+            try:
+                stream_kwargs = {
+                    "method": method,
+                    "url": prepared_url,
+                    "headers": headers,
+                }
+                if body_bytes is not None:
+                    stream_kwargs["content"] = body_bytes
+
+                if proxy_mode == "pool":
+                    print(
+                        f"\n----- Proxy #{run_index + 1}: "
+                        f"{mask_url_credentials(run_proxy)} "
+                        f"({run_proxy_index + 1}/{len(proxy_pool)}, {proxy_pool_strategy}) -----"
+                    )
+
+                with run_client.stream(**stream_kwargs) as response:
+                    status_code = response.status_code
+                    metrics["http_code"] = status_code
+                    metrics["redirects"] = len(response.history)
+                    http_version = response.http_version or "HTTP/1.1"
+
+                    for chunk in response.iter_bytes():
+                        if first_byte_time is None:
+                            first_byte_time = time.perf_counter()
+                        body_buffer.extend(chunk)
+
+                    total_elapsed = time.perf_counter() - start
+                    metrics["total"] = total_elapsed
+                    metrics["ttfb"] = (first_byte_time - start) if first_byte_time else total_elapsed
+                    metrics["size_download"] = len(body_buffer)
+                    metrics["speed_download"] = (len(body_buffer) / total_elapsed) if total_elapsed > 0 else 0.0
+                    if metrics.get("pretransfer") is None:
+                        metrics["pretransfer"] = (metrics.get("dns_lookup") or 0.0) + (metrics.get("tcp_connect") or 0.0) + (metrics.get("tls_handshake") or 0.0)
+
+                    decoded_body, used_encoding, encoding_source = decode_body_bytes(bytes(body_buffer), response.headers, args.response_encoding)
+
+                    print(f"\n===== Response #{run_index + 1} =====")
+                    download_target = (args.download or "").strip()
+                    if download_target:
+                        if repeat > 1 and "{i}" in download_target:
+                            filename = download_target.format(i=run_index + 1)
+                        else:
+                            filename = download_target
+                        try:
+                            if os.path.dirname(filename):
+                                os.makedirs(os.path.dirname(filename), exist_ok=True)
+                            with open(filename, "wb") as fh:
+                                fh.write(body_buffer)
+                            print(f"[saved response body to file: {filename}]")
+                        except OSError as exc:
+                            print(f"[failed to save response body to {filename}: {exc}]", file=sys.stderr)
+                    if args.include_headers:
+                        status_line = f"{http_version} {status_code} {response.reason_phrase}"
+                        print(status_line)
+                        for key, value in response.headers.items():
+                            print(f"{key}: {value}")
+                        print("")
+                    output_body, body_output_meta = format_response_body_output(
+                        decoded_body,
+                        response_filter,
+                        args.response_filter_mode,
+                        args.response_filter_invert,
+                        args.response_filter_ignore_case,
+                        response_max_lines,
+                        response_max_bytes,
+                        response_preview_lines,
+                        response_context_lines,
+                        compiled_filter=compiled_response_filter,
+                    )
+                    has_filter_or_cap = bool(
+                        response_filter or response_max_lines > 0 or response_max_bytes > 0
+                    )
+                    if has_filter_or_cap and body_output_meta.get("mode") != "empty":
+                        print_response_body_summary(body_output_meta)
+                        if body_output_meta.get("preview") and not body_output_meta.get("matched_lines"):
+                            print("[body] no regex match; showing preview:")
+                    if output_body:
+                        print(output_body)
+                        if body_output_meta.get("truncated") or body_output_meta.get("byte_truncated"):
+                            omitted = (body_output_meta.get("total_lines") or 0) - (
+                                body_output_meta.get("display_lines") or 0
+                            )
+                            if omitted > 0:
+                                print(f"[body] ... {omitted} more line(s) omitted (use --download for full body)")
+                    elif body_output_meta.get("mode") == "empty":
+                        print("[no body]")
+                    elif response_filter and not body_output_meta.get("preview"):
+                        print("[body] no lines matched filter")
+                    else:
+                        print("[no body]")
+
+                    print(f"\n----- Meta #{run_index + 1} -----")
+                    if args.show_summary:
+                        for key in METRIC_KEYS:
+                            label = key.replace("_", " ").title()
+                            print(f"{label}: {format_metric_value(key, metrics.get(key))}")
+                            value = metrics.get(key)
+                            if aggregate is not None and isinstance(value, (int, float)):
+                                aggregate[key].append(float(value))
+                        print(f"Wall Time (client): {total_elapsed:.6f}s")
+                        if aggregate is not None:
+                            aggregate["wall_time"].append(total_elapsed)
+                    else:
+                        print("Summary disabled (--no-show-summary).")
+                        print(f"Wall Time (client): {total_elapsed:.6f}s")
+
+                    print(f"Encoding Used: {used_encoding} ({encoding_source})")
+
+                    if args.verbose_output:
+                        sent_bytes = len(body_bytes) if body_bytes else 0
+                        print("\nVerbose diagnostics:")
+                        print(f"  Sent body bytes: {sent_bytes}")
+                        if probe_metrics:
+                            for key, value in probe_metrics.items():
+                                print(f"  Probe {key}: {value:.6f}s")
+                        print(f"  History length: {len(response.history)}")
+
+            except httpx.HTTPError as exc:
+                exit_code = 1
+                elapsed = time.perf_counter() - start
+                print(f"\n===== Response #{run_index + 1} =====")
+                print(f"Request failed after {elapsed:.6f}s: {exc}")
+                continue
+            finally:
+                if proxy_mode == "pool" and run_client is not None:
+                    run_client.close()
+
+        if aggregate and repeat > 1:
+            print("\n===== Aggregate Timing =====")
+            for key, values in aggregate.items():
+                summary = summarize(values)
+                if not summary:
+                    continue
+                label = key.replace("_", " ").title()
+                min_v, avg_v, max_v = summary
+                if key == "speed_download":
+                    print(f"{label}: min {min_v:.2f} B/s | avg {avg_v:.2f} B/s | max {max_v:.2f} B/s")
+                elif key == "size_download":
+                    print(f"{label}: min {min_v:.0f}B | avg {avg_v:.0f}B | max {max_v:.0f}B")
+                elif key in {"http_code", "redirects"}:
+                    print(f"{label}: min {min_v:.0f} | avg {avg_v:.2f} | max {max_v:.0f}")
+                else:
+                    print(f"{label}: min {min_v:.6f}s | avg {avg_v:.6f}s | max {max_v:.6f}s")
+
+    finally:
+        if client is not None:
+            client.close()
+
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        sys.exit(130)

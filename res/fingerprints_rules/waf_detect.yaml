@@ -1,0 +1,230 @@
+version: '1.0'
+description: WAF 检测规则
+request_groups:
+  - paths:
+      - '{{BaseURL}}'
+    host_redirects: true
+    fingerprints:
+      - name: 安全宝
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('X-Powered-By-Anquanbao', header)"
+      - name: 云加速
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Server: yunjiasu', header)"
+      - name: BlockDos
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Server: BlockDos.Net', header)"
+      - name: 云盾
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('href=\\\\\"/.well-known/yunjiasu-cgi/', body)"
+          - "regex('help.365cyd.com/cyd-error-help.html?code=403', body)"
+          condition: or
+      - name: 通用WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Web Application Firewall Error', body)"
+      - name: Cloudflare
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Server: cloudflare', header)"
+          - "regex('Set-Cookie: __cfduid=', header)"
+          condition: or
+      - name: FortiGate
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('FortiGate Application Control', body) && regex('globalurl.fortinet.net', body)"
+          - "regex('Web Application Firewall', body) && regex('globalurl.fortinet.net', body) && regex('Event ID', body)"
+          - "regex('FortiGuard Intrusion Prevention', body) && regex('globalurl.fortinet.net', body) && regex('<title>Web Filter Violation', body)"
+          condition: or
+      - name: 华为云WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Server: HuaweiCloudWAF', header)"
+          - "regex('Set-Cookie: HWWAFSESID=', header)"
+          - "regex('hws_security@', body)"
+          condition: or
+      - name: Imunify360
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Server: imunify360', header)"
+          - "regex('imunify360.preloader', body)"
+          - "regex('protected.by.{0,10}?imunify360', body)"
+          - "regex('powered.by.{0,10}?imunify360', body)"
+          condition: or
+      - name: 绿盟WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Server: NSFocus', header)"
+          - "regex('<title>fw_error_www', body)"
+          - "regex('src=\\\\\"/oralogo_small.gif\\\\\"', body)"
+          - "regex('www.oracleimg.com/us/assets/metrics/ora_ocom.js', body)"
+          condition: or
+      - name: PentaWaf
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Server: PentaWaf', header)"
+      - name: 腾讯云WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('腾讯云Web应用防火墙', body) && status_code == 403"
+      - name: Safe3WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Server: Safe3 Web Firewall', header)"
+          - "regex('X-Powered-By: Safe3WAF', header)"
+          condition: or
+      - name: 安全狗
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Server: Safedog', header)"
+          - "regex('Set-Cookie: safedog-flow-item=', header)"
+          - "regex('safedogsite/broswer_logo.jpg', body)"
+          - "regex('404.safedog.cn/sitedog_stat.html', body)"
+          - "regex('404.safedog.cn/images/safedogsite/head.png', body)"
+          condition: or
+      - name: SonicWALL
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Server: SonicWALL', header)"
+          - "regex('<(title|h\\\\d{1})>Web Site Blocked', body)"
+          - "regex('\\\\+?nsa_banner', body)"
+          condition: or
+      - name: 奇安信WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Server: qianxin-waf', header)"
+      - name: 网御WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('WZWS-Ray', header)"
+          - "regex('X-Powered-By-360WZB', header)"
+          condition: or
+      - name: 云盾WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Server: YUNDUN', header)"
+          - "regex('X-Cache: YUNDUN', header)"
+          - "regex('Set-Cookie: yd_cookie=', header)"
+          - "regex('Blocked by YUNDUN Cloud WAF', body)"
+          - "regex('yundun\\\\.com/yd[-_]http[_-]error/', body)"
+          - "regex('www\\\\.yundun\\\\.com/(static/js/fingerprint\\\\d{1}?\\\\.js)?', body)"
+          condition: or
+      - name: 云锁
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('Set-Cookie: yunsuo_session=', header)"
+          - "regex('class=\\\\\"yunsuologo\\\\\"', body)"
+          condition: or
+      - name: 长亭WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('您的访问请求可能对网站造成安全威胁，请求已被阻断', body)"
+          - "regex('您的访问请求可能对网站造成安全威胁，请求已被 长亭 SafeLine 阻断', body)"
+          condition: or
+      - name: 宝塔WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('宝塔网站防火墙免费版', body) && regex('这是误报，请联系宝塔', body) && regex('http://www.bt.cn/bbs', body)"
+      - name: 通用拦截页面
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('很抱歉，由于您访问的URL有可能对网站造成安全威胁，您的访问被阻断', body)"
+          - "regex('提醒：您的访问可能对网站造成危险，已被云防护安全拦截', body)"
+          - "regex('抱歉！您的访问可能对网站造成威胁，已被云防护安全拦截', body)"
+          - "regex('您的请求带有不合法参数，已被网站管理员设置拦截', body)"
+          - "regex('当前访问可能对网站安全造成威胁，已被云防护拦截', body)"
+          - "regex('您的请求疑似攻击行为', body) && regex('如果您是站长，您可以前往WAF控制台进行误报屏蔽设置，让您的访问不再被拦截', body)"
+          - "regex('当前页面开启了安全防护策略。您刚才的操作被安全防护策略禁止', body)"
+          - "regex('当前访问疑似黑客攻击', body) && regex('您的IP最近有可疑的攻击行为，请稍后重试', body)"
+          - "regex('请不要使用非法的URL地址访问', body) && regex('您访问的URL地址不被允许', body)"
+          - "regex('<title>WTS-WAF拦截提示</title>', body)"
+          - "regex('502 Bad Gateway', body) && regex('网站访问者', body) && regex('安域防护节点', body) && regex('源站服务器', body)"
+          condition: or
+      - name: 腾讯云WAF-regex
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('waf\\\\.tencent\\\\-?cloud\\\\.com', body)"
+      - name: 创宇盾WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('创宇盾提示您：当前访问疑似黑客攻击，已被网站管理员设置为拦截', body)"
+          - "regex('help.365cyd.com/cyd-error-help.html?code=403', body)"
+          condition: or
+      - name: 长亭雷池WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('访问已被拦截', body) && regex('已被管理员拦截', body)"
+          - "regex('\"name\":\"雷池\"', body)"
+          condition: or
+      - name: 阿里云WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('很抱歉，由于您访问的URL有可能对网站造成安全威胁，您的访问被阻断', body)"
+      - name: 安恒明御WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('请不要使用非法的URL地址访问', body) && regex('您访问的URL地址不被允许', body)"
+      - name: 奇安信安域WAF
+        category: waf
+        matchers:
+        - type: dsl
+          dsl:
+          - "regex('502 Bad Gateway', body) && regex('网站访问者', body) && regex('安域防护节点', body) && regex('源站服务器', body)"

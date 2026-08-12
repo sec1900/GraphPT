@@ -100,6 +100,13 @@ def schema_version_latest() -> int:
 # 迁移脚本列表：(版本号, 描述, SQL 列表)
 # 每个版本只执行一次，执行后记录到 schema_version 表
 _MIGRATIONS: list[tuple[int, str, list[str]]] = [
+    (43, "credentials add session protocol columns", [
+        "ALTER TABLE credentials ADD COLUMN role_label TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE credentials ADD COLUMN auth_cookie_string TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE credentials ADD COLUMN auth_headers_json TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE credentials ADD COLUMN jwt_payload_json TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE credentials ADD COLUMN session_json TEXT NOT NULL DEFAULT '{}'",
+    ]),
     (1, "task_steps add token/cost columns", [
         "ALTER TABLE task_steps ADD COLUMN prompt_tokens INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE task_steps ADD COLUMN completion_tokens INTEGER NOT NULL DEFAULT 0",
