@@ -376,6 +376,35 @@ def _exec_update_todos(
 _SUBAGENT_EXCLUDED_TOOLS: frozenset[str] = frozenset()
 
 
+def _build_predefined_subagents() -> dict[str, str]:
+    """预定义子代理注册表：任务型（4）+ 领域专家型（8）。
+
+    description 匹配时自动注入完整任务模板（主代理 prompt 只带本次上下文）。
+    """
+    _map: dict[str, str] = {}
+    try:
+        from graphpt.core.subagent_prompts import (
+            TARGET_MODELER_TASK,
+            SCAN_TRIAGE_TASK,
+            SOURCE_AUDIT_TASK,
+            EXPLOIT_RESEARCH_TASK,
+        )
+        _map.update({
+            "target_modeler": TARGET_MODELER_TASK,
+            "scan_triage": SCAN_TRIAGE_TASK,
+            "source_audit": SOURCE_AUDIT_TASK,
+            "exploit_research": EXPLOIT_RESEARCH_TASK,
+        })
+        # 领域专家子代理（vibe-pentest 方法论）:
+        # description=injection/auth/file/api/business/misc/poc/chain →
+        # 自动注入领域模板（角色身份/职责范围/白帽操守/执行策略/反幻觉/输出协议）
+        from graphpt.core.domain_agent_templates import DOMAIN_AGENT_TEMPLATES
+        _map.update(DOMAIN_AGENT_TEMPLATES)
+    except ImportError:
+        pass
+    return _map
+
+
 def _exec_dispatch_agent(
     arguments: dict[str, Any],
     *,
@@ -432,22 +461,7 @@ def _exec_dispatch_agent(
 
     # B8: 预定义子代理类型 → 自动注入完整任务模板。主代理 prompt 不再嵌入 5K 字符模板,
     # 只需在 description 选类型,本次具体上下文走 prompt 参数。
-    _PREDEFINED_SUBAGENTS: dict[str, str] = {}
-    try:
-        from graphpt.core.subagent_prompts import (
-            TARGET_MODELER_TASK,
-            SCAN_TRIAGE_TASK,
-            SOURCE_AUDIT_TASK,
-            EXPLOIT_RESEARCH_TASK,
-        )
-        _PREDEFINED_SUBAGENTS = {
-            "target_modeler": TARGET_MODELER_TASK,
-            "scan_triage": SCAN_TRIAGE_TASK,
-            "source_audit": SOURCE_AUDIT_TASK,
-            "exploit_research": EXPLOIT_RESEARCH_TASK,
-        }
-    except ImportError:
-        pass
+    _PREDEFINED_SUBAGENTS = _build_predefined_subagents()
 
     desc_key = description.strip().lower()
     if desc_key in _PREDEFINED_SUBAGENTS:
