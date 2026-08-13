@@ -105,7 +105,10 @@ _PARALLEL_SAFE_TOOL_NAMES = frozenset({
     "Bash",
     "Grep",
     "Glob",
-    "Task",
+    # Task 不走并行：9 个子代理并行时（flush_parallel_batch + AI 并发）子代理
+    # 执行质量打折、findings 文件不写。串行执行（一次一个）经测试验证每个
+    # 子代理都会按 user prompt 输出协议写 findings 文件 — 可靠性优先于速度。
+    # "Task",
     "graph_query",
     "graph_summary",
     "graph_attack_paths",
@@ -1106,11 +1109,18 @@ def run_agent_loop(
     # 挂当前运行上下文，供 dispatch_agent 子代理工具读取（含递归深度 +1）。
     _parent_ctx = _AGENT_RUN_CONTEXT.get()
     _cur_depth = int((_parent_ctx or {}).get("depth", -1)) + 1
+    # agent_source 溯源：子代理 session_role 格式 "subagent:{domain}"（injection/auth/...）
+    # → 该领域子代理写入的漏洞标记 agent_source={domain}；主 agent 为 main。
+    _agent_source = "main"
+    if session_role.startswith("subagent:"):
+        _agent_source = session_role.split(":", 1)[1].strip() or "subagent"
     _ctx_token = _AGENT_RUN_CONTEXT.set({
         "ai_config": ai_config,
         "depth": _cur_depth,
         "workspace_root": workspace_root,
         "session_role": session_role,
+        "agent_source": _agent_source,
+        "dispatch_count": 0,  # 主 agent 已派发的子代理数（Task 工具调用计数，供阶段门禁）
     })
     # 子代理透传 status callback：dispatch_agent 派子代理时读这个 contextvar，
     # wrap 一下（加 ↳ 前缀）传给子 run_agent_loop，让子代理状态可视。
@@ -1473,6 +1483,12 @@ def run_agent_loop(
             pending_parallel = []
 
         for tc in tool_call_requests:
+            # Task (dispatch_agent) 调用计数：供阶段门禁判断 8 领域是否派发完
+            if tc.name == "Task":
+                _ctx_now = _AGENT_RUN_CONTEXT.get()
+                if _ctx_now is not None:
+                    _ctx_now["dispatch_count"] = int(_ctx_now.get("dispatch_count", 0)) + 1
+
             if on_status:
                 args_brief = json.dumps(tc.arguments, ensure_ascii=False)[:80]
                 on_status(f"[iter {iteration+1}] 调用工具 {tc.name}({args_brief})")

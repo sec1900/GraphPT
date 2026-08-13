@@ -37,6 +37,21 @@ def _exec_db_query_adapter(
     return exec_db_query(arguments, db_file=db_file, task_id=task_id, workspace_root=workspace_root)
 
 
+def _exec_browser_auth_tool(
+    arguments: dict[str, Any],
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """browser_auth 注册执行器：委托 core/browser.execute_browser_tool。"""
+    from graphpt.core.browser import execute_browser_tool
+    return execute_browser_tool(
+        "browser_auth",
+        dict(arguments),
+        task_id=int(kwargs.get("task_id", 0) or 0),
+        workspace_root=kwargs.get("workspace_root"),
+        db_file=kwargs.get("db_file"),
+    )
+
+
 def _exec_db_write_adapter(
     arguments: dict[str, Any],
     *,
@@ -48,6 +63,80 @@ def _exec_db_write_adapter(
     if db_file is None:
         return {"error": "db_file not available — DB tools require agent loop context", "success": False}
     return exec_db_write(arguments, db_file=db_file, task_id=task_id)
+
+
+def _exec_http_test(
+    arguments: dict[str, Any],
+    *,
+    workspace_root: Path | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """http_test 注册执行器：包装 graphpt/tools/http_test.py CLI。
+
+    响应瘦身/编码守护/时序聚合由 http_test.py 内置；这里把参数映射为
+    CLI 参数并截断超长输出（防止灌爆 agent 上下文）。
+    """
+    import json as _json
+    import subprocess as _sp
+    import sys as _sys
+    import time as _time
+    from pathlib import Path as _Path
+
+    url = str(arguments.get("url", "") or "").strip()
+    if not url:
+        return {"error": "url required", "success": False}
+
+    script = _Path(__file__).resolve().parent / "http_test.py"
+    cmd = [_sys.executable, str(script), "--url", url]
+    method = str(arguments.get("method", "GET") or "GET").strip().upper()
+    if method and method != "GET":
+        cmd += ["--method", method]
+    data = arguments.get("data")
+    if data:
+        cmd += ["--data", str(data)]
+    headers = arguments.get("headers")
+    if headers:
+        if isinstance(headers, dict):
+            headers = _json.dumps(headers, ensure_ascii=False)
+        cmd += ["--headers", str(headers)]
+    cookies = arguments.get("cookies")
+    if cookies:
+        cmd += ["--cookies", str(cookies)]
+    timeout = int(arguments.get("timeout", 20) or 20)
+    cmd += ["--timeout", str(timeout)]
+    repeat = int(arguments.get("repeat", 1) or 1)
+    if repeat > 1:
+        cmd += ["--repeat", str(repeat), "--delay", str(arguments.get("delay", 0.3) or 0.3)]
+    if arguments.get("include_headers"):
+        cmd += ["--include-headers"]
+    cmd += ["--show-summary", "--response-max-lines", "80"]
+
+    try:
+        start = _time.monotonic()
+        proc = _sp.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout + 30,
+            cwd=str(workspace_root) if workspace_root else None,
+        )
+        duration_s = round(_time.monotonic() - start, 2)
+    except _sp.TimeoutExpired:
+        return {"error": "timeout", "success": False, "timed_out": True}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc), "success": False}
+
+    out = (proc.stdout or "") + (("\n[stderr] " + proc.stderr) if proc.stderr.strip() else "")
+    if len(out) > 8000:
+        out = out[:8000] + f"\n...[输出截断 {len(out)} 字符]"
+    return {
+        "stdout": out,
+        "return_code": proc.returncode,
+        "duration_s": duration_s,
+        "success": proc.returncode == 0,
+    }
 
 
 _BUILTIN_TOOLS: list[tuple[ToolDef, ToolExecutor]] = [
@@ -68,6 +157,62 @@ _BUILTIN_TOOLS: list[tuple[ToolDef, ToolExecutor]] = [
             approval_policy="manual_only",
         ),
         _exec_run_command,
+    ),
+    (
+        ToolDef(
+            name="browser_auth",
+            description=(
+                "浏览器自动化认证登录（提取登录态 Cookie 存凭据库，供后续 http_test 携带）。"
+                "mode=auto 自动填表登录（需 username/password）；mode=manual 打开浏览器人工登录。"
+                "参数：url 登录页地址；mode auto/manual；username/password 凭据；timeout_ms 超时。"
+                "成功后返回 cookie 串，后续请求用 http_test 的 cookies 参数携带。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "登录页 URL"},
+                    "mode": {"type": "string", "enum": ["auto", "manual"], "default": "auto"},
+                    "username": {"type": "string", "description": "登录用户名"},
+                    "password": {"type": "string", "description": "登录密码"},
+                    "timeout_ms": {"type": "number", "default": 120000},
+                },
+                "required": ["url"],
+            },
+            risk_level="medium",
+            needs_scope_check=False,
+        ),
+        _exec_browser_auth_tool,
+    ),
+    (
+        ToolDef(
+            name="http_test",
+            description=(
+                "统一 HTTP 发包工具（渗透测试首选，禁止裸 curl 做注入/表单/API 测试）。"
+                "功能：响应瘦身防灌爆上下文、自动 charset 检测（GBK/UTF-8）、时序聚合 "
+                "（--repeat 盲注用）、--show-command 输出可回放证据命令。\n"
+                "参数：url 必填；method 默认 GET；data 请求体；headers JSON 字符串；"
+                "cookies Cookie 串；timeout 秒；repeat 重复次数；delay 间隔秒；"
+                "include_headers 是否显示响应头。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "目标 URL"},
+                    "method": {"type": "string", "enum": ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS"], "default": "GET"},
+                    "data": {"type": "string", "description": "请求体（表单或 JSON）"},
+                    "headers": {"type": "string", "description": "JSON 格式头，如 {\"Content-Type\": \"application/json\"}"},
+                    "cookies": {"type": "string", "description": "Cookie 串，如 a=1; b=2"},
+                    "timeout": {"type": "number", "default": 20},
+                    "repeat": {"type": "number", "default": 1, "description": "重复次数（时序/盲注测试用）"},
+                    "delay": {"type": "number", "default": 0.3, "description": "重复间隔秒"},
+                    "include_headers": {"type": "boolean", "default": False},
+                },
+                "required": ["url"],
+            },
+            risk_level="medium",
+            needs_scope_check=False,
+        ),
+        _exec_http_test,
     ),
     (ToolDef(name="Read", description="读文件。支持 @skill/<name>、@poc/<id>、@asset/<category> 前缀引用知识库。", parameters={"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "default": 0}, "limit": {"type": "integer", "default": 8000, "description": "读取字符数，不传则返回全文"}}, "required": ["path"]}, risk_level="low", needs_scope_check=False), _exec_read_file),
     (ToolDef(name="Write", description="写文件(覆盖/追加)。@evidence/<id> 写漏洞证据;@asset/<category> 追加资产(自动去重,mode=append)。", parameters={"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "mode": {"type": "string", "enum": ["overwrite", "append"], "default": "overwrite"}}, "required": ["path", "content"]}, risk_level="low", needs_scope_check=False), _exec_write_note),
@@ -469,6 +614,19 @@ def _exec_dispatch_agent(
     elif description:
         sub_system_prompt += f"\n任务标签：{description}"
 
+    # 领域骨架注入：程序生成"必测类型 + 攻击面"清单，强制子代理逐项覆盖
+    # （对齐 vibe-pentest findings 骨架协议 — 该测的必须测）
+    # asset_id 通过 session_role 传递（格式 "graph_agent:{asset_id}"）
+    try:
+        from graphpt.core.findings_skeleton import build_skeleton_prompt
+        _role = str(ctx.get("session_role") or "")
+        _aid = _role.split(":", 1)[1] if ":" in _role else ""
+        _skeleton = build_skeleton_prompt(desc_key, _aid)
+        if _skeleton:
+            sub_system_prompt += "\n\n" + _skeleton
+    except Exception:  # noqa: BLE001
+        pass
+
     # 进度回灌：子代理与父 loop 同线程，从 contextvar 取 UI 进度回调（CLI 状态栏）。
     # 给子 run_agent_loop 挂一个只计数的 HookManager：每次子工具完成 → 递增主状态栏
     # 的「子代理 N 工具」，让委派期间看得出子代理在动、没卡死。无 UI（如 web 路径）则为 None。
@@ -520,6 +678,52 @@ def _exec_dispatch_agent(
         except Exception:  # noqa: BLE001
             pass
 
+    # 输出协议强制（user prompt 层 — dsv4flash 遵循 user prompt 明确指令，
+    # 无视 system prompt 协议文本。测试证明：指令写进 user prompt 就会被执行）
+    if desc_key:
+        prompt = (str(prompt).rstrip() +
+                  "\n\n【输出协议 — 必须遵守】\n"
+                  f"1) 测试确认的每个漏洞，必须用 Write 工具写入 findings/{desc_key}.json：\n"
+                  '   path = findings/' + desc_key + '.json，content = JSON 数组，每条格式：\n'
+                  '   {"url": "...", "vuln_type": "<枚举值: sqli/xss/idor/csrf/lfi/ssrf/'
+                  'business-logic/info-leak/privilege-escalation/...>", "title": "...", '
+                  '"severity": "critical/high/medium/low/info", "confidence": "confirmed", "detail": "..."}\n'
+                  "2) 测过判定不存在的类型无需写入；\n"
+                  "3) 全部测试完成后，把发现摘要回传主代理。\n"
+                  "【结束条件】不写入 findings 文件不算完成任务——主代理会检查该文件是否存在。")
+
+    # 子代理执行刚性门禁：每轮迭代注入"完成标准"检查（findings 文件是否已写）。
+    # 文件存在是程序可判定的完成标志 — 不依赖 LLM 自觉，无法早退。
+    _findings_path = None
+    if workspace_root is not None and desc_key:
+        try:
+            _findings_path = Path(workspace_root) / "findings" / f"{desc_key}.json"
+        except Exception:  # noqa: BLE001
+            _findings_path = None
+
+    _sub_iter_count = {"n": 0}  # 子代理迭代计数（引导收敛，防完美主义陷阱）
+
+    def _sub_steering() -> list[str]:
+        msgs: list[str] = []
+        _sub_iter_count["n"] += 1
+        if _findings_path is not None and not _findings_path.exists():
+            if _sub_iter_count["n"] > 25:
+                # 深度探索已完成：引导立即写文件收敛（避免"没测完就一直测"卡死）
+                msgs.append(
+                    "【立即收尾】你已充分测试（超过 25 轮迭代）。现在必须用 Write 工具写入 "
+                    "findings/%(d)s.json（JSON 数组：url/vuln_type/title/severity/confidence/detail），"
+                    "把你已确认的所有漏洞写入该文件，然后立即结束任务。不要再继续测试。" % {"d": desc_key}
+                )
+            else:
+                msgs.append(
+                    "【完成标准未达成】你尚未写入 findings 文件（路径 findings/%(d)s.json）。"
+                    "继续逐项测试必测清单中的类型，把确认的漏洞写入该文件"
+                    "（JSON 数组：url/vuln_type/title/severity/confidence/detail）；"
+                    "测过判定不存在的类型无需写入。测试到主要攻击面覆盖后即可写文件结束，"
+                    "不必穷尽每个参数变体。" % {"d": desc_key}
+                )
+        return msgs
+
     try:
         result = run_agent_loop(
             ai_config=ctx["ai_config"],
@@ -532,9 +736,10 @@ def _exec_dispatch_agent(
             task_id=0,  # 子代理用 0：内部工具事件不发主屏 SSE（对齐 Claude Code 折叠子代理过程），
                         # 中间步骤也不落库——它是隔离临时上下文，只回传 summary 给主代理。
             stop_event=stop_event,
-            session_role="subagent",
+            session_role=f"subagent:{desc_key}",  # 领域溯源：save_vulnerability 标记 agent_source
             hooks=sub_hooks,
             on_status=sub_on_status,
+            steering_provider=_sub_steering,
         )
     finally:
         if progress:
@@ -548,12 +753,65 @@ def _exec_dispatch_agent(
             except Exception:  # noqa: BLE001
                 pass
 
+    # 自动入库：扫描子代理的 Write 调用，解析 findings/{domain}.json 并写入图库
+    # （对齐 vibe-pentest 的 findings 文件协议 — 数据不依赖主代理转写）
+    ingested = 0
+    try:
+        import json as _json
+        from graphpt.tools.graph_write_tools import _exec_save_vulnerability
+        _aid = _role.split(":", 1)[1] if ":" in _role else ""
+        for rec in result.tool_calls or []:
+            if str(rec.get("tool_name", "")) != "Write":
+                continue
+            _args = rec.get("arguments") or {}
+            _path = str(_args.get("path", "")).replace("\\", "/")
+            if not _path.startswith("findings/") or not _path.endswith(".json"):
+                continue
+            _content = str(_args.get("content", "")).strip()
+            try:
+                _items = _json.loads(_content)
+            except (TypeError, ValueError, _json.JSONDecodeError):
+                continue
+            if not isinstance(_items, list):
+                continue
+            for item in _items:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    _r = _exec_save_vulnerability({
+                        "url": str(item.get("url", "")),
+                        "vuln_type": str(item.get("vuln_type", "")),
+                        "title": str(item.get("title", "")),
+                        "severity": str(item.get("severity", "medium")),
+                        "confidence": str(item.get("confidence", "likely")),
+                        "detail": str(item.get("detail", "")),
+                        "status": "confirmed",
+                        "asset_id": _aid,
+                    })
+                    if _r.get("success"):
+                        ingested += 1
+                except Exception:  # noqa: BLE001
+                    continue
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 三态验收：findings 文件写入 或 save_vulnerability 调用过 都算产出；
+    # 两者都没有 → subagent_no_output=True，主 agent 收到后必须重新派发或自行补测
+    saved_directly = 0
+    for rec in result.tool_calls or []:
+        if str(rec.get("tool_name", "")) == "save_vulnerability":
+            saved_directly += 1
+    no_output = (ingested == 0 and saved_directly == 0)
+
     summary = (result.final_text or "").strip() or "[子代理未产出文字结论]"
     return {
         "success": True,
         "summary": summary,
         "iterations": result.iterations,
         "tool_call_count": len(result.tool_calls),
+        "findings_ingested": ingested,
+        "saved_directly": saved_directly,
+        "subagent_no_output": no_output,
         "depth": depth + 1,
     }
 

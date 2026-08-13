@@ -186,6 +186,23 @@ def _check_dependencies():
         sys.exit(1)
 
 
+def _trim_uvicorn_log(max_bytes: int = 100 * 1024 * 1024, keep_tail: int = 10 * 1024 * 1024):
+    """启动前截断超大 uvicorn.log（手动重定向场景防无限增长）。"""
+    try:
+        log_file = PROJECT / "data" / "debug" / "uvicorn.log"
+        if not log_file.exists():
+            return
+        size = log_file.stat().st_size
+        if size > max_bytes:
+            with log_file.open("rb") as f:
+                f.seek(-keep_tail, 2)
+                tail = f.read()
+            log_file.write_bytes(tail)
+            print(f"[init] uvicorn.log {size // 1024 // 1024}MB 超限，已截断保留尾部 {keep_tail // 1024 // 1024}MB")
+    except Exception:
+        pass
+
+
 def _clean_redis_on_startup():
     """清理上次非正常退出残留的调度锁、槽位和扫描恢复标记，防止误恢复。"""
     try:
@@ -232,7 +249,8 @@ def main():
     if not args.debug:
         _check_dependencies()
         _clean_redis_on_startup()
-    else:
+    _trim_uvicorn_log()
+    if args.debug:
         print("[DEBUG] Skipping dependency checks and Redis cleanup")
         print()
 

@@ -209,12 +209,19 @@ def execute_tool(
     if env:
         proc_env.update(env)
 
-    # 代理注入
+    # 代理管理：显式配置 GRAPHPT_PROXY_URL 时注入；未配置时清除继承的代理
+    # 环境变量（shell 全局大写 HTTP_PROXY/HTTPS_PROXY 会劫持 agent 的 curl，
+    # 导致引号/握手失败，白白浪费多轮迭代）
     from graphpt.common.settings import get_proxy_url
     _proxy = get_proxy_url()
+    _proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                   "ALL_PROXY", "all_proxy")
     if _proxy:
-        for _pk in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        for _pk in _proxy_keys:
             proc_env.setdefault(_pk, _proxy)
+    else:
+        for _pk in _proxy_keys:
+            proc_env.pop(_pk, None)
 
     # Windows 工具环境自动探测：根据可执行文件位置注入 *DIR 环境变量
     if sys.platform == "win32":

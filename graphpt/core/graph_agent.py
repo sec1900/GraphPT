@@ -20,7 +20,10 @@ from graphpt.tools.core import _TOOL_REGISTRY
 
 _CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "agent_prompt.yaml"
 
-_EXCLUDED_TOOLS = frozenset({"Task"})
+# Task (dispatch_agent) 不再排除：主 agent 侦察后必须用它派发领域子代理
+# （injection/auth/file/api/business/misc/poc/chain），子代理有独立上下文和
+# 专属判定模板，单 agent 串行循环注意力会收敛到少数攻击面。
+_EXCLUDED_TOOLS: frozenset[str] = frozenset()
 
 _DEFAULT_SYSTEM_TEMPLATE = """你是 GraphPT 自动化渗透测试 Agent。
 
@@ -143,6 +146,29 @@ def run_graph_agent(
             f"该资产的数据都在这个 ID 下。"
         )
 
+    # 阶段门禁：包装外部 steering_provider，每轮迭代注入未完成阶段提示
+    # （对齐 vibe-pentest Phase 状态机 — LLM 无法跳过未完成阶段）
+    def _with_stage_gates(_base_provider):
+        def _provider():
+            msgs: list[str] = []
+            if _base_provider is not None:
+                try:
+                    msgs.extend(_base_provider() or [])
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                from graphpt.core.agent_loop import get_agent_run_context
+                from graphpt.core.task_objectives import check_stage_progress
+                _ctx = get_agent_run_context() or {}
+                msgs.extend(check_stage_progress(
+                    asset_id,
+                    dispatch_count=int(_ctx.get("dispatch_count", 0)),
+                ))
+            except Exception:  # noqa: BLE001
+                pass
+            return msgs
+        return _provider
+
     result = run_agent_loop(
         ai_config=ai_config,
         system_prompt=system_prompt,
@@ -154,9 +180,9 @@ def run_graph_agent(
         on_reasoning=on_reasoning,
         on_status=on_status,
         stop_event=stop_event,
-        session_role="graph_agent",
+        session_role=f"graph_agent:{asset_id}",  # 资产 ID 编码进 role，供子代理骨架注入解析
         prior_messages=prior_messages,
-        steering_provider=steering_provider,
+        steering_provider=_with_stage_gates(steering_provider),
     )
 
     return GraphAgentResult(

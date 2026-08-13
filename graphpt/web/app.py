@@ -4441,6 +4441,13 @@ async def api_agent_run(req: _AgentRequest):
     with _agent_lock:
         _agent_stops[session_id] = stop_evt
 
+    # Session 独立工作区：每个 agent 会话隔离脚本/缓存/资产文件，
+    # 避免历史 session 的脚本污染新会话（此前全部共用项目根导致
+    # 旧脚本残留、文件冲突、agent 陷入清理循环）。
+    from graphpt.common.paths import PROJECT_ROOT as _PR
+    _session_workspace = _PR / "data" / "workspaces" / session_id
+    _session_workspace.mkdir(parents=True, exist_ok=True)
+
     def _run():
         def _on_status(msg):
             _append_agent_log(session_id, msg)
@@ -4455,18 +4462,62 @@ async def api_agent_run(req: _AgentRequest):
             result = run_graph_agent(
                 asset_id=req.asset_id,
                 user_prompt=req.prompt or "",
-                workspace_root=_PROJECT_ROOT,
+                workspace_root=_session_workspace,
                 on_status=_on_status,
                 on_token=_on_token,
                 steering_provider=_steering,
                 stop_event=stop_evt,
             )
+            # 程序化证据复查：confirmed 漏洞逐个重放验证，未通过降级 likely
+            verify_summary = None
+            try:
+                from graphpt.core.verify_findings import (
+                    downgrade_failed, verify_asset_findings,
+                )
+                vreport = verify_asset_findings(req.asset_id)
+                if vreport.get("ok"):
+                    downgraded = downgrade_failed(req.asset_id, vreport)
+                    verify_summary = {
+                        "total": vreport.get("total", 0),
+                        "passed": vreport.get("passed", 0),
+                        "failed": vreport.get("failed", 0),
+                        "unknown": vreport.get("unknown", 0),
+                        "downgraded": downgraded,
+                    }
+                    _append_agent_log(
+                        session_id,
+                        f"[复查] confirmed {vreport.get('total', 0)} 条：通过 "
+                        f"{vreport.get('passed', 0)}，未过 {vreport.get('failed', 0)}，"
+                        f"降级 {downgraded}",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _append_agent_log(session_id, f"[复查] 执行失败: {exc}")
+
+            # 专业报告：HTML + Word 自动生成（P2-⑧）
+            report_paths = None
+            try:
+                from graphpt.core.report_link import generate_report_for_asset
+                rpt = generate_report_for_asset(
+                    req.asset_id, target_url=f"http://{req.asset_id}",
+                )
+                if rpt.get("ok"):
+                    report_paths = rpt.get("paths", [])
+                    _append_agent_log(
+                        session_id,
+                        f"[报告] {rpt.get('report_id')} 生成：{len(rpt.get('paths', []))} 个文件",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                _append_agent_log(session_id, f"[报告] 生成失败: {exc}")
+
             _update_agent_session(session_id, {
                 "status": "done",
                 "result": result.final_text,
                 "tool_calls": result.tool_calls_count,
+                "verify": verify_summary,
+                "report_paths": report_paths,
                 "finished_at": _agent_now(),
-            }, event={"type": "done", "tool_calls": result.tool_calls_count})
+            }, event={"type": "done", "tool_calls": result.tool_calls_count,
+                     "verify": verify_summary, "report_paths": report_paths})
         except Exception as e:
             _update_agent_session(session_id, {
                 "status": "error",

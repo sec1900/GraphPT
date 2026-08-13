@@ -748,7 +748,14 @@ def _exec_read_file(args: dict[str, Any], *, workspace_root: Path | None = None)
     p = workspace_root / file_path
     resolved = p.resolve()
     if not resolved.exists():
-        return {"error": "file_not_found", "success": False}
+        # Session 隔离工作区回退：项目级目录（扫描日志/字典/产物）在项目根下，
+        # 相对路径 data/ res/ .graphpt/cache 等在 session 目录找不到时回退项目根。
+        from graphpt.common.paths import PROJECT_ROOT
+        _project_candidate = (PROJECT_ROOT / file_path).resolve()
+        if _project_candidate.exists() and str(_project_candidate).startswith(str(PROJECT_ROOT.resolve())):
+            resolved = _project_candidate
+        else:
+            return {"error": "file_not_found", "success": False}
     offset = max(0, int(args.get("offset", 0)))
     has_limit = "limit" in args or "max_chars" in args
     try:

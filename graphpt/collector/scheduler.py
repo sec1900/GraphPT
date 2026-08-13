@@ -142,13 +142,15 @@ def _auto_tune() -> dict[str, int]:
 def _memory_pressure(threshold_mb: int = 0) -> bool:
     """当前可用内存是否低于安全水位线。True = 内存吃紧，应暂停派发新工具。
 
-    threshold_mb 默认取 (总内存 × 15%) 或 1GB，取较大值。
+    threshold_mb 默认取 (总内存 × 5%) 或 300MB，取较大值。
+    （原 15%/1GB 对 8GB 机器过严：外部系统占 3GB+ 时永远达不到，扫描死等。
+     工具模板预筛后单进程 50-270MB，低水位 300-400MB 足以防 OOM。）
     """
     if threshold_mb <= 0:
         total = _detect_system_memory_mb()
         if total is None:
             return False  # 无法检测，不阻塞
-        threshold_mb = max(1024, int(total * 0.15))
+        threshold_mb = max(300, int(total * 0.05))
     avail = _available_memory_mb()
     if avail is None:
         return False
@@ -568,6 +570,13 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
         ready = []
         skipped = []
         for tool in tools:
+            # 跳过 tools_enabled 中显式禁用的工具（scan_config.yaml）
+            try:
+                from graphpt.collector.scan_config import get_scan_config
+                if not get_scan_config(asset_id).is_tool_enabled(tool):
+                    continue
+            except Exception:
+                pass
             n = _count_targets(tool, asset_id)
             if n <= 0:
                 continue
@@ -744,6 +753,9 @@ def _run_one_tool(tool: str, asset_id: str, *,
         # 启动前先检查中止信号（快速路径：还没开始就不必创建 PipelineExecutor）
         if _is_aborted(asset_id):
             raise ScanAborted(f"scan aborted before {tool}")
+
+        # 内存保护由 _memory_pressure（层 worker 内）统一处理 —— 派发前不再单独检查，
+        # 避免双重等待把低内存机器卡死（外部进程占内存时永远达不到高阈值）
         result = _run_single_tool_pipeline(tool, asset_id=asset_id, stage_name=tool,
                                            command=command, force_rescan=force_rescan)
     except ScanAborted:
@@ -939,6 +951,15 @@ def run_full_scan(asset_id: str, *,
     """
     _log.info("full_scan_start asset=%s force_rescan=%s", asset_id, force_rescan)
 
+    # 立即标记 scanning（OOB 会话尝试最长 30s，期间 scan/state 必须可见，
+    # 否则前端/监控会把"启动中"误判为"无扫描"）
+    with _SCAN_STATE_LOCK:
+        _SCAN_STATE[asset_id] = {
+            "status": "scanning", "layer": start_layer,
+            "tool": None, "started_at": time.time(),
+            "active_layers": {},  # layer_num → tool_name
+        }
+
     _scan_log_path = os.environ.get("GRAPHPT_SCAN_LOG", "")
     def _scan_log(msg: str) -> None:
         if _scan_log_path:
@@ -966,13 +987,6 @@ def run_full_scan(asset_id: str, *,
             _scan_log(f"oob_session_started domain={_oob.get('domain', '')}")
     except Exception:
         pass
-
-    with _SCAN_STATE_LOCK:
-        _SCAN_STATE[asset_id] = {
-            "status": "scanning", "layer": start_layer,
-            "tool": None, "started_at": time.time(),
-            "active_layers": {},  # layer_num → tool_name
-        }
 
     total_findings = 0
     total_errors = 0
@@ -1027,9 +1041,15 @@ def run_full_scan(asset_id: str, *,
             _active_layers[layer_num] = "waiting"
 
         while not _stop.is_set() and not _is_aborted(asset_id):
-            # 检查本层是否有目标
+            # 检查本层是否有目标（跳过 tools_enabled 禁用的工具）
             ready = []
             for tool in tools:
+                try:
+                    from graphpt.collector.scan_config import get_scan_config
+                    if not get_scan_config(asset_id).is_tool_enabled(tool):
+                        continue
+                except Exception:
+                    pass
                 try:
                     count = _count_targets(tool, asset_id, force_rescan=force_rescan)
                     if count > 0:

@@ -80,3 +80,9 @@ res/wordlists/SecLists/
 brutespray-checkpoint.json
 brutespray-checkpoint.jsonl
 *.checkpoint.jsonl
+
+# 部署/工具二进制
+*.tgz
+*.bin
+graphpt/.claude/
+anthropic-ai-claude-code-2.1.88/
