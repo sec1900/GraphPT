@@ -1,10 +1,8 @@
 """fleet HTTP client — worker 侧通过 HTTPS 与主控通信。
 
-配置（小弟服务器上设置环境变量）：
-  GRAPHPT_MASTER_URL=https://主控域名:443    # 必填（有此变量时启用 HTTP 模式）
-  GRAPHPT_FLEET_TOKEN=xxxx                  # 必填（从主控 /api/fleet/tokens/issue 获取）
-
-不需要直连 Redis 或 Neo4j，只需能访问主控 HTTP 端口。
+配置优先级：> env（GRAPHPT_MASTER_URL / GRAPHPT_FLEET_TOKEN）
+           > 本地持久化 data/fleet_config.yaml（WorkerConfig 写入）
+配置支持热加载：每次 poll 前可调用 WorkerConfig.maybe_reload() 从主控拉新配置。
 """
 
 from __future__ import annotations
@@ -27,14 +25,28 @@ _READ_TIMEOUT = 15     # 轮询时稍长
 def _master_url() -> str:
     global _MASTER_URL
     if _MASTER_URL is None:
-        _MASTER_URL = os.environ.get("GRAPHPT_MASTER_URL", "").rstrip("/")
+        url = os.environ.get("GRAPHPT_MASTER_URL", "").strip()
+        if not url:
+            try:
+                from graphpt.fleet.config_store import WorkerConfig
+                url = WorkerConfig().master_url
+            except Exception:
+                url = ""
+        _MASTER_URL = url.rstrip("/")
     return _MASTER_URL
 
 
 def _token() -> str:
     global _TOKEN
     if _TOKEN is None:
-        _TOKEN = os.environ.get("GRAPHPT_FLEET_TOKEN", "")
+        tok = os.environ.get("GRAPHPT_FLEET_TOKEN", "").strip()
+        if not tok:
+            try:
+                from graphpt.fleet.config_store import WorkerConfig
+                tok = WorkerConfig().fleet_token
+            except Exception:
+                tok = ""
+        _TOKEN = tok
     return _TOKEN
 
 

@@ -30,11 +30,23 @@ _LOOPBACK_LOCK = threading.Lock()
 
 
 def master_role() -> str:
-    """主控角色：worker（主力一体，默认）| brain（纯大脑只派发）。"""
+    """主控角色：worker（主力一体，默认）| brain（纯大脑只派发）。
+
+    优先级：环境变量 > data/fleet_config.yaml（持久化）> Redis（运行缓存）。
+    修改走 fleet/routes POST /api/fleet/config/role（写 yaml + 刷 Redis）。
+    """
     role = os.getenv(_ROLE_KEY, "").strip().lower()
     if role in ("worker", "brain"):
         return role
-    # Redis 里的动态设置（舰队面板切换，进程内即时生效）
+    # 持久化 yaml（重启不丢的唯一事实源）
+    try:
+        from graphpt.fleet.config_store import master_load
+        role = master_load().get("role", "").strip().lower()
+        if role in ("worker", "brain"):
+            return role
+    except Exception:
+        pass
+    # Redis 运行缓存（旧版/手动设置）
     try:
         from graphpt.common.redis_client import get_redis
         r = get_redis(decode_responses=True, socket_connect_timeout=1)
@@ -52,14 +64,17 @@ def is_brain() -> bool:
 
 
 def set_master_role(role: str) -> bool:
-    """动态切换主控角色（存 Redis，立即生效）。"""
+    """持久化切换主控角色（写 yaml + 刷 Redis，重启不丢）。
+
+    推荐走 HTTP API POST /api/fleet/config/role（带 token 鉴权）。
+    """
     role = role.strip().lower()
     if role not in ("worker", "brain"):
         return False
     try:
-        from graphpt.common.redis_client import get_redis
-        r = get_redis(decode_responses=True, socket_connect_timeout=1)
-        return bool(r.set("fleet:config:master_role", role))
+        from graphpt.fleet.config_store import master_save
+        master_save({"role": role})
+        return True
     except Exception:
         return False
 

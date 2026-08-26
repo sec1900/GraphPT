@@ -260,13 +260,19 @@ def main():
         print(f"Mode:    FLEET WORKER (id={args.worker_id or 'auto'})")
     print()
 
-    # 检查依赖服务（Neo4j + Redis）- debug 模式跳过
-    if not args.debug:
+    # 依赖检查（Neo4j + Redis）：
+    # - debug 模式省略
+    # - worker HTTP 模式（--worker --master-url）省略——纯 worker 不需要本地
+    #   Neo4j/Redis，只连主控一个地址（主控那里才有这两个服务）
+    _skip_deps = args.debug or (args.worker and args.master_url)
+    if not _skip_deps:
         _check_dependencies()
         _clean_redis_on_startup()
     _trim_uvicorn_log()
-    if args.debug:
-        print("[DEBUG] Skipping dependency checks and Redis cleanup")
+    if _skip_deps:
+        reason = ("DEBUG" if args.debug
+                  else "worker-http: 纯 worker 不强依赖本地 Neo4j/Redis")
+        print(f"[INFO] Skipping dependency checks ({reason})")
         print()
 
     services = []

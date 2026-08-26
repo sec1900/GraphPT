@@ -108,6 +108,13 @@ async def _auto_resume_interrupted_scans():
         start_results_consumer()
     except Exception:
         _web_log.warning("fleet_consumer_start_failed", exc_info=True)
+    # fleet 配置持久化恢复：从 data/fleet_config.yaml 恢复 Redis 运行缓存
+    # （token/角色/告警重启不丢）
+    try:
+        from graphpt.fleet.config_store import master_init_redis
+        master_init_redis()
+    except Exception:
+        _web_log.warning("fleet_config_init_failed", exc_info=True)
 
 
 async def _try_auto_resume():

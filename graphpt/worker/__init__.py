@@ -173,16 +173,33 @@ def _start_heartbeat_http(worker_id: str, stop: threading.Event,
 def _main_http(worker_id: str, stop: threading.Event) -> None:
     """HTTP 模式主循环：poll → 执行 → done（不连 Redis/Neo4j）。"""
     from graphpt.fleet.http_client import get_asset_config, poll_tasks, report_done
+    from graphpt.fleet.config_store import WorkerConfig
     from graphpt.worker.capabilities import detect_capabilities
+
+    # 持久化本地配置（启动一次即可，之后重启从 yaml 读取，不需要环境变量）
+    cfg_store = WorkerConfig()
+    try:
+        cfg_store.save_local(
+            master_url=os.environ.get("GRAPHPT_MASTER_URL", ""),
+            fleet_token=os.environ.get("GRAPHPT_FLEET_TOKEN", ""),
+            worker_id=worker_id,
+        )
+    except Exception:
+        pass
 
     caps = detect_capabilities()
     _log.info("[worker] %s started in HTTP mode, master=%s",
-              worker_id, __import__("os").environ.get("GRAPHPT_MASTER_URL"))
+              worker_id, os.environ.get("GRAPHPT_MASTER_URL"))
     _start_heartbeat_http(worker_id, stop, caps)
 
     round_no = 0
     while not stop.is_set():
         round_no += 1
+        # 热加载：配置变化（角色等）无需重启 worker
+        try:
+            cfg_store.maybe_reload(force=(round_no % 30 == 0))
+        except Exception:
+            pass
         try:
             tasks = poll_tasks(worker_id, count=1)
         except Exception as exc:

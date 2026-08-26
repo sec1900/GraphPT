@@ -36,19 +36,28 @@ fleet_router = APIRouter(prefix="/api/fleet")
 def _verify_fleet_token(token: str) -> None:
     """验证 fleet token（X-Fleet-Token）。
 
-    优先查 Redis fleet:tokens SET；Redis 不可达时退化为环境变量比对。
+    校验来源：data/fleet_config.yaml 持久化 token 列表（首选，重启不丢）
+    → Redis fleet:tokens SET（运行缓存）→ 环境变量 GRAPHPT_FLEET_TOKEN。
     空 token 或不匹配均返回 403。
     """
     if not token:
         raise HTTPException(status_code=403, detail="missing fleet token")
+    # 持久化配置（唯一事实源）
+    try:
+        from graphpt.fleet.config_store import master_load
+        if token in (master_load().get("worker_tokens") or []):
+            return
+    except Exception:
+        pass
+    # Redis 运行缓存
     try:
         r = _r()
         r.ping()
         if r.sismember("fleet:tokens", token):
             return
-        # 允许 Redis 里没有 token 时回退到环境变量（单机调试友好）
     except Exception:
         pass
+    # 环境变量兜底（单机调试友好）
     env_token = os.environ.get("GRAPHPT_FLEET_TOKEN", "")
     if env_token and token == env_token:
         return
@@ -101,6 +110,25 @@ async def fleet_events(consumer_id: str = "web-viewer", limit: int = 50):
     return {"ok": True, "data": events}
 
 
+@fleet_router.get("/config/version")
+async def fleet_config_version(x_fleet_token: str = Header(default="")):
+    """配置版本号（worker 热加载轮询用）。需要 fleet token。"""
+    _verify_fleet_token(x_fleet_token)
+    from graphpt.fleet.config_store import config_version
+    return {"ok": True, "data": {"version": config_version()}}
+
+
+@fleet_router.get("/config/remote")
+async def fleet_config_remote(x_fleet_token: str = Header(default="")):
+    """主控持久化下发配置（worker 热加载拉取）。需要 fleet token。"""
+    _verify_fleet_token(x_fleet_token)
+    from graphpt.fleet.config_store import master_load
+    return {"ok": True, "data": {
+        "role": master_load().get("role", "worker"),
+        "alert_webhook": master_load().get("alert_webhook", ""),
+    }}
+
+
 @fleet_router.get("/config")
 async def fleet_config():
     from graphpt.fleet.dispatcher import master_role
@@ -129,12 +157,15 @@ class RoleBody(BaseModel):
 @fleet_router.post("/config/role")
 async def fleet_set_role(body: RoleBody,
                          x_fleet_token: str = Header(default="")):
-    """切换主控角色：worker（主力一体）↔ brain（纯大脑只派发）。"""
+    """切换主控角色：worker（主力一体）↔ brain（纯大脑只派发）。
+
+    持久化到 data/fleet_config.yaml（不丢）+ 刷 Redis（即时生效）+ 版本号递增。
+    """
     _verify_fleet_token(x_fleet_token)
-    from graphpt.fleet.dispatcher import set_master_role
-    ok = set_master_role(body.role)
-    if not ok:
+    from graphpt.fleet import config_store
+    if body.role not in ("worker", "brain"):
         return {"ok": False, "error": "invalid role (worker|brain)"}
+    config_store.master_save({"role": body.role})
     return {"ok": True, "role": body.role,
             "hint": "brain 模式下主控本地不执行任何工具，任务全部派发给 worker"}
 
@@ -459,50 +490,49 @@ async def fleet_asset_config(asset_id: str,
 @fleet_router.post("/config/alert")
 async def fleet_set_alert(webhook_url: str = "", queue_threshold: int = 20,
                           x_fleet_token: str = Header(default="")):
-    """设置舰队告警配置（webhook URL + 队列堆积阈值）。"""
+    """设置舰队告警配置（webhook URL + 队列堆积阈值）。
+
+    持久化到 data/fleet_config.yaml（重启不丢）+ 刷 Redis + 版本号递增。
+    """
     _verify_fleet_token(x_fleet_token)
-    try:
-        r = _r()
-        if webhook_url:
-            r.set("fleet:config:alert_webhook", webhook_url)
-        if queue_threshold:
-            r.set("fleet:config:alert_queue_threshold", str(queue_threshold))
-        return {"ok": True, "webhook_url": webhook_url,
-                "queue_threshold": queue_threshold}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+    from graphpt.fleet import config_store
+    update: dict[str, Any] = {}
+    if webhook_url:
+        update["alert_webhook"] = webhook_url
+    if queue_threshold:
+        update["alert_queue_threshold"] = queue_threshold
+    config_store.master_save(update)
+    return {"ok": True, "webhook_url": webhook_url,
+            "queue_threshold": queue_threshold}
 
 
 @fleet_router.get("/config/alert")
 async def fleet_get_alert():
-    """读取当前告警配置。"""
-    try:
-        r = _r()
-        webhook_url = r.get("fleet:config:alert_webhook") or ""
-        threshold = r.get("fleet:config:alert_queue_threshold") or "20"
-        return {"ok": True, "data": {
-            "webhook_url": webhook_url,
-            "queue_threshold": int(threshold),
-        }}
-    except Exception as exc:
-        return {"ok": False, "error": str(exc), "data": {}}
+    """读取当前告警配置（以 yaml 持久化配置为准）。"""
+    from graphpt.fleet import config_store
+    cfg = config_store.master_load()
+    return {"ok": True, "data": {
+        "webhook_url": cfg.get("alert_webhook", ""),
+        "queue_threshold": int(cfg.get("alert_queue_threshold", 20)),
+    }}
 
 
 @fleet_router.post("/tokens/issue")
 async def fleet_issue_token(name: str = "worker"):
-    """签发 fleet token（通过已有 X-GraphPT-Key 鉴权，在 Web UI 或管理员调用）。
-
-    生产用途：在主控服务器命令行执行后把 token 配置到小弟 GRAPHPT_FLEET_TOKEN。
-    """
+    """签发 fleet token 并持久化到 data/fleet_config.yaml（重启不丢）。"""
     import secrets
     token = secrets.token_hex(24)
+    from graphpt.fleet import config_store
+    cfg = config_store.master_load()
+    tokens = list(cfg.get("worker_tokens", []))
+    tokens.append(token)
+    config_store.master_save({"worker_tokens": tokens})
     try:
         r = _r()
-        r.sadd("fleet:tokens", token)
         r.hset("fleet:token_meta", token, json.dumps({
             "name": name, "created_at": int(time.time()),
         }))
-    except Exception as exc:
-        return {"ok": False, "error": str(exc)}
+    except Exception:
+        pass
     return {"ok": True, "token": token, "name": name,
             "note": "把 token 配置到小弟服务器的 GRAPHPT_FLEET_TOKEN 环境变量"}
