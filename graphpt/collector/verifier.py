@@ -140,7 +140,10 @@ def verify_candidate(
     vtype = str(vuln_type or "unknown").strip().lower()
 
     # 原始请求：优先 traffic_store 记录，退化默认 GET
-    method = str(traffic.get("method") or method or "GET")
+    # 注意：traffic 可能为 None，必须先判空再 .get()
+    if traffic:
+        method = str(traffic.get("method") or method or "GET")
+    # else: 保持传入的 method 参数（默认 "GET"）
     try:
         req_headers = json.loads(traffic.get("req_headers") or "{}") if traffic else {}
         if not isinstance(req_headers, dict):
@@ -229,11 +232,19 @@ def verify_candidate(
                 "evidence": "IDOR 需人工确认权限语义（自动替换资源 ID 对比仅作参考）",
                 "checks": checks}
 
-    # ---- 其他: 重放可复现 ----
-    status, _, _ = _replay(method, url, req_headers, req_body)
-    if status > 0:
-        return {"status": "verified", "evidence": f"重放可复现 (status={status})", "checks": checks}
-    return {"status": "candidate", "evidence": "重放失败，保持候选", "checks": checks}
+    # ---- 其他/CVE 类: 无专门验证策略，保持 candidate ----
+    # CVE 类漏洞（nuclei 产出）需要 payload 重放验证，普通 GET 无法证明漏洞存在。
+    # 无脑标 verified 会让报告里的"已验证"标签不可信 — 发现即确认是误报源头。
+    status, body, _ = _replay(method, url, req_headers, req_body)
+    if status == 0:
+        return {"status": "candidate",
+                "evidence": "重放失败（目标不可达/超时），保持候选",
+                "checks": checks}
+    # 可达不等于存在漏洞 — 保持 candidate，需 payload 重放或人工确认
+    _check("replay", True, f"status={status}（可达不等于存在漏洞）")
+    return {"status": "candidate",
+            "evidence": f"目标可达 (status={status})，但无专门验证策略 — 需 payload 重放或人工确认",
+            "checks": checks}
 
 
 # ──────────────────────────────────────────────
