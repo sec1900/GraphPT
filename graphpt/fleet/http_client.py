@@ -115,3 +115,49 @@ def get_asset_config(asset_id: str) -> dict[str, Any]:
     """从主控拉取资产扫描配置。"""
     r = _get(f"/api/fleet/config/{asset_id}")
     return r.get("data") or {}
+
+
+def upload_artifact(worker_id: str, task_id: str, tool: str, asset_id: str,
+                    file_path: str) -> bool:
+    """上传扫描产物文件到主控（multipart/form-data）。
+
+    file_path: 本地文件路径（绝对路径）。
+    文件不存在或超时则返回 False，不抛异常（产物上传不阻断主流程）。
+    """
+    import pathlib
+    p = pathlib.Path(file_path)
+    if not p.exists() or not p.is_file():
+        return False
+    try:
+        import urllib.parse
+        boundary = "----GraphPTBoundary7bXc"
+        url = _master_url() + "/api/fleet/artifacts/upload"
+
+        def encode_field(name: str, value: str) -> bytes:
+            return (f"--{boundary}\r\nContent-Disposition: form-data; "
+                    f'name="{name}"\r\n\r\n{value}\r\n').encode()
+
+        body = b""
+        for fname, fval in [("worker_id", worker_id), ("task_id", task_id),
+                              ("tool", tool), ("asset_id", asset_id)]:
+            body += encode_field(fname, fval)
+
+        file_content = p.read_bytes()
+        filename = p.name
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                 f'name="file"; filename="{filename}"\r\n'
+                 f"Content-Type: application/octet-stream\r\n\r\n").encode()
+        body += file_content
+        body += f"\r\n--{boundary}--\r\n".encode()
+
+        import urllib.request
+        req = urllib.request.Request(url, data=body, method="POST")
+        req.add_header("X-Fleet-Token", _token())
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        req.add_header("Content-Length", str(len(body)))
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+            return bool(result.get("ok"))
+    except Exception as exc:
+        _log.warning("upload_artifact_failed file=%s err=%s", file_path, exc)
+        return False

@@ -74,6 +74,7 @@ class ResultsConsumer:
 
     def _loop(self) -> None:
         r = None
+        last_worker_check = 0.0
         while not self._stop.is_set():
             try:
                 if r is None:
@@ -81,6 +82,23 @@ class ResultsConsumer:
                     r.ping()
                 for ev in read_new(self.consumer, limit=50, r=r):
                     self._handle(ev, r)
+
+                # 每 60s 巡检 worker 在线状态 + 队列深度
+                now = time.time()
+                if now - last_worker_check > 60:
+                    last_worker_check = now
+                    try:
+                        from graphpt.fleet import registry
+                        from graphpt.fleet.alerts import (
+                            check_and_alert_workers,
+                            check_and_alert_queue,
+                        )
+                        workers = registry.list_workers(r)
+                        check_and_alert_workers(r, workers)
+                        queue_depth = {s: r.xlen(s) for s in streams.QUEUE_ALL}
+                        check_and_alert_queue(r, queue_depth)
+                    except Exception as exc:
+                        _log.debug("alert_check_error: %s", exc)
             except Exception as exc:
                 _log.warning("consumer_loop_error: %s", exc)
                 r = None

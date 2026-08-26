@@ -244,6 +244,9 @@ async def fleet_asset_release(asset_id: str, worker_id: str,
                 "error": "" if ok else "not_owner"}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+@fleet_router.post("/tasks/done")
 async def fleet_tasks_done(body: DoneBody,
                            x_fleet_token: str = Header(default="")):
     """worker 上报执行结果 → 主控 XACK + 发 res:events + 更新 inflight。"""
@@ -277,7 +280,76 @@ async def fleet_tasks_done(body: DoneBody,
     return {"ok": True}
 
 
-@fleet_router.get("/config/{asset_id}")
+# ── 产物回流接口 ───────────────────────────────────────────────────────────
+
+from fastapi import UploadFile, Form as FastAPIForm
+
+
+@fleet_router.post("/artifacts/upload")
+async def fleet_artifact_upload(
+    file: UploadFile,
+    worker_id: str = FastAPIForm(default=""),
+    task_id: str = FastAPIForm(default=""),
+    tool: str = FastAPIForm(default=""),
+    asset_id: str = FastAPIForm(default=""),
+    x_fleet_token: str = Header(default=""),
+):
+    """worker 通过 multipart/form-data 上传扫描产物到主控。
+
+    存储路径：data/artifacts/{asset_id}/{worker_id}/{task_id}/{filename}
+    单文件上限 50MB，超限自动保留最后 50MB（日志尾部最有价值）。
+    """
+    _verify_fleet_token(x_fleet_token)
+    import pathlib, re
+
+    _MAX_BYTES = 50 * 1024 * 1024
+
+    def _safe(s: str) -> str:
+        return re.sub(r"[^\w.\-]", "_", s or "unknown")[:64]
+
+    base = (pathlib.Path("data") / "artifacts"
+            / _safe(asset_id) / _safe(worker_id) / _safe(task_id))
+    base.mkdir(parents=True, exist_ok=True)
+
+    filename = _safe(file.filename or f"{tool}.log")
+    dest = base / filename
+    content = await file.read()
+    truncated = len(content) > _MAX_BYTES
+    if truncated:
+        content = content[-_MAX_BYTES:]
+
+    try:
+        dest.write_bytes(content)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    return {"ok": True, "path": str(dest), "size": len(content),
+            "truncated": truncated}
+
+
+@fleet_router.get("/artifacts")
+async def fleet_artifacts_list(asset_id: str = "", worker_id: str = ""):
+    """列出已上传的产物文件（可按 asset/worker 过滤）。"""
+    import pathlib
+    base = pathlib.Path("data") / "artifacts"
+    if not base.exists():
+        return {"ok": True, "data": []}
+    out = []
+    pattern = f"{asset_id or '*'}/{worker_id or '*'}/**/*"
+    for f in base.glob(pattern):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(base).as_posix()
+        parts = rel.split("/")
+        out.append({
+            "asset_id": parts[0] if len(parts) > 0 else "",
+            "worker_id": parts[1] if len(parts) > 1 else "",
+            "task_id": parts[2] if len(parts) > 2 else "",
+            "filename": parts[3] if len(parts) > 3 else f.name,
+            "size": f.stat().st_size,
+            "path": f"data/artifacts/{rel}",
+        })
+    return {"ok": True, "data": sorted(out, key=lambda x: x["path"])}
 async def fleet_asset_config(asset_id: str,
                              x_fleet_token: str = Header(default="")):
     """worker 拉取资产扫描配置（scan_config.yaml + 词表路径）。"""
@@ -291,6 +363,38 @@ async def fleet_asset_config(asset_id: str,
 
 
 # ── Token 管理（调试/一次性生成）─────────────────────────────────────────
+
+@fleet_router.post("/config/alert")
+async def fleet_set_alert(webhook_url: str = "", queue_threshold: int = 20,
+                          x_fleet_token: str = Header(default="")):
+    """设置舰队告警配置（webhook URL + 队列堆积阈值）。"""
+    _verify_fleet_token(x_fleet_token)
+    try:
+        r = _r()
+        if webhook_url:
+            r.set("fleet:config:alert_webhook", webhook_url)
+        if queue_threshold:
+            r.set("fleet:config:alert_queue_threshold", str(queue_threshold))
+        return {"ok": True, "webhook_url": webhook_url,
+                "queue_threshold": queue_threshold}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@fleet_router.get("/config/alert")
+async def fleet_get_alert():
+    """读取当前告警配置。"""
+    try:
+        r = _r()
+        webhook_url = r.get("fleet:config:alert_webhook") or ""
+        threshold = r.get("fleet:config:alert_queue_threshold") or "20"
+        return {"ok": True, "data": {
+            "webhook_url": webhook_url,
+            "queue_threshold": int(threshold),
+        }}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "data": {}}
+
 
 @fleet_router.post("/tokens/issue")
 async def fleet_issue_token(name: str = "worker"):

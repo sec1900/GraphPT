@@ -16,6 +16,7 @@ export function loadFleetPage(manual = false) {
       if (!j.ok) throw new Error(j.error || 'fleet api failed');
       el.innerHTML = renderFleet(j.data);
       fetchEvents();
+      loadFleetAlertStatus();
     })
     .catch(err => {
       el.innerHTML = `<div class="loading">Fleet 不可用: ${esc(err.message)}</div>`;
@@ -71,6 +72,14 @@ function renderFleet(d) {
     <tr><td>normal</td><td>${qs['scan:queue:normal']||0}</td></tr>
     <tr><td>low</td><td>${qs['scan:queue:low']||0}</td></tr>
   </tbody></table>
+
+  <div style="margin-top:14px;font-size:11px;color:var(--muted)">告警通知（webhook）
+    <button class="btn outline small" onclick="loadFleetAlertConfig()" style="margin-left:8px;font-size:10px">配置</button>
+  </div>
+  <div id="fleet-alert-section" style="font-size:11px;color:var(--muted)">
+    <span id="fleet-alert-status">加载中...</span>
+  </div>
+
   <div style="margin-top:14px;font-size:11px;color:var(--muted)">最近事件流</div>
   <div id="fleet-events" style="font-family:monospace;font-size:11px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px;max-height:220px;overflow-y:auto;white-space:pre-wrap"></div>`;
 }
@@ -122,9 +131,50 @@ export function startFleetLoop() {
   }, 5000);
 }
 
+export async function loadFleetAlertConfig() {
+  const res = await fetch('/api/fleet/config/alert').then(r => r.json()).catch(() => ({}));
+  const cur = (res.data || {});
+  const webhook = prompt('告警 Webhook URL（支持钉钉/飞书/Telegram/通用）：', cur.webhook_url || '');
+  if (webhook === null) return;  // 取消
+  const threshold = prompt('队列堆积告警阈值（任务数）：', cur.queue_threshold || '20');
+  if (threshold === null) return;
+
+  // 需要 token 才能保存 — 弹出简单输入框
+  const token = prompt('Fleet token（/api/fleet/tokens/issue 签发）：', '');
+  if (!token) return;
+
+  const r = await fetch('/api/fleet/config/alert', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-Fleet-Token': token},
+    body: JSON.stringify({webhook_url: webhook, queue_threshold: parseInt(threshold) || 20})
+  }).then(r => r.json()).catch(e => ({ok: false, error: e.message}));
+
+  if (r.ok) {
+    toast('告警配置已保存', 'success');
+    loadFleetAlertStatus();
+  } else {
+    toast('保存失败: ' + (r.error || ''), 'error');
+  }
+}
+
+async function loadFleetAlertStatus() {
+  const el = document.getElementById('fleet-alert-status');
+  if (!el) return;
+  const res = await fetch('/api/fleet/config/alert').then(r => r.json()).catch(() => ({}));
+  const d = res.data || {};
+  if (d.webhook_url) {
+    el.textContent = `Webhook 已配置 (阈值: ${d.queue_threshold || 20} 任务)`;
+    el.style.color = 'var(--green)';
+  } else {
+    el.textContent = '未配置（点"配置"按钮设置 webhook）';
+    el.style.color = 'var(--muted)';
+  }
+}
+
 // 页面切换钩子（app-bridge 调用）
 window.loadFleet = () => {
   loadFleetPage(true);
   startFleetLoop();
 };
 window.loadFleetPage = (manual) => loadFleetPage(!!manual);
+window.loadFleetAlertConfig = loadFleetAlertConfig;

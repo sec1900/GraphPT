@@ -79,7 +79,7 @@ def _execute(msg: dict[str, Any]) -> dict[str, Any]:
     payload = msg["payload"]
     task_id = str(payload.get("task_id") or "")
     kind = str(payload.get("kind") or "scan_tool")
-    assert kind == "scan_tool", f"unsupported kind: {kind}"  # M1 支持 agent_mission
+    assert kind == "scan_tool", f"unsupported kind: {kind}"
 
     from graphpt.collector.tasks import _run_single_tool_pipeline
 
@@ -93,10 +93,12 @@ def _execute(msg: dict[str, Any]) -> dict[str, Any]:
         tool, asset_id=asset_id, stage_name=tool,
         command=command, force_rescan=force_rescan,
     )
+    log_file = result.get("log_file", "")
     return {
         "task_id": task_id, "tool": tool, "asset_id": asset_id,
         "status": result.get("status", "error"),
         "findings": (result.get("result") or {}).get("findings", 0),
+        "log_file": log_file,
     }
 
 
@@ -216,10 +218,28 @@ def _main_http(worker_id: str, stop: threading.Event) -> None:
                 )
                 status = result.get("status", "error")
                 findings = (result.get("result") or {}).get("findings", 0) or 0
+                log_file = result.get("log_file", "")
             except Exception as exc:
                 _log.error("http_task_crash: %s", exc)
-                status, findings = "error", 0
+                status, findings, log_file = "error", 0, ""
             report_done(worker_id, task, status=status, findings=findings)
+
+            # 产物回流：把工具日志上传到主控
+            if log_file:
+                try:
+                    from graphpt.fleet.http_client import upload_artifact
+                    ok = upload_artifact(
+                        worker_id=worker_id,
+                        task_id=task.get("task_id", ""),
+                        tool=tool,
+                        asset_id=asset_id,
+                        file_path=log_file,
+                    )
+                    if ok:
+                        _log.info("artifact_uploaded task=%s log=%s",
+                                  task.get("task_id", ""), log_file)
+                except Exception as exc:
+                    _log.warning("artifact_upload_failed: %s", exc)
 
 
 def main() -> None:
