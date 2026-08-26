@@ -27,6 +27,16 @@ _MAXLEN = 100_000
 _POLL_MS = 200              # 轮询间隔：Memurai 不支持 XREADGROUP 长阻塞
                             # （服务器端断连），用短轮询兼容（Redis 同样适用）
 
+
+def queue_for_worker(worker_id: str) -> str:
+    """worker 私有队列（按资产定向派发用——资产主人专属，不抢）。"""
+    return f"scan:queue:w:{worker_id}"
+
+
+def worker_queues(worker_id: str) -> tuple[str, ...]:
+    """worker 拉取顺序：私有队列优先（自己资产的活），共享三流兜底。"""
+    return (queue_for_worker(worker_id),) + QUEUE_ALL
+
 # 派发优先级（layer → 队列）
 def stream_for_layer(layer: int | None, priority: str = "") -> str:
     """按层/优先级选流。layer>=6（Vuln/Secret 确认）→ high；

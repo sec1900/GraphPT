@@ -263,6 +263,27 @@ def _main_http(worker_id: str, stop: threading.Event) -> None:
                     _log.warning("artifact_upload_failed: %s", exc)
 
 
+def probe_master_role(master_url: str, token: str) -> str:
+    """探测主控角色：worker | brain | unreachable。
+
+    HTTP 模式下启动时调用——发现主控是 brain（纯大脑）→ 本节点自动以
+    worker 身份归队接受指挥，无需额外配置。
+    """
+    try:
+        import json as _json
+        import urllib.request
+        req = urllib.request.Request(
+            master_url.rstrip("/") + "/api/fleet/config/remote",
+            headers={"X-Fleet-Token": token})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = _json.loads(resp.read())
+        role = ((data.get("data") or {}).get("role") or "worker").strip().lower()
+        return role if role in ("worker", "brain") else "worker"
+    except Exception as exc:
+        _log.warning("probe_master_role_failed: %s", exc)
+        return "unreachable"
+
+
 def main() -> None:
     global _cur_worker
     logging.basicConfig(level=logging.INFO,
@@ -288,6 +309,18 @@ def main() -> None:
 
     stop = threading.Event()
     if is_http_mode():
+        # 自动发现大脑：主控 brain → 本机自动确认自己是 worker（纯执行）
+        import os as _os
+        role = probe_master_role(
+            _os.environ.get("GRAPHPT_MASTER_URL", ""),
+            _os.environ.get("GRAPHPT_FLEET_TOKEN", ""),
+        )
+        if role == "brain":
+            print(f"[worker] 探测到主控为纯大脑（brain），本机自动以 worker 身份归队")
+        elif role == "worker":
+            print(f"[worker] 探测到主控为主力一体（worker），本机作为其 worker 归队")
+        else:
+            print(f"[worker] 警告：主控不可达，按 worker 模式继续尝试连接")
         _main_http(args.id, stop)
     else:
         _main_redis(args.id, stop, block_ms=args.block)

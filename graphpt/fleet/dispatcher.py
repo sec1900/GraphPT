@@ -118,9 +118,9 @@ def dispatch_tool(executor_fn: Callable[..., Any], tool: str, asset_id: str,
 
 def _publish(tool: str, asset_id: str, *, layer: int | None = None,
              command: str | None = None, force_rescan: bool = False) -> str:
-    """发布模式：能力路由 + inflight 登记 + XADD。"""
+    """发布模式：按资产定向派发（有主人进私有队列，无主人进共享流）+ inflight 登记。"""
     from graphpt.common.redis_client import get_redis
-    from graphpt.fleet import registry
+    from graphpt.fleet import registry, ownership
 
     r = get_redis(decode_responses=True, socket_connect_timeout=2)
     try:
@@ -142,9 +142,18 @@ def _publish(tool: str, asset_id: str, *, layer: int | None = None,
             pass
         return ""
 
+    # 按资产定向派发（用户要求：不给 worker 抢，按资产主人派活）：
+    #   资产有 owner（ownership lease）→ 任务只发给该主人（私有队列）
+    #   资产无 owner → 共享流（首次认领者成为主人，之后定向）
+    owner = ownership.get_owner(r, asset_id)
+    if owner:
+        stream = streams.queue_for_worker(owner)
+    else:
+        stream = streams.stream_for_layer(layer)
+
     task_id = streams.publish_task(
         tool, asset_id, layer=layer, command=command, force_rescan=force_rescan,
-        stream=streams.stream_for_layer(layer),
+        stream=stream,
     )
     if task_id:
         try:

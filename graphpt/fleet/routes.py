@@ -232,8 +232,11 @@ async def fleet_tasks_poll(body: PollBody,
 
     tasks: list[dict[str, Any]] = []
     try:
+        # 拉取顺序：本 worker 私有队列（自己资产的活）优先，共享三流兜底
+        streams_claim = streams.worker_queues(body.worker_id)
         msgs = streams.claim_tasks(body.worker_id, block_ms=200, r=r,
-                                   count=body.count)
+                                   count=body.count,
+                                   streams=streams_claim)
     except Exception as exc:
         return {"ok": False, "error": str(exc), "tasks": []}
 
