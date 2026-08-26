@@ -14,6 +14,11 @@
   <span class="sub">Admin Panel</span>
   <input id="global-search" type="text" placeholder="Search subdomain/IP/URL..." style="margin-left:16px;padding:4px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-size:12px;width:220px" onkeyup="if(event.key==='Enter')doSearch()">
   <span class="spacer"></span>
+  <div class="asset-sel" id="header-project-sel" style="margin-right:8px">
+    <select id="global-project-sel" onchange="switchProject(this.value)" title="Project (多公司资产容器)"><option value="">全部项目</option></select>
+    <button class="btn outline small" onclick="openNewProjectModal()" title="New Project">⛁</button>
+    <button class="btn outline small" onclick="window.location='/api/export'" title="导出数据 (Excel)">⤓</button>
+  </div>
   <div class="asset-sel" id="header-asset-sel">
     <select id="global-asset-sel" onchange="switchAsset(this.value)"><option value="default">default</option></select>
     <button class="btn outline small" onclick="openNewAssetModal()" title="New Asset">+</button>
@@ -31,6 +36,7 @@
   <button data-page="logs">Logs</button>
   <button data-page="graph">Graph</button>
   <button data-page="agent">Agent</button>
+  <button data-page="fleet">Fleet</button>
   <span class="spacer"></span>
   <button data-page="config" class="icon-btn" title="Settings">&#9881;</button>
 </nav>
@@ -317,24 +323,22 @@
     </div>
   </div>
 
-  <div id="ctx-menu" class="ctx-menu" style="display:none"></div>
-</main>
-
-<!-- Tutorial Overlay -->
-<div class="modal-overlay" id="tut-overlay" style="display:none" onclick="if(event.target===this)tutClose()">
-  <div class="modal" style="max-width:680px;max-height:85vh;overflow-y:auto">
-    <h3 style="font-size:18px;margin-bottom:4px">GraphPT Quick Guide</h3>
-    <p style="color:var(--muted);font-size:12px;margin-bottom:16px">3-layer recon platform — collect assets, store in graph, drive pentest agent</p>
-    <div id="tut-steps"></div>
-    <div class="actions" style="margin-top:16px">
-      <button class="btn outline small" onclick="tutPrev()" id="tut-prev-btn" style="display:none">← Prev</button>
+  <!-- ==================== Fleet ==================== -->
+  <div id="page-fleet" class="page">
+    <div class="toolbar">
+      <span style="font-weight:600">Fleet</span>
+      <span style="font-size:11px;color:var(--muted);margin-left:6px">分布式扫描 worker 舰队</span>
       <span class="spacer"></span>
-      <span style="font-size:11px;color:var(--muted)" id="tut-counter"></span>
-      <button class="btn small" id="tut-next-btn" onclick="tutNext()">Next →</button>
-      <button class="btn" id="tut-done-btn" onclick="tutClose()" style="display:none">Got it</button>
+      <button class="btn outline small" onclick="loadFleetPage(true)" style="font-size:11px">⟳ 刷新</button>
+    </div>
+    <div id="fleet-content" style="padding:12px"><div class="loading">Loading fleet...</div></div>
+    <div style="margin-top:8px;font-size:11px;color:var(--muted)">
+      启动 worker：<code>python start.py --worker --worker-id worker-xxx</code>（需与 Master 用同一 Redis / Neo4j）
     </div>
   </div>
-</div>
+
+  <div id="ctx-menu" class="ctx-menu" style="display:none"></div>
+</main>
 
 <!-- Pipeline Editor Modal -->
 <div class="modal-overlay" id="pl-editor-overlay" style="display:none">
@@ -394,24 +398,86 @@
 
 <!-- New Asset Modal -->
 <div class="modal-overlay" id="asset-modal-overlay" style="display:none">
-  <div class="modal" style="max-width:420px">
+  <div class="modal" style="max-width:460px">
     <h3>New Asset</h3>
-    <p style="color:var(--muted);font-size:12px;margin-bottom:16px">An asset = a target company/organization. All scans scoped here.</p>
-    <div style="margin-bottom:10px">
-      <label style="font-size:11px;color:var(--muted)">Company Name</label>
-      <input type="text" id="modal-asset-name" placeholder="Acme Corporation" oninput="syncAssetId(this.value)" />
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <button class="btn small" id="asset-tab-single" onclick="switchAssetTab('single')">单个</button>
+      <button class="btn outline small" id="asset-tab-bulk" onclick="switchAssetTab('bulk')">批量导入</button>
     </div>
+    <div id="asset-form-single">
+      <p style="color:var(--muted);font-size:12px;margin-bottom:16px">An asset = a target company/organization. All scans scoped here.</p>
+      <div style="margin-bottom:10px">
+        <label style="font-size:11px;color:var(--muted)">Company Name</label>
+        <input type="text" id="modal-asset-name" placeholder="Acme Corporation" oninput="syncAssetId(this.value)" />
+      </div>
+      <div style="margin-bottom:10px">
+        <label style="font-size:11px;color:var(--muted)">Asset ID <span style="color:var(--orange)">*slug</span></label>
+        <input type="text" id="modal-asset-id" placeholder="acme-corp" />
+      </div>
+      <div style="margin-bottom:10px">
+        <label style="font-size:11px;color:var(--muted)">Project <span style="color:var(--muted)">*归拢到项目，可留空=未归属</span></label>
+        <select id="modal-asset-project"><option value="">未归属</option></select>
+      </div>
+      <div style="margin-bottom:16px">
+        <label style="font-size:11px;color:var(--muted)">Root Domains <span style="color:var(--muted)">*comma-sep, e.g. acme.com, acme.cn</span></label>
+        <input type="text" id="modal-asset-domains" placeholder="acme.com" />
+      </div>
+      <div class="actions">
+        <button class="btn outline" onclick="document.getElementById('asset-modal-overlay').style.display='none'">Cancel</button>
+        <button class="btn" onclick="createAsset()">Create</button>
+      </div>
+    </div>
+    <div id="asset-form-bulk" style="display:none">
+      <p style="color:var(--muted);font-size:12px;margin-bottom:10px">直接粘贴任意格式：<b>表头"子域名/域名/IP"+整列数据</b> → 挂载到当前选中资产；<b>一列域名</b> → 自动生成公司名；<b>公司名+域名</b> → 建公司。均自动识别。</p>
+      <div style="margin-bottom:10px">
+        <label style="font-size:11px;color:var(--muted)">粘贴文本（每行一个，逗号/分号/tab 分隔列）</label>
+        <textarea id="modal-asset-bulk-text" rows="6" placeholder="demo.testfire.net&#10;acme.com.cn&#10;北京云盾科技, yundun.com.cn&#10;南方数据集团, nfdata.com" style="width:100%;font-family:monospace;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px"></textarea>
+      </div>
+      <div style="margin-bottom:10px">
+        <label style="font-size:11px;color:var(--muted)">或上传文件（md 层级文档 / CSV / Excel）<a href="/api/export/template?format=md" style="color:var(--accent);margin-left:8px" download>⬇ md 模板</a> <a href="/api/export/template" style="color:var(--accent);margin-left:8px" download>⬇ Excel 模板</a></label>
+        <input type="file" id="modal-asset-bulk-file" accept=".md,.markdown,.csv,.txt,.xlsx,.xls" style="font-size:12px" />
+      </div>
+      <div style="margin-bottom:10px;border-top:1px solid var(--border);padding-top:10px">
+        <label style="font-size:11px;color:var(--muted)">或当场逐条填写</label>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <select id="modal-item-kind" style="font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px">
+            <option value="subdomain">子域名</option>
+            <option value="domain">根域名</option>
+            <option value="ip">IP</option>
+            <option value="port">端口</option>
+            <option value="endpoint">端点</option>
+            <option value="asset">公司</option>
+          </select>
+          <input type="text" id="modal-item-value" placeholder="mail.example.com" style="flex:1;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px" onkeydown="if(event.key==='Enter')addImportItem()" />
+          <button class="btn small" onclick="addImportItem()">+ 添加</button>
+        </div>
+        <div id="modal-item-list" style="margin-top:6px;max-height:110px;overflow-y:auto"></div>
+      </div>
+      <div class="actions">
+        <button class="btn outline" onclick="document.getElementById('asset-modal-overlay').style.display='none'">Cancel</button>
+        <button class="btn" onclick="importAssetsBulk()">导入</button>
+      </div>
+      <div id="asset-bulk-status" style="font-size:12px;color:var(--muted);margin-top:8px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- New Project Modal -->
+<div class="modal-overlay" id="project-modal-overlay" style="display:none">
+  <div class="modal" style="max-width:420px">
+    <h3>New Project</h3>
+    <p style="color:var(--muted);font-size:12px;margin-bottom:16px">A project = a container for multiple companies (assets) under one engagement.</p>
     <div style="margin-bottom:10px">
-      <label style="font-size:11px;color:var(--muted)">Asset ID <span style="color:var(--orange)">*slug</span></label>
-      <input type="text" id="modal-asset-id" placeholder="acme-corp" />
+      <label style="font-size:11px;color:var(--muted)">Project Name</label>
+      <input type="text" id="modal-project-name" placeholder="攻防演练 2026" />
     </div>
     <div style="margin-bottom:16px">
-      <label style="font-size:11px;color:var(--muted)">Root Domains <span style="color:var(--muted)">*comma-sep, e.g. acme.com, acme.cn</span></label>
-      <input type="text" id="modal-asset-domains" placeholder="acme.com" />
+      <label style="font-size:11px;color:var(--muted)">Description</label>
+      <input type="text" id="modal-project-desc" placeholder="optional" />
     </div>
     <div class="actions">
-      <button class="btn outline" onclick="document.getElementById('asset-modal-overlay').style.display='none'">Cancel</button>
-      <button class="btn" onclick="createAsset()">Create</button>
+      <button class="btn outline" onclick="document.getElementById('project-modal-overlay').style.display='none'">Cancel</button>
+      <button class="btn" onclick="createProjectFromModal()">Create</button>
     </div>
   </div>
 </div>

@@ -22,6 +22,8 @@ import { pollingManager, onPageVisible, isPageVisible } from './core/polling.js'
 import * as Dashboard from './pages/dashboard.js';
 import { Targets } from './pages/targets.js';
 import { Vulnerabilities } from './pages/vulnerabilities.js';
+import * as Projects from './core/projects.js';
+import { loadFleetPage as _loadFleetPage, startFleetLoop, stopFleetLoop } from './pages/fleet.js';
 
 // ============================================================
 // 兼容层：导出到全局作用域
@@ -60,10 +62,152 @@ window.switchAsset = (id) => {
   switchAsset(id);
   window.currentAsset = id;  // 同步全局变量
 };
-window.openNewAssetModal = openNewAssetModal;
-window.createAsset = createAsset;
-window.deleteAsset = deleteAssetModule;
+window.openNewAssetModal = () => {
+  syncProjectOptions();
+  switchAssetTab('single');
+  openNewAssetModal();
+};
+// 资产弹窗 tab 切换：单个 / 批量导入
+window.switchAssetTab = switchAssetTab;
+function switchAssetTab(tab) {
+  const single = document.getElementById('asset-form-single');
+  const bulk = document.getElementById('asset-form-bulk');
+  const tab1 = document.getElementById('asset-tab-single');
+  const tab2 = document.getElementById('asset-tab-bulk');
+  if (!single || !bulk) return;
+  const showSingle = tab !== 'bulk';
+  single.style.display = showSingle ? '' : 'none';
+  bulk.style.display = showSingle ? 'none' : '';
+  tab1.className = showSingle ? 'btn small' : 'btn outline small';
+  tab2.className = showSingle ? 'btn outline small' : 'btn small';
+}
+// 逐条填写：收集 items 列表
+let _importItems = [];
+window.addImportItem = addImportItem;
+function addImportItem() {
+  const kind = document.getElementById('modal-item-kind').value;
+  const val = document.getElementById('modal-item-value').value.trim();
+  if (!val) return;
+  _importItems.push({ kind, value: val });
+  document.getElementById('modal-item-value').value = '';
+  renderImportItems();
+  document.getElementById('modal-item-value').focus();
+}
+window.removeImportItem = removeImportItem;
+function removeImportItem(idx) {
+  _importItems.splice(idx, 1);
+  renderImportItems();
+}
+function renderImportItems() {
+  const box = document.getElementById('modal-item-list');
+  if (!box) return;
+  box.innerHTML = _importItems.map((it, i) =>
+    '<div style="font-size:11px;padding:2px 0;display:flex;gap:6px;align-items:center">' +
+    '<span class="badge" style="min-width:44px;text-align:center">' + esc(it.kind) + '</span>' +
+    '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(it.value) + '</span>' +
+    '<button class="btn outline small" style="font-size:9px;padding:0 4px" onclick="removeImportItem(' + i + ')">✕</button></div>'
+  ).join('') || '<div style="font-size:11px;color:var(--muted)">尚未添加（输入值后点 + 添加）</div>';
+}
+
+// 批量导入（文本 或 CSV/Excel 文件 或 逐条填写，归入当前项目）
+window.importAssetsBulk = importAssetsBulk;
+async function importAssetsBulk() {
+  const status = document.getElementById('asset-bulk-status');
+  const text = document.getElementById('modal-asset-bulk-text').value.trim();
+  const file = document.getElementById('modal-asset-bulk-file').files[0];
+  const projectId = Projects.currentProject || '';
+  // 当前选中资产：表头驱动（域名/子域名/IP）挂载目标
+  const attachAsset = window.currentAsset && window.currentAsset !== 'default' ? window.currentAsset : null;
+  if (!text && !file && !_importItems.length) { status.textContent = '请粘贴文本、选文件或逐条添加'; return; }
+  status.textContent = '导入中...';
+  try {
+    let res;
+    if (_importItems.length) {
+      // 逐条填写优先
+      res = await fetch(API + '/assets/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: _importItems,
+          project_id: (projectId && projectId !== 'unassigned') ? projectId : null,
+          asset_id: attachAsset
+        })
+      });
+      _importItems = [];
+      renderImportItems();
+    } else if (file) {
+      const fd = new FormData();
+      fd.append('file', file);
+      if (projectId && projectId !== 'unassigned') fd.append('project_id', projectId);
+      if (attachAsset) fd.append('asset_id', attachAsset);
+      res = await fetch(API + '/assets/import', { method: 'POST', body: fd });
+    } else {
+      res = await fetch(API + '/assets/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, project_id: (projectId && projectId !== 'unassigned') ? projectId : null, asset_id: attachAsset })
+      });
+    }
+    const json = await res.json();
+    if (json.ok && json.data) {
+      const d = json.data;
+      let msg = '完成: 创建 ' + d.created + ' 家';
+      if (d.attached) msg += ', 挂载 ' + d.attached + ' 条';
+      msg += ', 失败 ' + d.failed;
+      if (d.errors && d.errors.length) msg += ' — ' + d.errors.slice(0, 3).join('; ');
+      status.textContent = msg;
+      document.getElementById('modal-asset-bulk-text').value = '';
+      document.getElementById('modal-asset-bulk-file').value = '';
+      await loadAssets();
+      Projects.loadProjects();
+      await Projects.switchProject(projectId || '');
+      window.dispatchEvent(new CustomEvent('asset-changed', { detail: { assetId: window.currentAsset } }));
+    } else {
+      status.textContent = json.error || '导入失败';
+    }
+  } catch (e) {
+    status.textContent = '导入失败: ' + e.message;
+  }
+}
+window.createAsset = async () => {
+  await createAsset();
+  Projects.loadProjects();  // 资产归属变化后刷新项目资产数
+};
+window.deleteAsset = async (id, name) => {
+  await deleteAssetModule(id, name);
+  Projects.loadProjects();
+};
 window.clearErrors = clearErrors;
+
+// 导出项目函数
+window.currentProject = Projects.currentProject;
+window.loadProjects = Projects.loadProjects;
+window.switchProject = Projects.switchProject;
+window.assignAssetToProject = Projects.assignAssetToProject;
+window.openNewProjectModal = () => {
+  document.getElementById('modal-project-name').value = '';
+  document.getElementById('modal-project-desc').value = '';
+  document.getElementById('project-modal-overlay').style.display = 'flex';
+  document.getElementById('modal-project-name').focus();
+};
+window.createProjectFromModal = async () => {
+  const name = document.getElementById('modal-project-name').value.trim();
+  const desc = document.getElementById('modal-project-desc').value.trim();
+  const ok = await Projects.createProject(name, desc);
+  if (ok) document.getElementById('project-modal-overlay').style.display = 'none';
+};
+// 项目列表 → 资产弹窗项目下拉同步
+window.syncProjectOptions = syncProjectOptions;
+function syncProjectOptions() {
+  const sel = document.getElementById('modal-asset-project');
+  if (!sel) return;
+  const cur = Projects.currentProject;
+  const opts = ['<option value="">未归属</option>',
+    ...Projects.projectList.map(p =>
+      '<option value="' + p.id + '">' + esc(p.name || ('Project ' + p.id)) + '</option>')];
+  sel.innerHTML = opts.join('');
+  if (cur && cur !== 'unassigned') sel.value = cur;
+}
 
 // index.html 新建资产弹窗 oninput 引用（旧 app.js 函数，这里补齐兼容层）
 window.syncAssetId = function (val) {
@@ -1614,108 +1758,6 @@ async function runPipeline() {
 }
 
 // ============================================================
-// Tutorial
-// ============================================================
-const TUT_STEPS = [
-  {
-    title: '1. Add Targets',
-    html: `
-      <p>Add the domains, IPs, URLs, or subdomains you want to recon.</p>
-      <div style="background:var(--bg);border-radius:6px;padding:10px;margin:8px 0;font-size:12px;line-height:1.8">
-        <div>1. Go to <b>Targets</b> tab</div>
-        <div>2. Select type (Domain / IP / URL)</div>
-        <div>3. Enter value → click <b>Add</b></div>
-        <div>4. Go to <b>Tasks</b> tab to manually trigger scans</div>
-        <div style="color:var(--muted);margin-top:4px">Example: <code>example.com</code> or <code>192.168.1.0/24</code></div>
-      </div>
-      <p style="color:var(--muted);font-size:11px">Scanning is manual by default. Set GRAPHPT_AUTO_SCAN=1 in .env for scheduled auto-scan.</p>
-    `,
-  },
-  {
-    title: '2. Explore Attack Surface',
-    html: `
-      <p>Browse the full asset hierarchy with sources and relationships visible at every level.</p>
-      <div style="background:var(--bg);border-radius:6px;padding:10px;margin:8px 0;font-size:12px;line-height:1.8">
-        <div>📁 <b>Domain</b> — click to expand → subdomains with resolved IPs</div>
-        <div>🔗 <b>IP</b> — click to expand → open ports with HTTP endpoints</div>
-        <div>Each node shows <b>sources</b> (which tool discovered it), timestamps, and relationships</div>
-        <div style="color:var(--muted);margin-top:4px">Multi-source consensus = higher confidence. Breadcrumb navigation at the top.</div>
-      </div>
-      <p style="color:var(--muted);font-size:11px">Data is stored in Neo4j with provenance tracking — drill down through Asset → Domain → IP → Port → Endpoint.</p>
-    `,
-  },
-  {
-    title: '3. Run Tasks & Pipelines',
-    html: `
-      <p>Manually trigger collection tasks or design multi-stage pipelines.</p>
-      <div style="background:var(--bg);border-radius:6px;padding:10px;margin:8px 0;font-size:12px;line-height:1.8">
-        <div><b>Tasks tab</b> — one-click trigger scheduled jobs</div>
-        <div style="margin:4px 0;padding-left:12px;border-left:2px solid var(--border)">
-          <code>dns_resolve</code>, <code>port_scan</code>, <code>web_fingerprint</code>, etc.
-        </div>
-        <div style="margin-top:8px"><b>Pipelines tab</b> — design custom multi-stage workflows</div>
-        <div style="margin:4px 0;padding-left:12px;border-left:2px solid var(--border)">
-          Example: <code>nmap SYN → nmap -sV -p {ports} → httpx -l {urls_file}</code>
-        </div>
-        <div style="color:var(--green);margin-top:4px">Stage 1 finds ports → {ports} feeds Stage 2 → {urls} feeds Stage 3</div>
-      </div>
-    `,
-  },
-  {
-    title: '4. Edit Tool Commands',
-    html: `
-      <p>Customize how each tool is invoked via <code>tools/&lt;name&gt;/tool.yaml</code>.</p>
-      <div style="background:var(--bg);border-radius:6px;padding:10px;margin:8px 0;font-size:12px;line-height:1.8">
-        <div>Available placeholders:</div>
-        <div><code>{bin}</code> — auto-resolved tool path</div>
-        <div><code>{ip}</code> <code>{domain}</code> <code>{subdomain}</code> — target</div>
-        <div><code>{port}</code> <code>{url}</code> — single value</div>
-        <div><code>{ports}</code> <code>{ips}</code> <code>{urls}</code> — comma-joined list (pipelines only)</div>
-        <div><code>{urls_file}</code> — temp file, one URL per line (pipelines only)</div>
-      </div>
-      <p style="color:var(--muted);font-size:11px">Changes take effect on next task run (hot-reload). No restart needed.</p>
-    `,
-  },
-];
-
-let _tutIdx = 0;
-
-function tutRender() {
-  var steps = document.getElementById('tut-steps');
-  if (!steps) return;  // 教程 DOM 不存在时不渲染
-  const s = TUT_STEPS[_tutIdx];
-  steps.innerHTML = `
-    <h4 style="margin-bottom:10px">${s.title}</h4>
-    ${s.html}
-  `;
-  var counter = document.getElementById('tut-counter');
-  if (counter) counter.textContent = `${_tutIdx+1} / ${TUT_STEPS.length}`;
-  var prev = document.getElementById('tut-prev-btn');
-  if (prev) prev.style.display = _tutIdx > 0 ? '' : 'none';
-  var next = document.getElementById('tut-next-btn');
-  if (next) next.style.display = _tutIdx < TUT_STEPS.length - 1 ? '' : 'none';
-  var done = document.getElementById('tut-done-btn');
-  if (done) done.style.display = _tutIdx === TUT_STEPS.length - 1 ? '' : 'none';
-}
-
-function tutNext() {
-  if (_tutIdx < TUT_STEPS.length - 1) { _tutIdx++; tutRender(); }
-}
-function tutPrev() {
-  if (_tutIdx > 0) { _tutIdx--; tutRender(); }
-}
-function tutClose() {
-  document.getElementById('tut-overlay').style.display = 'none';
-  try { localStorage.setItem('graphpt_tutorial_done', '1'); } catch(e) {}
-}
-
-function tutOpen() {
-  _tutIdx = 0;
-  tutRender();
-  document.getElementById('tut-overlay').style.display = 'flex';
-}
-
-// ============================================================
 // Scan All Unscanned
 // ============================================================
 let _scanAllJobId = null;
@@ -2044,13 +2086,69 @@ function _renderGraph(data) {
         html += '<span style="word-break:break-all">' + esc(p.value||p.id) + '</span>';
         if (p.created_at) html += '<br><span style="color:var(--muted)">Created: ' + fmtTime(p.created_at) + '</span>';
         html += '<br><span style="color:var(--muted)">ID: ' + esc(p.id||'') + '</span>';
+        // 节点操作：按类型提供可添加的子节点
+        html += '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">';
+        html += '<div style="font-size:11px;color:var(--muted);margin-bottom:4px">添加子节点</div>';
+        html += '<select id="graph-add-kind" style="font-size:12px;width:100%;margin-bottom:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px">';
+        const kinds = _graphChildKinds[lbl] || ['domain','subdomain','ip'];
+        const kindNames = {domain:'根域名', subdomain:'子域名', ip:'IP', port:'端口', endpoint:'端点'};
+        kinds.forEach(k => { html += '<option value="' + k + '">' + (kindNames[k]||k) + '</option>'; });
+        html += '</select>';
+        html += '<input id="graph-add-value" placeholder="' + (lbl==='IP' ? '8080/tcp' : lbl==='Port' ? 'http://example.com/' : '值') + '" style="font-size:12px;width:100%;margin-bottom:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px" onkeydown="if(event.key===\'Enter\')graphAddChild()" />';
+        html += '<button class="btn small" style="width:100%" onclick="graphAddChild()">添加</button>';
+        html += '<div id="graph-add-status" style="font-size:11px;color:var(--muted);margin-top:4px"></div></div>';
         info.innerHTML = html;
         info.style.display = 'block';
+        info.dataset.parentId = p.id || '';
+        info.dataset.parentLabel = lbl;
       }
     } else {
       info.style.display = 'none';
     }
   });
+}
+
+// 节点可添加的子节点类型（按父节点标签）
+const _graphChildKinds = {
+  'Asset': ['domain', 'subdomain', 'ip', 'endpoint'],
+  'Domain': ['subdomain', 'endpoint', 'ip'],
+  'RootDomain': ['subdomain', 'endpoint', 'ip'],
+  'Subdomain': ['endpoint', 'ip'],
+  'IP': ['port', 'endpoint'],
+  'Port': ['endpoint']
+};
+
+// 图节点添加子节点（Graph 页）
+window.graphAddChild = graphAddChild;
+async function graphAddChild() {
+  const info = document.getElementById('graph-info');
+  const status = document.getElementById('graph-add-status');
+  const kind = document.getElementById('graph-add-kind');
+  const val = document.getElementById('graph-add-value');
+  if (!info || !kind || !val || !val.value.trim()) return;
+  status.textContent = '添加中...';
+  try {
+    const res = await fetch('/api/graph/node/children', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        parent_id: info.dataset.parentId,
+        parent_label: info.dataset.parentLabel,
+        kind: kind.value,
+        value: val.value.trim()
+      })
+    });
+    const d = await res.json();
+    if (d.ok && d.data && d.data.added) {
+      status.textContent = '已添加';
+      val.value = '';
+      loadGraph();  // 刷新图
+    } else {
+      status.textContent = d.error || '添加失败';
+    }
+  } catch (e) {
+    status.textContent = '添加失败: ' + e.message;
+  }
 }
 
 async function loadGraph() {
@@ -2354,7 +2452,8 @@ async function startFullScan() {
     const r = await fetch('/api/scan/start', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({asset_id:currentAsset, force_rescan: forceRescan})
+      body:JSON.stringify({asset_id:currentAsset, force_rescan: forceRescan,
+        project_id: window.currentProject || null})
     });
     const d = await r.json();
     if (d.ok) {
@@ -2779,13 +2878,30 @@ async function showNodeDetail(url, nodeId) {
   async function loadReports() {
     document.getElementById("page-reports").innerHTML = '<div class="loading">Loading...</div>';
     try {
-      const [v, r] = await Promise.all([
+      const [v, r, ag] = await Promise.all([
         fetch(API + "/vulnerabilities?asset_id=" + currentAsset + "&per_page=10"),
-        fetch(API + "/report?asset_id=" + currentAsset)
+        fetch(API + "/report?asset_id=" + currentAsset),
+        fetch(API + "/reports/agent?asset_id=" + encodeURIComponent(currentAsset)).then(x => x.json()).catch(() => ({data: []}))
       ]);
-      const vd = (await v.json()).data || [], rm = r.ok ? await r.text() : '';
+      const vd = (v.ok ? (await v.json()).data : []) || [], rm = r.ok ? await r.text() : '';
+      const agentReports = (ag && ag.data) || [];
       let h = '<div class="toolbar">';
       h += '<span class="spacer"></span><a href="' + API + '/report?asset_id=' + currentAsset + '" class="btn" download>Download .md</a> <a href="' + API + '/report?asset_id=' + currentAsset + '&format=json" class="btn outline" download>Download .json</a></div>';
+      // Agent 漏洞挖掘报告（分析过程/攻击链/建议）
+      h += '<div style="margin:16px 0 8px;font-weight:600">Agent 漏洞挖掘报告 (' + agentReports.length + ')</div>';
+      if (agentReports.length) {
+        h += '<div style="border:1px solid var(--border);border-radius:8px;padding:8px">';
+        agentReports.forEach(x => {
+          h += '<div style="padding:6px 4px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center">';
+          h += '<span style="flex:1;font-size:12px">' + esc(x.name.replace(/^agent_/, '').replace(/_(\d{8}_\d{6})$/, ' · $1')) + '</span>';
+          h += '<a class="btn outline small" href="' + API + '/report/agent/' + encodeURIComponent(x.path) + '" target="_blank" style="font-size:10px">查看</a>';
+          h += '<a class="btn outline small" href="' + API + '/report/agent/' + encodeURIComponent(x.path) + '" download style="font-size:10px">下载</a>';
+          h += '</div>';
+        });
+        h += '</div>';
+      } else {
+        h += '<div style="font-size:12px;color:var(--muted);margin-bottom:8px">暂无 Agent 挖掘报告（Agent 会话完成后自动生成）</div>';
+      }
       h += '<div style="margin:16px 0 8px;font-weight:600">Findings (' + vd.length + ')</div><table><thead><tr><th>Sev</th><th>Title</th><th>Endpoint</th></tr></thead><tbody>';
       if (vd.length) vd.forEach(x => h += '<tr><td>' + severityBadge(x.severity) + '</td><td>' + esc(x.title || '?') + '</td><td>' + (x.url ? '<a href="' + esc(x.url) + '" target="_blank">' + esc((x.url || '').substring(0, 60)) + '</a>' : '-') + '</td></tr>');
       else h += '<tr><td colspan="3" style="color:var(--muted)">No findings. Run a full scan.</td></tr>';
@@ -2811,25 +2927,17 @@ setTimeout(function() {
   } else {
     loadDashboard();
   }
-  // 后台加载资产列表 + 工具注册表（填充下拉框和右键菜单）
-  setTimeout(function() { loadAssets(); }, 2000);
+  // 后台加载资产列表 + 项目列表 + 工具注册表（填充下拉框和右键菜单）
+  setTimeout(function() {
+    Projects.loadProjects();
+    loadAssets();
+    setTimeout(syncProjectOptions, 300);
+  }, 2000);
   // 工具列表从 API 动态获取（右键菜单 _cfgTools）
   fetch(API + '/config/check').then(function(r){return r.json();}).then(function(j){
     if (j.ok) { _cfgTools = Object.entries(j.data).map(function(e){return {name:e[0], desc:e[1].desc||'', command:e[1].command||'', use_on:e[1].use_on||{}};}); }
   }).catch(function(){});
 }, 500);
-if (!localStorage.getItem('graphpt_tutorial_done')) { tutOpen(); }
-
-// "?" button in header to reopen tutorial
-(function() {
-  const hdr = document.querySelector('header');
-  const btn = document.createElement('button');
-  btn.textContent = '?';
-  btn.title = 'Quick Guide';
-  btn.style.cssText = 'background:var(--accent);color:#fff;border:none;width:26px;height:26px;border-radius:50%;font-size:14px;font-weight:700;cursor:pointer';
-  btn.onclick = tutOpen;
-  hdr.appendChild(btn);
-})();
 
 // ============================================================
 // 导出所有页面加载函数到全局作用域
@@ -2845,11 +2953,6 @@ window.loadAgent = loadAgent;
 
 // 导出其他在 app.js 中使用的函数
 window._vulnToggle = _vulnToggle;
-window.tutNext = tutNext;
-window.tutPrev = tutPrev;
-window.tutClose = tutClose;
-window.tutOpen = tutOpen;
-window.tutRender = tutRender;
 window.scanAllPreview = scanAllPreview;
 window.scanAllStart = scanAllStart;
 window.scanAllStop = scanAllStop;
@@ -2962,6 +3065,7 @@ document.querySelectorAll('nav button[data-page]').forEach(btn => {
       case 'config': window.loadConfig(); break;
       case 'graph': window.loadGraph(); break;
       case 'agent': loadAgent(); break;
+      case 'fleet': window.loadFleet(); break;
     }
   });
 });

@@ -55,7 +55,15 @@ _SEARCH_PATHS: list[tuple[str, str, str]] = [
 
 _web_log = logging.getLogger("graphpt.web")
 
+# 哨兵：区分"字段未提供"与"显式置空"（PATCH 语义）
+_UNSET = object()
+
 web_app = FastAPI(title="GraphPT Admin", version="0.1.0")
+
+# fleet 管理路由（分布式舰队面板/事件）
+from graphpt.fleet.routes import fleet_router as _fleet_router
+
+web_app.include_router(_fleet_router)
 
 
 # ── API 鉴权（可选）──
@@ -94,6 +102,12 @@ async def _security_headers(request: Request, call_next):
 async def _auto_resume_interrupted_scans():
     import asyncio
     asyncio.create_task(_try_auto_resume())
+    # 舰队结果消费（publish 模式下分布式任务完成判定，不影响单机路径）
+    try:
+        from graphpt.fleet.consumer import start_results_consumer
+        start_results_consumer()
+    except Exception:
+        _web_log.warning("fleet_consumer_start_failed", exc_info=True)
 
 
 async def _try_auto_resume():
@@ -899,19 +913,34 @@ async def dashboard(asset_id: str = "default"):
 # ============================================================
 
 @web_app.get("/api/assets")
-async def list_assets():
-    """列出所有 Asset（项目），含节点统计。30s 缓存。"""
-    cache_key = "assets_list"
+async def list_assets(project_id: str = ""):
+    """列出所有 Asset（项目），含节点统计。30s 缓存。
+
+    project_id: 空=全部；"unassigned"=仅未归属；数字=该项目资产 + 未归属。
+    """
+    cache_key = f"assets_list:{project_id or '*'}"
     cached = _cached(cache_key, ttl=30)
     if cached:
         return cached
 
     try:
+        # 归属过滤（项目视图恒含未归属，避免漏资产）
+        if project_id == "unassigned":
+            scope_clause = "WHERE a.project_id IS NULL"
+        elif project_id:
+            scope_clause = (
+                "WHERE a.project_id = $pid OR a.project_id IS NULL")
+        else:
+            scope_clause = ""
+        extra_params = {"pid": str(project_id)} if project_id and project_id != "unassigned" else {}
         # 拆回独立 CALL 子查询，避免 OPTIONAL MATCH 交叉乘积
+        # 注：不用 f-string（CALL 子查询含花括号），scope_clause 用拼接
         rows = _neo4j_query(
-            """
-            MATCH (a:Asset)
-            CALL (a) { OPTIONAL MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(d:Domain) RETURN count(d) AS domain_cnt }
+            "MATCH (a:Asset)\n"
+            + scope_clause + "\n"
+            + """CALL (a) {
+              OPTIONAL MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(d:Domain) RETURN count(d) AS domain_cnt
+            }
             CALL (a) {
               OPTIONAL MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(ip:IP)
               RETURN count(ip) AS domain_ip_cnt
@@ -929,15 +958,18 @@ async def list_assets():
             CALL (a) { OPTIONAL MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN count(ep) AS direct_ep_cnt }
             CALL (a) { OPTIONAL MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN count(ep) AS domain_direct_ep_cnt }
             RETURN a.id AS id, coalesce(a.name, a.id) AS name, a.created_at AS created_at,
+                   a.project_id AS project_id,
                    domain_cnt,
                    domain_ip_cnt + direct_ip_cnt AS ip_cnt,
                    domain_port_cnt + direct_port_cnt AS port_cnt,
                    domain_ep_cnt + direct_ep_cnt + domain_direct_ep_cnt AS ep_cnt
             ORDER BY a.created_at DESC
-            """
+            """,
+            **extra_params,
         )
         assets = [
             {"id": r["id"], "name": r["name"], "created_at": r["created_at"],
+             "project_id": str(r["project_id"]) if r["project_id"] is not None else None,
              "domain_count": r["domain_cnt"],
              "ip_count": r["ip_cnt"], "port_count": r["port_cnt"], "endpoint_count": r["ep_cnt"]}
             for r in rows
@@ -1118,72 +1150,1616 @@ async def get_new_assets(asset_id: str, node_type: str = None):
 
 
 
+def _slugify_asset_id(name: str) -> str:
+    """公司名 → 资产 id（slug）。保留中文，去空白/符号。"""
+    s = re.sub(r"[^\w-]", "", name.lower().replace(" ", "-"))
+    return s or "asset"
+
+
+def _host_of_url(url: str) -> str:
+    """http://demo.testfire.net/path → demo.testfire.net。"""
+    from urllib.parse import urlsplit
+    try:
+        return urlsplit(url if "://" in url else f"http://{url}").hostname or url
+    except ValueError:
+        return url
+
+
+_TWO_LEVEL_TLDS = {
+    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "co.uk", "org.uk",
+    "com.au", "net.au", "co.jp", "ne.jp", "com.br", "net.br", "co.kr",
+    "com.mx", "com.tw", "com.hk", "com.sg", "com.my", "co.in", "com.tr",
+}
+
+
+def _root_domain_of(host: str) -> str:
+    """mail.example.com → example.com；shop.example.co.uk → example.co.uk。"""
+    h = (host or "").strip().lower().rstrip(".")
+    parts = [p for p in h.split(".") if p]
+    if len(parts) <= 2:
+        return h
+    tail2 = ".".join(parts[-2:])
+    if tail2 in _TWO_LEVEL_TLDS:
+        return ".".join(parts[-3:])
+    return tail2
+
+
+def _attach_to_project(project_id: str, kind: str, value: str) -> bool:
+    """把域名/IP 挂到项目下（无资产对应，悬空数据）。"""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if kind in ("domain", "subdomain"):
+        _neo4j_query(
+            """
+            MERGE (d:Domain {id: $did})
+              ON CREATE SET d.value = $v, d.created_at = $now,
+                            d.is_root = false, d.project_id = $pid
+              SET d.project_id = $pid
+            """,
+            did=f"domain:{value}", v=value, now=now, pid=str(project_id),
+        )
+        return True
+    if kind == "ip":
+        _neo4j_query(
+            """
+            MERGE (ip:IP {id: $iid})
+              ON CREATE SET ip.value = $v, ip.created_at = $now, ip.project_id = $pid
+              SET ip.project_id = $pid
+            """,
+            iid=f"ip:{value}", v=value, now=now, pid=str(project_id),
+        )
+        return True
+    return False
+
+
+def _add_child_node(parent_id: str, parent_label: str, kind: str, value: str) -> bool:
+    """图节点操作：在指定父节点下添加子节点并建立关系（Graph 页点击节点）。
+
+    parent_label: Asset / Domain / Subdomain / IP / Port / HTTPEndpoint
+    kind: domain / subdomain / ip / port / endpoint
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    parent_label = str(parent_label or "")
+    value = (value or "").strip()
+    if not value:
+        return False
+
+    # Asset 下的域名/子域名/IP → 走既有资产挂载
+    if parent_label == "Asset":
+        if kind in ("domain", "subdomain", "ip"):
+            return _attach_to_asset(parent_id, kind, value)
+        if kind == "endpoint":
+            return _attach_endpoint(parent_id, parent_id, value)
+        return False
+
+    # 域节点（Domain/Subdomain）：加子域 / 端点 / IP
+    if parent_label in ("Domain", "Subdomain"):
+        if kind == "subdomain":
+            _neo4j_query(
+                """
+                MATCH (p:Domain {id: $pid})
+                MERGE (d:Domain {id: $did})
+                  ON CREATE SET d.value = $v, d.created_at = $now,
+                                d.is_root = false, d.level = 2
+                MERGE (p)-[:PARENT_OF]->(d)
+                """,
+                pid=parent_id, did=f"domain:{value}", v=value, now=now,
+            )
+            return True
+        if kind == "ip":
+            _neo4j_query(
+                """
+                MATCH (p:Domain {id: $pid})
+                MERGE (ip:IP {id: $iid})
+                  ON CREATE SET ip.value = $v, ip.created_at = $now
+                MERGE (p)-[:RESOLVES_TO]->(ip)
+                """,
+                pid=parent_id, iid=f"ip:{value}", v=value, now=now,
+            )
+            return True
+        if kind == "endpoint":
+            # 从父域链找资产 id
+            rows = _neo4j_query(
+                "MATCH (a:Asset)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->"
+                "(p:Domain {id: $pid}) RETURN a.id AS aid LIMIT 1",
+                pid=parent_id,
+            )
+            aid = rows[0]["aid"] if rows else parent_id
+            return _attach_endpoint(parent_id, str(aid), value)
+        return False
+
+    # IP 节点：加端口 / 端点
+    if parent_label == "IP":
+        if kind == "port":
+            return _attach_port(parent_id, value)
+        if kind == "endpoint":
+            return _attach_endpoint(parent_id, parent_id, value)
+        return False
+
+    # Port 节点：加端点
+    if parent_label == "Port":
+        return _attach_endpoint(parent_id, parent_id, value)
+
+    return False
+
+
+def _asset_id_of_node(node_id: str) -> str:
+    """从任意节点找归属资产 id（沿关系链回溯），找不到返回原 id。"""
+    try:
+        rows = _neo4j_query(
+            """
+            MATCH (n {id: $nid})
+            OPTIONAL MATCH (a:Asset)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(n)
+            OPTIONAL MATCH (a2:Asset)-[:HAS_IP]->(n)
+            OPTIONAL MATCH (a3:Asset)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(n)
+            OPTIONAL MATCH (a4:Asset)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)
+                              -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(n)
+            WITH coalesce(a.id, a2.id, a3.id, a4.id) AS aid
+            WHERE aid IS NOT NULL RETURN aid LIMIT 1
+            """,
+            nid=node_id,
+        )
+        return rows[0]["aid"] if rows else node_id
+    except Exception:
+        return node_id
+
+
+def _attach_port(ip_id: str, value: str) -> bool:
+    """端口挂载：value 格式 '80/tcp'、'8080' 或 '1.2.3.4:80/tcp'（含 IP 时用后者）。"""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    v = value.strip()
+    ip_val = ip_id.split(":", 1)[-1] if ip_id.startswith("ip:") else ip_id
+    m = re.match(r"^(?:(\d{1,3}(?:\.\d{1,3}){3})[:\s])?(\d{1,5})(?:/(\w+))?", v)
+    if not m:
+        return False
+    host, num, proto = m.group(1), m.group(2), (m.group(3) or "tcp")
+    if host:
+        ip_val = host
+    _neo4j_query(
+        """
+        MATCH (ip:IP {id: $iid})
+        MERGE (p:Port {id: $pid})
+          ON CREATE SET p.number = $num, p.protocol = $proto, p.created_at = $now
+          SET p.number = $num, p.protocol = $proto
+        MERGE (ip)-[:HAS_PORT]->(p)
+        """,
+        iid=f"ip:{ip_val}", pid=f"port:{ip_val}:{num}/{proto}",
+        num=int(num), proto=proto, now=now,
+    )
+    return True
+
+
+def _attach_endpoint(parent_id: str, asset_id: str, value: str) -> bool:
+    """端点挂载：value 为 URL，挂到父节点（EXPOSES）+ 设置 asset_id。"""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    url = value
+    if "://" not in url:
+        url = f"http://{url}"
+    ep_id = f"ep:GET:{url}"
+    _neo4j_query(
+        """
+        MATCH (p {id: $pid})
+        MERGE (ep:HTTPEndpoint {id: $eid})
+          ON CREATE SET ep.url = $url, ep.asset_id = $aid, ep.created_at = $now
+          SET ep.url = $url, ep.asset_id = $aid
+        MERGE (p)-[:EXPOSES]->(ep)
+        """,
+        pid=parent_id, eid=ep_id, url=url, aid=asset_id, now=now,
+    )
+    return True
+
+
+@web_app.post("/api/graph/node/children")
+async def add_node_child(body: dict):
+    """图节点操作：在节点下添加子节点（Graph 页点击节点 → 添加）。
+
+    body: {parent_id, parent_label, kind, value}
+    """
+    parent_id = str(body.get("parent_id") or "").strip()
+    parent_label = str(body.get("parent_label") or "").strip()
+    kind = str(body.get("kind") or "").strip()
+    value = str(body.get("value") or "").strip()
+    if not parent_id or not kind or not value:
+        raise HTTPException(400, "parent_id/kind/value are required")
+    try:
+        ok = _add_child_node(parent_id, parent_label, kind, value)
+        _invalidate_assets_cache()
+        return {"ok": True, "data": {"added": ok, "parent": parent_id,
+                                     "kind": kind, "value": value}}
+    except Exception as exc:
+        return _json_error(exc)
+
+
+def _attach_to_asset(asset_id: str, kind: str, value: str) -> bool:
+    """把域名/子域名/IP 挂到指定资产（表头驱动的列式导入）。
+
+    kind: domain（HAS_DOMAIN）/ subdomain（挂根域 PARENT_OF）/ ip（HAS_IP）
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if kind == "domain":
+        _neo4j_query(
+            """
+            MATCH (a:Asset {id: $aid})
+            MERGE (d:Domain {id: $did})
+              ON CREATE SET d.value = $v, d.created_at = $now,
+                            d.is_root = true, d.level = 1
+            MERGE (a)-[:HAS_DOMAIN]->(d)
+            """,
+            aid=asset_id, did=f"domain:{value}", v=value, now=now,
+        )
+        return True
+    if kind == "subdomain":
+        # 自动推导主域：mail.example.com → 确保 example.com 根域存在并 PARENT_OF 挂上
+        root = _root_domain_of(value)
+        _neo4j_query(
+            """
+            MATCH (a:Asset {id: $aid})
+            MERGE (rd:Domain {id: $rdid})
+              ON CREATE SET rd.value = $root, rd.created_at = $now,
+                            rd.is_root = true, rd.level = 1
+            MERGE (a)-[:HAS_DOMAIN]->(rd)
+            MERGE (d:Domain {id: $did})
+              ON CREATE SET d.value = $v, d.created_at = $now,
+                            d.is_root = false, d.level = 2
+            MERGE (rd)-[:PARENT_OF]->(d)
+            """,
+            aid=asset_id, rdid=f"domain:{root}", root=root,
+            did=f"domain:{value}", v=value, now=now,
+        )
+        return True
+    if kind == "ip":
+        _neo4j_query(
+            """
+            MATCH (a:Asset {id: $aid})
+            MERGE (ip:IP {id: $iid})
+              ON CREATE SET ip.value = $v, ip.created_at = $now
+            MERGE (a)-[:HAS_IP]->(ip)
+            """,
+            aid=asset_id, iid=f"ip:{value}", v=value, now=now,
+        )
+        return True
+    return False
+
+
+def _create_asset_graph(asset_id: str, name: str,
+                        domains: list[str], project_id: str | None) -> dict:
+    """创建/更新 Asset + 种子根域名（单建与批量导入共享）。"""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if project_id is not None:
+        # 注意：_sanitize_params 过滤 None 参数，pid 为 None 时不能走 $pid 查询
+        result = _neo4j_query(
+            """
+            MERGE (a:Asset {id: $aid})
+              ON CREATE SET a.name = $name, a.created_at = $now
+              SET a.project_id = $pid
+            RETURN a.id AS id, a.name AS name, a.created_at = $now AS created
+            """,
+            aid=asset_id, name=name, now=now, pid=project_id,
+        )
+    else:
+        result = _neo4j_query(
+            """
+            MERGE (a:Asset {id: $aid})
+              ON CREATE SET a.name = $name, a.created_at = $now
+              REMOVE a.project_id
+            RETURN a.id AS id, a.name AS name, a.created_at = $now AS created
+            """,
+            aid=asset_id, name=name, now=now,
+        )
+    record = result[0] if result else None
+    created = record.get("created", False) if record else False
+
+    # 种子根域名
+    seeded = 0
+    for domain in domains:
+        domain = domain.strip().lower()
+        if not domain:
+            continue
+        _neo4j_query(
+            """
+            MATCH (a:Asset {id: $aid})
+            MERGE (d:Domain {id: $domain_id})
+              ON CREATE SET d.value = $domain, d.created_at = $now, d.is_root = true, d.level = 1
+            MERGE (a)-[:HAS_DOMAIN]->(d)
+            """,
+            aid=asset_id, domain_id=f"domain:{domain}", domain=domain, now=now,
+        )
+        seeded += 1
+
+    _invalidate_assets_cache()  # 清除资产列表缓存（含 project_id 键）
+    return {"id": record["id"] if record else asset_id,
+            "name": record["name"] if record else name,
+            "created": created, "domains_seeded": seeded}
+
+
+def _parse_import_text(text: str) -> list[list[str]]:
+    """多行文本 → 行列表。每行: 公司名, 域名1, 域名2...（逗号/分号/tab 分隔）。"""
+    rows: list[list[str]] = []
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("#"):
+            continue
+        parts = [p.strip() for p in re.split(r"[,;\t]", ln) if p.strip()]
+        if parts:
+            rows.append(parts)
+    return rows
+
+
+def _decode_import_bytes(data: bytes) -> str:
+    for enc in ("utf-8-sig", "utf-8", "gbk", "latin-1"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _parse_import_rows(data: bytes, filename: str) -> dict[str, list[list[str]]]:
+    """文件字节 → {sheet_name: rows}。xlsx 多 sheet；csv/txt 归 "default"。"""
+    fn = (filename or "").lower()
+    if fn.endswith(".xlsx") or fn.endswith(".xlsm") or fn.endswith(".xls"):
+        import io
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True)
+        out: dict[str, list[list[str]]] = {}
+        for ws in wb.worksheets:
+            rows: list[list[str]] = []
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c).strip() if c is not None else "" for c in row]
+                if any(cells):
+                    rows.append(cells)
+            if rows:
+                out[ws.title] = rows
+        return out or {"default": []}
+    return {"default": _parse_import_text(_decode_import_bytes(data))}
+
+
+_IMPORT_HEADER_HINTS = ("公司", "公司名", "公司名称", "名称", "name", "company", "domain")
+_PROJECTS_HEADER_HINTS = ("id", "项目id", "project_id", "项目名", "name")
+_ASSETS_HEADER_HINTS = ("project_id", "项目id", "公司名", "公司", "公司名称", "名称", "name", "company")
+
+
+def _looks_like_domain(v: str) -> bool:
+    """域名/IP/URL 特征（含点号/协议头的目标串）。"""
+    v = (v or "").strip().lower()
+    if not v or len(v) < 3:
+        return False
+    if "://" in v or v.startswith("www."):
+        return True
+    try:
+        import ipaddress
+        ipaddress.ip_address(v)
+        return True
+    except ValueError:
+        pass
+    return "." in v and not v.endswith(".")
+
+
+def _infer_company_from_domain(domain: str) -> str:
+    """demo.testfire.net → 'testfire'；acme.com.cn → 'acme'。"""
+    host = (domain or "").strip().lower()
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    host = host.split("/", 1)[0].split("?", 1)[0]
+    parts = [p for p in host.split(".") if p]
+    tlds = {"com", "cn", "net", "org", "io", "gov", "edu", "info", "co", "cc",
+            "me", "top", "xyz", "site", "online", "vip", "club", "wang",
+            "shop", "biz", "pro", "tech", "app", "dev", "cloud"}
+    while parts and (parts[-1] in tlds or len(parts[-1]) <= 2):
+        parts.pop()
+    return parts[-1] if parts else host
+
+
+_IMPORT_KIND_HINTS = {
+    "domain": ("域名", "根域名", "domain", "dns"),
+    "subdomain": ("子域名", "subdomain", "sub"),
+    "ip": ("ip", "ip地址", "地址"),
+}
+
+
+def _parse_markdown_import(text: str) -> list[dict[str, object]]:
+    """解析层级 Markdown（导出 md 文件可编辑后直接回导）。
+
+    结构：## 资产: 名字 (`id`) → ### 子域名/根域名/IP/端点 → - 值
+    返回 [{"kind": "asset"|"domain"|"subdomain"|"ip", "value": str, "name": str}]
+    """
+    items: list[dict[str, object]] = []
+    cur_asset_name = ""
+    cur_asset_id = ""
+    cur_project_id = ""
+    cur_section = ""
+    _MD_SECTIONS = ("根域名", "子域名", "域名", "IP", "端点", "漏洞", "悬空")
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith((">", "<!--", "_（")):
+            continue
+        if line.startswith("## "):
+            continue  # 顶层标题（"## 资产" 等）
+        if line.startswith("### ") or line.startswith("#### "):
+            head = line[line.index(" ") + 1:].strip().rstrip("：:")
+            # 项目悬空数据段：#### 项目: 名字 (`1`) — 悬空数据（ID 可省略，按名查）
+            m_proj = re.match(
+                r"^项目[:：]?\s*(.+?)\s*(?:\(`(\d+)`\))?\s*[—\-–]?\s*悬空", head)
+            if m_proj and "悬空" in head:
+                pname = m_proj.group(1).strip()
+                cur_project_id = m_proj.group(2) or ""
+                if not cur_project_id:
+                    try:
+                        from graphpt.db.conn import open_db as _open_db
+                        _conn = _open_db(_ensure_db())
+                        try:
+                            row = _conn.execute(
+                                "SELECT id FROM projects WHERE name = ? LIMIT 1",
+                                (pname,)).fetchone()
+                            if row:
+                                cur_project_id = str(row["id"])
+                        finally:
+                            _conn.close()
+                    except Exception:
+                        pass
+                cur_asset_id = ""
+                cur_section = "悬空"
+                continue
+            if head in _MD_SECTIONS:
+                cur_section = head
+                continue
+            # 否则 = 资产条目：### 名字 (`id`，项目: xxx)
+            m_id = re.search(r"`([^`]+)`", head)
+            cur_asset_id = m_id.group(1) if m_id else ""
+            cur_asset_name = re.sub(r"\s*\([^)]*\)\s*$", "", head).strip()
+            m_pname = re.search(r"项目[:：]\s*([^)`]+)", head)
+            cur_project_id = ""
+            if m_pname:
+                pname = m_pname.group(1).strip()
+                try:
+                    from graphpt.db.conn import open_db as _open_db
+                    _conn = _open_db(_ensure_db())
+                    try:
+                        row = _conn.execute(
+                            "SELECT id FROM projects WHERE name = ? LIMIT 1",
+                            (pname,)).fetchone()
+                        if row:
+                            cur_project_id = str(row["id"])
+                    finally:
+                        _conn.close()
+                except Exception:
+                    pass
+            cur_section = ""
+            if cur_asset_id:
+                items.append({"kind": "asset", "value": cur_asset_name,
+                              "name": cur_asset_name, "asset_id": cur_asset_id,
+                              "project_id": cur_project_id or None})
+            continue
+        if line.startswith(("- ", "* ")):
+            v = line[2:].strip()
+            if not v:
+                continue
+            # 去 Markdown 装饰：**标题** (严重度/状态) url · 状态码 / · [kind]
+            m_kind = re.search(r"·\s*\[(\w+)\]$", v)
+            dangling_kind = m_kind.group(1) if m_kind else ""
+            v_clean = re.sub(r"·\s*\[\w+\]$", "", v).strip()
+            v_clean = re.sub(r"^\*\*(.+?)\*\*\s*(?:\([^)]*\))?\s*", "", v_clean).strip()
+            v_clean = v_clean.split("·")[0].strip()
+            if not v_clean:
+                continue
+            # 悬空数据（挂项目，无资产）
+            if cur_section == "悬空" and cur_project_id:
+                items.append({"kind": dangling_kind or "domain",
+                              "value": v_clean, "project_id": cur_project_id})
+                continue
+            if not cur_asset_id:
+                continue
+            if "子域名" in cur_section:
+                items.append({"kind": "subdomain", "value": v_clean,
+                              "asset_id": cur_asset_id})
+            elif "根域名" in cur_section or "域名" in cur_section:
+                items.append({"kind": "domain", "value": v_clean,
+                              "asset_id": cur_asset_id})
+            elif cur_section == "IP":
+                items.append({"kind": "ip", "value": v_clean,
+                              "asset_id": cur_asset_id})
+            elif "端点" in cur_section:
+                items.append({"kind": "endpoint", "value": v_clean,
+                              "asset_id": cur_asset_id})
+            # 漏洞/其他 section：只读信息，跳过
+    return items
+
+
+def _header_kind(header: list[str]) -> str:
+    """表头语义：'asset'（公司）/'domain'/'subdomain'/'ip'/'project'/'unknown'。"""
+    if not header:
+        return "unknown"
+    first = (header[0] or "").strip().lower()
+    if _is_header_row(header, _ASSETS_HEADER_HINTS):
+        return "asset"
+    if _is_header_row(header, _PROJECTS_HEADER_HINTS):
+        return "project"
+    for kind, hints in _IMPORT_KIND_HINTS.items():
+        if any(h in first for h in hints):
+            return kind
+    return "unknown"
+
+
+def _parse_loose_rows(rows: list[list[str]]) -> list[dict[str, object]]:
+    """宽松解析：不管粘贴格式，自动推断每行列语义。
+
+    - 单列：整列是域名 → 每行一个域名 + 自动公司名（主域）；否则当公司名
+    - 多列：逐列语义推断（表头精确匹配优先；无表头按内容特征）
+    返回 [{"name": str, "domains": [str], "project_id": str|None,
+           "kind": "asset"|"domain"|"subdomain"|"ip", "value": str}]
+    """
+    out: list[dict[str, object]] = []
+    if not rows:
+        return out
+
+    header = rows[0]
+    kind = _header_kind(header)
+    # 任意已知表头都算表头行（公司/域名/子域名/IP/项目）
+    is_header = kind != "unknown"
+    pid_col = _col_index(header, "project_id", "项目id") if is_header else None
+    name_col = _col_index(header, "公司名", "公司", "公司名称", "名称", "name", "company") if is_header else None
+    start = 1 if is_header else 0
+    data_rows = rows[start:]
+
+    # 表头驱动：单列数据（子域名/域名/IP）→ 逐值挂载（kind + value）
+    if is_header and kind in ("domain", "subdomain", "ip"):
+        val_col = 0
+        for r in data_rows:
+            if not r or not any(r):
+                continue
+            v = r[val_col].strip() if len(r) > val_col else ""
+            if not v:
+                continue
+            out.append({"kind": kind, "value": v, "name": "", "domains": [],
+                        "project_id": None})
+        return out
+
+    # 无表头：按内容推断列语义
+    if not is_header:
+        cols = max(len(r) for r in data_rows) if data_rows else 1
+        # 统计每列域名特征比例
+        domain_ratio = []
+        for c in range(cols):
+            vals = [r[c] for r in data_rows if len(r) > c and r[c].strip()]
+            if not vals:
+                domain_ratio.append(0.0)
+                continue
+            domain_ratio.append(
+                sum(1 for v in vals if _looks_like_domain(v)) / len(vals))
+        # 域名占比最高的列 = 域名列（可多列）；其余 = 公司名/项目
+        company_candidates = [c for c in range(cols) if domain_ratio[c] < 0.5]
+        domain_cols = [c for c in range(cols) if domain_ratio[c] >= 0.5]
+        if not domain_cols:
+            # 全列都不是域名：第一列当公司名，其余列忽略
+            domain_cols = []
+            company_candidates = [0]
+        name_col = company_candidates[0] if company_candidates else None
+        pid_col = None
+        for r in data_rows:
+            if not r or not any(r):
+                continue
+            name = r[name_col].strip() if name_col is not None and len(r) > name_col else ""
+            domains = [r[c].strip() for c in domain_cols
+                       if len(r) > c and r[c].strip()]
+            if not name and domains:
+                name = _infer_company_from_domain(domains[0])
+            if not name:
+                continue
+            out.append({"kind": "asset", "name": name, "domains": domains,
+                        "project_id": None})
+        return out
+
+    # 有表头（公司类）：按列名取值
+    for r in data_rows:
+        if not r or not any(r):
+            continue
+
+        def _cell(idx):
+            return r[idx].strip() if idx is not None and 0 <= idx < len(r) else ""
+        row_pid = _cell(pid_col) or None
+        name = _cell(name_col)
+        # 表头未识别公司名列：找第一列非域名列当公司名
+        if not name:
+            for i, c in enumerate(r):
+                if c.strip() and not _looks_like_domain(c) and i != pid_col:
+                    name = c.strip()
+                    break
+        domains = [c for i, c in enumerate(r)
+                   if c.strip() and i != pid_col and i != name_col
+                   and _looks_like_domain(c)]
+        if not name and domains:
+            name = _infer_company_from_domain(domains[0])
+        if not name:
+            continue
+        out.append({"kind": "asset", "name": name, "domains": domains,
+                    "project_id": row_pid})
+    return out
+
+
+def _is_header_row(parts: list[str], hints: tuple[str, ...]) -> bool:
+    # 精确匹配（不能包含匹配：公司名"公司A"含"公司"会误判表头）
+    first = (parts[0] or "").strip().lower()
+    return first in hints
+
+
+def _col_index(header: list[str], *names: str) -> int | None:
+    """表头行中找列位置（精确/包含匹配，大小写不敏感）。"""
+    for i, cell in enumerate(header):
+        low = (cell or "").strip().lower()
+        if any(n in low for n in names):
+            return i
+    return None
+
+
+def _upsert_project_row(pid: str, name: str, extra: list[str]) -> int:
+    """项目导入：id 空=新建；id 存在=更新名称/描述。返回受影响行数。
+
+    extra = [description, status, scope_mode, campaign_mode,
+             campaign_objective, rules_of_engagement]（可缺省）
+    """
+    from graphpt.db.conn import open_db
+    conn = open_db(_ensure_db())
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        desc = extra[0] if len(extra) > 0 else ""
+        status = extra[1] if len(extra) > 1 else "active"
+        campaign_mode = extra[3] if len(extra) > 3 else "pentest"
+        objective = extra[4] if len(extra) > 4 else ""
+        roe = extra[5] if len(extra) > 5 else ""
+        if pid:
+            row = conn.execute(
+                "SELECT id FROM projects WHERE id = ?", (pid,)).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE projects SET name = ?, description = ?, status = ?, "
+                    "campaign_mode = ?, campaign_objective = ?, "
+                    "rules_of_engagement = ?, updated_at_utc = ? WHERE id = ?",
+                    (name, desc, status, campaign_mode, objective, roe, now, pid))
+                conn.commit()
+                return 1
+            # id 不存在 → 走新建（保留指定 id）
+            conn.execute(
+                "INSERT INTO projects (id, name, path, targets, status, description, "
+                "campaign_mode, campaign_objective, rules_of_engagement, "
+                "created_at_utc, updated_at_utc) "
+                "VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?)",
+                (pid, name, name, status, desc, campaign_mode, objective, roe, now, now))
+            conn.commit()
+            return 1
+        cur = conn.execute(
+            "INSERT INTO projects (name, path, targets, status, description, "
+            "campaign_mode, campaign_objective, rules_of_engagement, "
+            "created_at_utc, updated_at_utc) "
+            "VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?)",
+            (name, name, status, desc, campaign_mode, objective, roe, now, now))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+@web_app.get("/api/export")
+async def export_data(template: bool = False, format: str = "xlsx"):
+    """导出数据（图数据库 + SQLite 数据），支持三种格式：
+
+    - format=xlsx（默认）: Excel 多 sheet（全中文表头，可回导）
+    - format=cypher: Cypher 脚本（节点+关系语句，cypher-shell 直接执行回导）
+    - format=md: Markdown 层级文档（缩进=关系层级，人看关系的视图）
+    template=True 时返回空模板（仅 xlsx 支持）。
+    """
+    if format == "cypher":
+        return _export_cypher()
+    if format == "md":
+        return _export_markdown(template=template)
+    import io as _io
+    import openpyxl
+    wb = openpyxl.Workbook()
+
+    def _sheet(title: str, headers: list[str], sample: list[list[str]] | None = None,
+               rows: list[list[object]] | None = None) -> None:
+        if wb.sheetnames == ["Sheet"]:  # 首个 sheet：重命名默认 Sheet
+            ws = wb.active
+            ws.title = title
+        else:
+            ws = wb.create_sheet(title)
+        ws.append(headers)
+        if template:
+            for s in sample or []:
+                ws.append(s)
+        else:
+            for r in rows or []:
+                ws.append(r)
+
+    # ── Sheet: 项目 ──
+    _sheet("项目",
+           ["项目ID", "项目名", "描述", "状态", "范围模式", "作战模式",
+            "项目目标", "交战规则"],
+           sample=[["", "示例项目A", "可选描述", "active", "blacklist",
+                    "pentest", "可选目标", "可选交战规则"]],
+           rows=(
+               lambda: [[r["id"], r["name"], r["description"], r["status"],
+                         r["scope_mode"], r["campaign_mode"],
+                         r["campaign_objective"], r["rules_of_engagement"]]
+                        for r in _open_db_conn().execute(
+                            "SELECT id, name, description, status, scope_mode, "
+                            "campaign_mode, campaign_objective, rules_of_engagement "
+                            "FROM projects ORDER BY id").fetchall()]
+           )() if not template else None)
+
+    # ── Sheet: 资产 ──
+    _sheet("资产",
+           ["项目ID", "公司名"] + [f"域名{i}" for i in range(1, 9)],
+           sample=[["1", "示例公司", "example.com", "example.cn"],
+                   ["", "未归属公司", "orphan.com"]],
+           rows=(
+               lambda: _export_asset_rows()
+           )() if not template else None)
+
+    # ── Sheet: 域名 ──
+    _sheet("域名",
+           ["资产ID", "公司名", "域名", "是否根域名", "层级", "创建时间"],
+           sample=[["acme-corp", "Acme Corp", "acme.com", "是", "1", "2026-08-15T10:00:00Z"]],
+           rows=(lambda: _export_graph_rows(
+               "MATCH (a:Asset)-[:HAS_DOMAIN]->(d:Domain) "
+               "RETURN a.id AS aid, coalesce(a.name, a.id) AS aname, d.value AS v, "
+               "       coalesce(d.is_root, false) AS root, d.level AS lv, d.created_at AS ct "
+               "ORDER BY aid, v",
+               ["aid", "aname", "v", "root", "lv", "ct"],
+               {"root": _fmt_bool}))() if not template else None)
+
+    # ── Sheet: 子域名 ──（RootDomain/Subdomain 已统一为 Domain，查 PARENT_OF 非根链）
+    _sheet("子域名",
+           ["资产ID", "公司名", "子域名", "创建时间"],
+           sample=[["acme-corp", "Acme Corp", "mail.acme.com", "2026-08-15T10:00:00Z"]],
+           rows=(lambda: _export_graph_rows(
+               "MATCH (a:Asset)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(d:Domain) "
+               "WHERE coalesce(d.is_root, false) <> true "
+               "RETURN DISTINCT a.id AS aid, coalesce(a.name, a.id) AS aname, "
+               "       d.value AS v, d.created_at AS ct "
+               "ORDER BY aid, v",
+               ["aid", "aname", "v", "ct"]))() if not template else None)
+
+    # ── Sheet: IP ──
+    _sheet("IP",
+           ["资产ID", "公司名", "IP地址", "创建时间"],
+           sample=[["acme-corp", "Acme Corp", "1.2.3.4", "2026-08-15T10:00:00Z"]],
+           rows=(lambda: _export_graph_rows(
+               "MATCH (a:Asset)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)"
+               "-[:RESOLVES_TO]->(ip:IP) "
+               "RETURN a.id AS aid, coalesce(a.name, a.id) AS aname, ip.value AS v, ip.created_at AS ct "
+               "UNION "
+               "MATCH (a:Asset)-[:HAS_IP]->(ip:IP) "
+               "RETURN a.id AS aid, coalesce(a.name, a.id) AS aname, ip.value AS v, ip.created_at AS ct "
+               "ORDER BY aid, v",
+               ["aid", "aname", "v", "ct"]))() if not template else None)
+
+    # ── Sheet: 端口 ──
+    _sheet("端口",
+           ["资产ID", "公司名", "IP地址", "端口号", "协议", "服务", "创建时间"],
+           sample=[["acme-corp", "Acme Corp", "1.2.3.4", "8080", "tcp", "http", "2026-08-15T10:00:00Z"]],
+           rows=(lambda: _export_graph_rows(
+               "MATCH (a:Asset)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)"
+               "-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(p:Port) "
+               "RETURN a.id AS aid, coalesce(a.name, a.id) AS aname, ip.value AS ipv, "
+               "       p.number AS num, coalesce(p.protocol,'') AS proto, "
+               "       coalesce(p.service,'') AS svc, p.created_at AS ct "
+               "UNION "
+               "MATCH (a:Asset)-[:HAS_IP]->(ip:IP)-[:HAS_PORT]->(p:Port) "
+               "RETURN a.id AS aid, coalesce(a.name, a.id) AS aname, ip.value AS ipv, "
+               "       p.number AS num, coalesce(p.protocol,'') AS proto, "
+               "       coalesce(p.service,'') AS svc, p.created_at AS ct "
+               "ORDER BY aid, ipv, num",
+               ["aid", "aname", "ipv", "num", "proto", "svc", "ct"]))() if not template else None)
+
+    # ── Sheet: 端点 ──（端点自带 asset_id，直接按属性导出，覆盖各种挂载方式）
+    _sheet("端点",
+           ["资产ID", "公司名", "URL", "状态码", "标题", "内容类型", "创建时间"],
+           sample=[["acme-corp", "Acme Corp", "http://acme.com/", "200", "首页", "text/html", "2026-08-15T10:00:00Z"]],
+           rows=(lambda: _export_graph_rows(
+               "MATCH (ep:HTTPEndpoint) WHERE ep.asset_id IS NOT NULL "
+               "OPTIONAL MATCH (a:Asset {id: ep.asset_id}) "
+               "RETURN ep.asset_id AS aid, coalesce(a.name, ep.asset_id) AS aname, "
+               "       ep.url AS u, ep.status_code AS sc, coalesce(ep.title,'') AS ti, "
+               "       coalesce(ep.content_type,'') AS cty, ep.created_at AS ct "
+               "ORDER BY aid, u",
+               ["aid", "aname", "u", "sc", "ti", "cty", "ct"]))() if not template else None)
+
+    # ── Sheet: 漏洞 ──（漏洞自带 asset_id）
+    _sheet("漏洞",
+           ["资产ID", "公司名", "URL", "标题", "类型", "严重度", "状态", "描述", "修复建议"],
+           sample=[["acme-corp", "Acme Corp", "http://acme.com/login", "SQL注入", "sqli",
+                    "critical", "confirmed", "描述", "参数化查询"]],
+           rows=(lambda: _export_graph_rows(
+               "MATCH (v:Vulnerability) WHERE v.asset_id IS NOT NULL "
+               "OPTIONAL MATCH (a:Asset {id: v.asset_id}) "
+               "RETURN v.asset_id AS aid, coalesce(a.name, v.asset_id) AS aname, v.url AS u, "
+               "       coalesce(v.title,'') AS ti, coalesce(v.vuln_type,'') AS vt, "
+               "       coalesce(v.severity,'') AS sev, coalesce(v.status,'') AS st, "
+               "       coalesce(v.detail,'') AS dt, coalesce(v.remediation,'') AS rm "
+               "ORDER BY aid, sev",
+               ["aid", "aname", "u", "ti", "vt", "sev", "st", "dt", "rm"]))() if not template else None)
+
+    # ── Sheet: 说明 ──
+    ws_g = wb.create_sheet("说明")
+    guide = [
+        ["GraphPT 全量数据导出（中文表头，可直接回导）"],
+        [""],
+        ["【项目】每个项目一行：项目ID 留空=新建，填写已存在 ID=更新；其余列可选。"],
+        ["【资产】每家公司一行：项目ID 留空=未归属；公司名必填；域名列可多列。"],
+        ["【域名/子域名/IP/端口/端点/漏洞】扫描发现的图数据明细（导出存档用，导入时自动跳过空行）。"],
+        ["【导入】浏览器 → 资产弹窗 → 批量导入 → 选择本文件；空行/空单元格自动跳过。"],
+        [""],
+        ["导出的文件可直接修改后重新导入（格式完全兼容）。"],
+    ]
+    for row in guide:
+        ws_g.append(row)
+
+    buf = _io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = "graphpt_template.xlsx" if template else "graphpt_export.xlsx"
+    return Response(content=buf.getvalue(),
+                    media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
+def _open_db_conn():
+    from graphpt.db.conn import open_db as _open_db
+    return _open_db(_ensure_db())
+
+
+def _fmt_bool(v) -> str:
+    return "是" if v in (True, 1, "true", "True") else ("否" if v in (False, 0, "false", "False") else ("" if v is None else str(v)))
+
+
+def _export_asset_rows() -> list[list[object]]:
+    """资产行（项目ID/公司名/域名1..8）。"""
+    out: list[list[object]] = []
+    try:
+        rows = _neo4j_query(
+            """
+            MATCH (a:Asset)
+            OPTIONAL MATCH (a)-[:HAS_DOMAIN]->(d:Domain)
+            WITH a, collect(DISTINCT d.value)[..8] AS domains
+            RETURN a.id AS id, coalesce(a.name, a.id) AS name,
+                   a.project_id AS pid, domains,
+                   a.created_at AS created_at
+            ORDER BY created_at DESC
+            """
+        )
+        for r in rows:
+            row = [str(r["pid"]) if r["pid"] is not None else "",
+                   r["name"],
+                   *([""] * 8)]
+            domains = [d for d in (r["domains"] or []) if d]
+            for i, d in enumerate(domains[:8]):
+                row[2 + i] = d
+            out.append(row)
+    except Exception:
+        pass
+    return out
+
+
+def _export_graph_rows(cypher: str, keys: list[str],
+                       fmt: dict[str, callable] | None = None,
+                       params: dict[str, object] | None = None) -> list[list[object]]:
+    """执行图查询并转成行列表（按 keys 取列，异常返回空）。"""
+    out: list[list[object]] = []
+    try:
+        for r in _neo4j_query(cypher, **(params or {})):
+            row = []
+            for k in keys:
+                v = r.get(k)
+                if fmt and k in fmt and v is not None:
+                    v = fmt[k](v)
+                row.append("" if v is None else v)
+            out.append(row)
+    except Exception:
+        pass
+    return out
+
+
+def _cql(s: str) -> str:
+    """Cypher 字符串字面量转义（单引号翻倍）。"""
+    return str(s or "").replace("'", "\\'")
+
+
+def _export_cypher():
+    """导出 Cypher 脚本（节点 + 关系语句，cypher-shell -f 直接回导）。"""
+    import datetime as _dt
+    lines = [
+        "// GraphPT 数据导出 — Cypher 脚本",
+        f"// 生成时间: {_dt.datetime.now(_dt.timezone.utc).isoformat()}",
+        "// 回导: cypher-shell -f graphpt_export.cypher（幂等 MERGE，可重复执行）",
+        "",
+        "// ═══ 资产 ═══",
+    ]
+    for r in _export_graph_rows(
+            "MATCH (a:Asset) RETURN a.id AS id, coalesce(a.name, a.id) AS name, "
+            "a.project_id AS pid ORDER BY a.id",
+            ["id", "name", "pid"]):
+        aid, name, pid = r
+        props = f"name: '{_cql(name)}'"
+        if pid:
+            props += f", project_id: '{_cql(pid)}'"
+        lines.append(f"MERGE (a:Asset {{id: '{_cql(aid)}'}}) ON CREATE SET {props};")
+
+    lines += ["", "// ═══ 域名（根域 HAS_DOMAIN）═══"]
+    for r in _export_graph_rows(
+            "MATCH (a:Asset)-[:HAS_DOMAIN]->(d:Domain) "
+            "RETURN a.id AS aid, d.value AS v, coalesce(d.is_root,false) AS root "
+            "ORDER BY aid, v",
+            ["aid", "v", "root"]):
+        aid, v, root = r
+        lines.append(f"MERGE (d:Domain {{id: 'domain:{_cql(v)}'}}) "
+                     f"ON CREATE SET d.value = '{_cql(v)}', d.is_root = {str(bool(root)).lower()};")
+        lines.append(f"MERGE (a:Asset {{id: '{_cql(aid)}'}})-[:HAS_DOMAIN]->(d);")
+
+    lines += ["", "// ═══ 子域名（PARENT_OF 层级）═══"]
+    for r in _export_graph_rows(
+            "MATCH (a:Asset)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(d:Domain) "
+            "WHERE coalesce(d.is_root, false) <> true "
+            "RETURN DISTINCT a.id AS aid, d.value AS v ORDER BY aid, v",
+            ["aid", "v"]):
+        aid, v = r
+        lines.append(f"MERGE (d:Domain {{id: 'domain:{_cql(v)}'}}) "
+                     f"ON CREATE SET d.value = '{_cql(v)}', d.is_root = false;")
+        lines.append(f"MERGE (a:Asset {{id: '{_cql(aid)}'}})-[:HAS_DOMAIN]->(d);")
+
+    lines += ["", "// ═══ IP ═══"]
+    for r in _export_graph_rows(
+            "MATCH (a:Asset)-[:HAS_IP]->(ip:IP) RETURN a.id AS aid, ip.value AS v "
+            "UNION MATCH (a:Asset)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)"
+            "-[:RESOLVES_TO]->(ip:IP) RETURN a.id AS aid, ip.value AS v "
+            "ORDER BY aid, v",
+            ["aid", "v"]):
+        aid, v = r
+        lines.append(f"MERGE (ip:IP {{id: 'ip:{_cql(v)}'}}) ON CREATE SET ip.value = '{_cql(v)}';")
+        lines.append(f"MERGE (a:Asset {{id: '{_cql(aid)}'}})-[:HAS_IP]->(ip);")
+
+    lines += ["", "// ═══ 端点 ═══"]
+    for r in _export_graph_rows(
+            "MATCH (ep:HTTPEndpoint) WHERE ep.asset_id IS NOT NULL "
+            "RETURN ep.asset_id AS aid, ep.url AS u, ep.status_code AS sc "
+            "ORDER BY aid, u",
+            ["aid", "u", "sc"]):
+        aid, u, sc = r
+        ep_id = f"ep:GET:{u}"
+        props = f"url: '{_cql(u)}', asset_id: '{_cql(aid)}'"
+        if sc not in ("", None):
+            props += f", status_code: {int(sc)}"
+        lines.append(f"MERGE (ep:HTTPEndpoint {{id: '{_cql(ep_id)}'}}) ON CREATE SET {props};")
+        lines.append(f"MERGE (a:Asset {{id: '{_cql(aid)}'}})-[:EXPOSES]->(ep);")
+
+    lines += ["", "// ═══ 漏洞 ═══"]
+    for r in _export_graph_rows(
+            "MATCH (v:Vulnerability) WHERE v.asset_id IS NOT NULL "
+            "RETURN v.asset_id AS aid, v.id AS vid, coalesce(v.title,'') AS ti, "
+            "coalesce(v.severity,'') AS sev, coalesce(v.status,'') AS st, "
+            "coalesce(v.url,'') AS u ORDER BY aid",
+            ["aid", "vid", "ti", "sev", "st", "u"]):
+        aid, vid, ti, sev, st, u = r
+        props = f"title: '{_cql(ti)}', asset_id: '{_cql(aid)}'"
+        if sev:
+            props += f", severity: '{_cql(sev)}'"
+        if st:
+            props += f", status: '{_cql(st)}'"
+        if u:
+            props += f", url: '{_cql(u)}'"
+        lines.append(f"MERGE (v:Vulnerability {{id: '{_cql(vid)}'}}) ON CREATE SET {props};")
+        lines.append(f"MERGE (a:Asset {{id: '{_cql(aid)}'}})-[:MAY_BE_VULNERABLE_TO]->(v);")
+
+    lines += ["", "// 说明: 项目（SQLite）元数据不在此脚本，见 graphpt_export.xlsx「项目」sheet。"]
+    body = "\n".join(lines)
+    return Response(content=body.encode("utf-8"),
+                    media_type="text/plain; charset=utf-8",
+                    headers={"Content-Disposition": "attachment; filename=graphpt_export.cypher"})
+
+
+def _export_markdown(template: bool = False):
+    """导出 Markdown 层级文档（缩进=关系层级，人看关系的视图）。
+
+    template=True 时输出空模板（结构 + 示例行，无真实数据，直接填写）。
+    """
+    import datetime as _dt
+    L: list[str] = []
+    L.append("# GraphPT 数据导入模板")
+    if template:
+        L.append("> 用法：照着下方 10 种情况填数据，删掉不需要的示例，保存后到浏览器「批量导入」上传或粘贴。")
+        L.append("> 规则：`- 值` 一行一条；`>` 和 `<!-- -->` 开头的是说明行（自动跳过）；空行自动跳过；")
+        L.append("> 重复数据自动合并不报错；删行 = 不导入该条。")
+        L.append("")
+        L.append("## 项目")
+        L.append("<!-- 情况1：新建项目 —— ID 留空即创建新项目 -->")
+        L.append("- **新项目名** (模式: pentest)")
+        L.append("<!-- 情况2：已有项目 —— 填 ID 会更新该项目的名称/描述等 -->")
+        L.append("- **攻防演练 2026** (ID: 1, 模式: pentest)")
+        L.append("")
+        L.append("<!-- 情况3：悬空数据 —— 没有公司名的域名/IP 挂到项目下（项目名或 ID 都行） -->")
+        L.append("#### 项目: 攻防演练 2026 — 悬空数据（无资产对应）")
+        L.append("- orphan-domain.com  · [domain]")
+        L.append("- 172.16.1.1  · [ip]")
+        L.append("")
+        L.append("## 资产")
+        L.append("<!-- 情况4：公司 + 项目归属 —— `### 公司名 (\\`id\\`，项目: 项目名)` -->")
+        L.append("### 公司甲 (`co-a`，项目: 攻防演练 2026)")
+        L.append("#### 根域名")
+        L.append("- co-a.com")
+        L.append("#### 子域名")
+        L.append("<!-- 情况5：子域名只写子域不写主域 —— 主域自动推导并挂载 -->")
+        L.append("- mail.co-a.com")
+        L.append("- shop.co-a.com.cn")
+        L.append("#### IP")
+        L.append("- 1.2.3.4")
+        L.append("#### 端口")
+        L.append("<!-- 情况6：端口格式 —— ip:端口/协议 [服务] -->")
+        L.append("- 1.2.3.4:80/tcp [http]")
+        L.append("- 1.2.3.4:443/tcp [https]")
+        L.append("#### 端点")
+        L.append("<!-- 情况7：端点 —— URL 一行一条 -->")
+        L.append("- http://co-a.com/")
+        L.append("#### 漏洞")
+        L.append("<!-- 情况8：漏洞 —— 只读记录（回导不覆盖已有漏洞） -->")
+        L.append("- **SQL注入** (critical/confirmed) http://co-a.com/login")
+        L.append("")
+        L.append("<!-- 情况9：未归属公司 —— 不带项目即未归属 -->")
+        L.append("### 公司乙 (`co-b`，未归属)")
+        L.append("#### 根域名")
+        L.append("- co-b.com")
+        L.append("")
+        L.append("<!-- 情况10：纯域名列表（无公司名）—— 浏览器「多行文本」直接粘贴一列域名即可，")
+        L.append("     系统自动以主域建公司；不需要写进本模板 -->")
+        L.append("> 情况10速记：粘贴一列域名 = 自动建公司；表头\"子域名/IP\"+整列 = 挂到当前选中资产。")
+        L.append("")
+        return Response(content="\n".join(L).encode("utf-8"),
+                        media_type="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition": "attachment; filename=graphpt_template.md"})
+    L.append(f"> 生成时间: {_dt.datetime.now(_dt.timezone.utc).isoformat()}  ·  缩进 = 关系层级")
+    L.append("")
+
+    # 项目（含项目下悬空数据：无资产对应但归属项目的节点）
+    from graphpt.db.conn import open_db as _open_db
+    proj_names: dict[str, str] = {}
+    try:
+        conn = _open_db(_ensure_db())
+        try:
+            projs = conn.execute(
+                "SELECT id, name, description, campaign_mode FROM projects ORDER BY id").fetchall()
+            if projs:
+                L.append("## 项目")
+                for p in projs:
+                    proj_names[str(p["id"])] = p["name"]
+                    L.append(f"- **{p['name']}** (ID: {p['id']}, 模式: {p['campaign_mode'] or 'pentest'})")
+                    if p["description"]:
+                        L.append(f"  - 描述: {p['description']}")
+                L.append("")
+                # 项目下悬空数据（Domain/IP 带 project_id 但无资产对应）
+                for p in projs:
+                    pid_s = str(p["id"])
+                    dangling = _export_graph_rows(
+                        "MATCH (d:Domain {project_id: $pid}) "
+                        "WHERE NOT EXISTS { MATCH (:Asset)-[:HAS_DOMAIN]->(d) } "
+                        "RETURN DISTINCT 'domain' AS k, d.value AS v ORDER BY v",
+                        ["k", "v"], params={"pid": pid_s})
+                    dang_ips = _export_graph_rows(
+                        "MATCH (ip:IP {project_id: $pid}) "
+                        "WHERE NOT EXISTS { MATCH (:Asset)-[:HAS_IP]->(ip) } "
+                        "RETURN DISTINCT 'ip' AS k, ip.value AS v ORDER BY v",
+                        ["k", "v"], params={"pid": pid_s})
+                    dang = dang_ips + [d for d in dangling if d[1] not in {x[1] for x in dang_ips}]
+                    if dang:
+                        L.append(f"#### 项目: {p['name']} (`{pid_s}`) — 悬空数据（无资产对应）")
+                        for k, v in dang:
+                            L.append(f"- {v}  · [{k}]")
+                L.append("")
+        finally:
+            conn.close()
+    except Exception:
+        pass
+
+    # 资产树（关系驱动组装）
+    L.append("## 资产")
+    assets = _export_graph_rows(
+        "MATCH (a:Asset) RETURN a.id AS id, coalesce(a.name, a.id) AS name, "
+        "a.project_id AS pid ORDER BY a.id", ["id", "name", "pid"])
+    if not assets:
+        L.append("_（无资产）_")
+    for aid, aname, pid in assets:
+        proj_note = f"，项目: {proj_names.get(str(pid), pid)}" if pid else "，未归属"
+        L.append(f"### {aname} (`{aid}`{proj_note})")
+        # 根域名
+        roots = _export_graph_rows(
+            "MATCH (a:Asset {id: $aid})-[:HAS_DOMAIN]->(d:Domain) "
+            "WHERE coalesce(d.is_root, false) = true RETURN DISTINCT d.value AS v ORDER BY v",
+            ["v"], params={"aid": aid})
+        if roots:
+            L.append("#### 根域名")
+            for (v,) in roots:
+                L.append(f"- {v}")
+        # 子域名
+        subs = _export_graph_rows(
+            "MATCH (a:Asset {id: $aid})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(d:Domain) "
+            "WHERE coalesce(d.is_root, false) <> true "
+            "RETURN DISTINCT d.value AS v ORDER BY v",
+            ["v"], params={"aid": aid})
+        if subs:
+            L.append("#### 子域名")
+            for (v,) in subs:
+                L.append(f"- {v}")
+        # IP
+        ips = _export_graph_rows(
+            "MATCH (a:Asset {id: $aid})-[:HAS_IP]->(ip:IP) RETURN ip.value AS v "
+            "UNION MATCH (a:Asset {id: $aid})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)"
+            "-[:RESOLVES_TO]->(ip:IP) RETURN ip.value AS v ORDER BY v",
+            ["v"], params={"aid": aid})
+        if ips:
+            L.append("#### IP")
+            for (v,) in ips:
+                L.append(f"- {v}")
+        # 端口
+        ports = _export_graph_rows(
+            "MATCH (a:Asset {id: $aid})-[:HAS_IP]->(ip:IP)-[:HAS_PORT]->(p:Port) "
+            "RETURN DISTINCT ip.value AS ipv, p.number AS num, "
+            "       coalesce(p.protocol,'') AS proto, coalesce(p.service,'') AS svc "
+            "UNION "
+            "MATCH (a:Asset {id: $aid})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)"
+            "-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(p:Port) "
+            "RETURN DISTINCT ip.value AS ipv, p.number AS num, "
+            "       coalesce(p.protocol,'') AS proto, coalesce(p.service,'') AS svc "
+            "ORDER BY ipv, num",
+            ["ipv", "num", "proto", "svc"], params={"aid": aid})
+        if ports:
+            L.append("#### 端口")
+            for ipv, num, proto, svc in ports:
+                tag = f"  · [{svc}]" if svc else (f"  · [{proto}]" if proto else "")
+                L.append(f"- {ipv}:{num}/{proto or 'tcp'}{tag}")
+        # 端点
+        eps = _export_graph_rows(
+            "MATCH (ep:HTTPEndpoint {asset_id: $aid}) "
+            "RETURN ep.url AS u, ep.status_code AS sc ORDER BY u",
+            ["u", "sc"], params={"aid": aid})
+        if eps:
+            L.append("#### 端点")
+            for u, sc in eps:
+                L.append(f"- {u}" + (f"  · {sc}" if sc not in ("", None) else ""))
+        # 漏洞
+        vulns = _export_graph_rows(
+            "MATCH (v:Vulnerability {asset_id: $aid}) "
+            "RETURN coalesce(v.title,'') AS ti, coalesce(v.severity,'') AS sev, "
+            "coalesce(v.status,'') AS st, coalesce(v.url,'') AS u ORDER BY sev",
+            ["ti", "sev", "st", "u"], params={"aid": aid})
+        if vulns:
+            L.append("#### 漏洞")
+            for ti, sev, st, u in vulns:
+                L.append(f"- **{ti}** ({sev}/{st}) {u}")
+        L.append("")
+
+    body = "\n".join(L)
+    return Response(content=body.encode("utf-8"),
+                    media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": "attachment; filename=graphpt_export.md"})
+
+
+@web_app.get("/api/export/template")
+async def export_template(format: str = "xlsx"):
+    """下载空模板（结构 + 示例行，直接填写）。format: md / xlsx。"""
+    return await export_data(template=True, format=format)
+
+
+# ============================================================
+# Agent 漏洞挖掘报告（与资产报告分开：记录 agent 分析过程/攻击链/建议）
+# ============================================================
+
+_AGENT_REPORTS_DIR = _PROJECT_ROOT / "data" / "reports"
+
+
+def _generate_agent_report(asset_id: str, session_id: str,
+                           final_text: str, meta: dict | None = None,
+                           workspace_root: Path | None = None) -> list[str]:
+    """agent 会话完成 → 挖掘报告（md + html）落盘 data/reports/agent_*。
+
+    聚合三部分：
+    1. agent 最终分析输出（final_text：攻击链/验证/建议/评估）
+    2. 领域子代理报告（workspace/operations/*_report.json、attack_chains.json）
+    3. 发现池（workspace/findings/*.json）
+    与资产报告（图库汇总）分开，互不覆盖。
+    """
+    try:
+        _AGENT_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        safe = str(asset_id).replace("/", "_").replace("\\", "_") or "default"
+        meta = meta or {}
+        head = [
+            "# Agent 漏洞挖掘报告",
+            "",
+            f"- 资产: **{asset_id}**",
+            f"- 会话: `{session_id}`",
+            f"- 生成时间: {datetime.now(timezone.utc).isoformat()}",
+        ]
+        if meta.get("tool_calls"):
+            head.append(f"- 工具调用: {meta['tool_calls']} 次")
+        if meta.get("verify"):
+            head.append(f"- 程序化复查: {meta['verify']}")
+        head += ["", "---", ""]
+        body = str(final_text or "（无输出）")
+
+        # 领域子代理报告 + 发现池（agent 工具产物）
+        sections: list[str] = []
+        if workspace_root and Path(workspace_root).is_dir():
+            ops_dir = Path(workspace_root) / "operations"
+            find_dir = Path(workspace_root) / "findings"
+            ops_files = sorted(ops_dir.glob("*.json")) if ops_dir.is_dir() else []
+            find_files = sorted(find_dir.glob("*.json")) if find_dir.is_dir() else []
+            if ops_files:
+                sections.append("## 领域子代理报告（agent 工具产物）")
+                for p in ops_files:
+                    try:
+                        txt = p.read_text(encoding="utf-8")
+                        obj = json.loads(txt)
+                        txt = json.dumps(obj, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+                    sections.append(f"\n### {p.name}\n\n```json\n{txt}\n```")
+            if find_files:
+                sections.append("\n## 发现池（findings）")
+                for p in find_files:
+                    try:
+                        txt = p.read_text(encoding="utf-8")
+                        obj = json.loads(txt)
+                        txt = json.dumps(obj, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+                    sections.append(f"\n### {p.name}\n\n```json\n{txt}\n```")
+        if sections:
+            body = body + "\n\n---\n" + "\n".join(sections)
+
+        md_path = _AGENT_REPORTS_DIR / f"agent_{safe}_{ts}.md"
+        md_path.write_text("\n".join(head) + body, encoding="utf-8")
+
+        html_path = _AGENT_REPORTS_DIR / f"agent_{safe}_{ts}.html"
+        html = (
+            "<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
+            "<title>Agent 漏洞挖掘报告</title>"
+            "<style>body{font-family:system-ui,sans-serif;max-width:900px;margin:24px auto;"
+            "padding:0 16px;line-height:1.7}pre{background:#f6f6f6;padding:16px;"
+            "border-radius:8px;overflow-x:auto;white-space:pre-wrap;font-size:13px}</style>"
+            "</head><body><h1>Agent 漏洞挖掘报告</h1>"
+            f"<p>资产: <b>{esc_html(asset_id)}</b> · 会话: <code>{esc_html(session_id)}</code>"
+            f" · {esc_html(datetime.now(timezone.utc).isoformat())}</p>"
+            "<hr><pre>" + esc_html(body) + "</pre></body></html>"
+        )
+        html_path.write_text(html, encoding="utf-8")
+        return [str(md_path), str(html_path)]
+    except Exception:
+        return []
+
+
+def esc_html(s: str) -> str:
+    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+@web_app.get("/api/reports/agent")
+async def list_agent_reports(asset_id: str = ""):
+    """列出 Agent 挖掘报告文件（可选按资产过滤）。"""
+    try:
+        if not _AGENT_REPORTS_DIR.exists():
+            return {"ok": True, "data": []}
+        out = []
+        for p in sorted(_AGENT_REPORTS_DIR.glob("agent_*.md"),
+                        key=lambda x: x.stat().st_mtime, reverse=True):
+            name = p.stem  # agent_{asset}_{ts}
+            if asset_id and f"agent_{asset_id}_" not in name:
+                continue
+            out.append({
+                "name": name,
+                "path": p.name,
+                "size": p.stat().st_size,
+                "mtime": datetime.fromtimestamp(p.stat().st_mtime,
+                                                timezone.utc).isoformat(),
+            })
+        return {"ok": True, "data": out}
+    except Exception as exc:
+        return _json_error(exc)
+
+
+@web_app.get("/api/report/agent/{filename}")
+async def get_agent_report(filename: str):
+    """读取 Agent 挖掘报告内容（md）。"""
+    safe = Path(filename).name
+    if not safe.startswith("agent_") or not safe.endswith(".md"):
+        raise HTTPException(400, "invalid report name")
+    p = _AGENT_REPORTS_DIR / safe
+    if not p.exists():
+        raise HTTPException(404, "report not found")
+    return Response(content=p.read_bytes(),
+                    media_type="text/markdown; charset=utf-8")
+
+
+@web_app.post("/api/assets/import")
+async def import_assets(request: Request):
+    """批量创建资产。
+
+    两种来源：
+    - multipart 文件（csv/txt/xlsx）：每行/每行单元格 = [公司名, 域名1, 域名2...]
+    - JSON: {"project_id": "1", "text": "公司A, a.com\\n公司B, b.com"}
+    第一列 = 公司名（自动生成 slug id），其余列 = 根域名。单行失败不中断。
+    """
+    import io as _io
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        project_id = str(form.get("project_id") or "") or None
+        attach_asset = str(form.get("asset_id") or "") or None
+        up = form.get("file")
+        if up is None:
+            raise HTTPException(400, "file is required (multipart field 'file')")
+        raw = await up.read()
+        fn = (up.filename or "").lower()
+        if fn.endswith(".md") or fn.endswith(".markdown"):
+            # Markdown 层级文档文件（导出 md 编辑后直接上传回导）
+            text = _decode_import_bytes(raw)
+            if text.lstrip().startswith("#") and ("## 资产" in text or "# GraphPT" in text[:300]):
+                sheets = {"__md__": _parse_markdown_import(text)}
+            else:
+                sheets = {"default": _parse_import_text(text)}
+        else:
+            sheets = _parse_import_rows(raw, up.filename or "")
+    else:
+        body = await request.json()
+        project_id = str(body.get("project_id") or "") or None
+        attach_asset = str(body.get("asset_id") or "") or None
+        raw_text = str(body.get("text") or "")
+        items_list = body.get("items")
+        # 结构化逐条（前端当场填写）
+        if isinstance(items_list, list) and items_list:
+            sheets = {"__items__": items_list}
+        # Markdown 层级文档（导出 md 编辑后回导）
+        elif raw_text.lstrip().startswith("#") and (
+                "## 资产" in raw_text or "# GraphPT" in raw_text[:300]):
+            md_items = _parse_markdown_import(raw_text)
+            sheets = {"__md__": md_items}
+        else:
+            sheets = {"default": _parse_import_text(raw_text)}
+
+    created, failed = 0, 0
+    errors: list[str] = []
+    seen: set[str] = set()
+    project_upserts = 0
+    attached = 0
+
+    for sheet_name, rows in sheets.items():
+        lower_name = sheet_name.lower()
+        # 结构化逐条（前端当场填写）：[{kind, value, name, asset_id, project_id}]
+        if lower_name == "__items__":
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                kind = str(item.get("kind") or "asset")
+                value = str(item.get("value") or "").strip()
+                name = str(item.get("name") or "").strip()
+                i_asset = str(item.get("asset_id") or "") or attach_asset
+                i_pid = str(item.get("project_id") or "") or project_id
+                if kind == "asset":
+                    if not name:
+                        continue
+                    aid = _slugify_asset_id(name)
+                    if aid in seen:
+                        continue
+                    seen.add(aid)
+                    domains = [v for v in (item.get("domains") or []) if str(v).strip()]
+                    try:
+                        _create_asset_graph(aid, name, domains,
+                                            str(i_pid) if i_pid else None)
+                        created += 1
+                    except Exception as exc:  # noqa: BLE001
+                        failed += 1
+                        errors.append(f"{name}: {exc}")
+                    continue
+                if not value:
+                    continue
+                if i_asset:
+                    try:
+                        if _attach_to_asset(i_asset, kind, value):
+                            attached += 1
+                    except Exception as exc:  # noqa: BLE001
+                        failed += 1
+                        errors.append(f"{kind} '{value}': {exc}")
+                elif i_pid:
+                    try:
+                        if _attach_to_project(str(i_pid), kind, value):
+                            attached += 1
+                    except Exception as exc:  # noqa: BLE001
+                        failed += 1
+                        errors.append(f"{kind} '{value}': {exc}")
+                else:
+                    failed += 1
+                    errors.append(f"{kind} '{value}': 未指定资产或项目")
+            continue
+        # Markdown 层级回导（导出 md 编辑后回导）
+        if lower_name == "__md__":
+            for item in rows:
+                kind = str(item.get("kind") or "")
+                md_asset_id = str(item.get("asset_id") or "")
+                md_pid = str(item.get("project_id") or "") or None
+                value = str(item.get("value") or "").strip()
+                # 悬空数据（挂项目，无资产）
+                if md_pid and not md_asset_id and kind in ("domain", "subdomain", "ip"):
+                    if not value:
+                        continue
+                    try:
+                        if _attach_to_project(md_pid, kind, value):
+                            attached += 1
+                    except Exception as exc:  # noqa: BLE001
+                        failed += 1
+                        errors.append(f"{kind} '{value}': {exc}")
+                    continue
+                if kind == "asset":
+                    name = str(item.get("name") or "")
+                    if not name:
+                        continue
+                    aid = md_asset_id or _slugify_asset_id(name)
+                    if aid in seen:
+                        continue
+                    seen.add(aid)
+                    try:
+                        if md_pid:
+                            # 有项目归属：正常创建（SET project_id）
+                            _create_asset_graph(aid, name, [], md_pid)
+                        else:
+                            # 无项目信息：只更新名称，不清除已有归属（回导不踢出项目）
+                            _neo4j_query(
+                                "MERGE (a:Asset {id: $aid}) "
+                                "ON CREATE SET a.name = $name, a.created_at = $now "
+                                "RETURN a.id",
+                                aid=aid, name=name,
+                                now=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+                        created += 1
+                    except Exception as exc:  # noqa: BLE001
+                        failed += 1
+                        errors.append(f"{name}: {exc}")
+                    continue
+                if not value or not md_asset_id:
+                    continue
+                if kind == "endpoint":
+                    # 端点回导：URL 提取主机 → 挂子域名；简单起见挂资产域名
+                    try:
+                        _attach_to_asset(md_asset_id, "domain",
+                                         _host_of_url(value))
+                        attached += 1
+                    except Exception:  # noqa: BLE001
+                        failed += 1
+                        errors.append(f"端点 {value}: 挂载失败")
+                    continue
+                try:
+                    if _attach_to_asset(md_asset_id, kind, value):
+                        attached += 1
+                except Exception as exc:  # noqa: BLE001
+                    failed += 1
+                    errors.append(f"{kind} '{value}': {exc}")
+            continue
+        # projects sheet：项目导入（id 空=新建，有 id=更新）
+        if lower_name in ("projects", "项目", "project"):
+            for parts in rows:
+                if not parts or not any(parts):
+                    continue
+                if _is_header_row(parts, _PROJECTS_HEADER_HINTS):
+                    continue
+                pid = (parts[0] or "").strip()
+                pname = (parts[1] or "").strip() if len(parts) > 1 else ""
+                if not pname:
+                    failed += 1
+                    errors.append("projects 行缺项目名")
+                    continue
+                try:
+                    _upsert_project_row(pid, pname, parts[2:])
+                    project_upserts += 1
+                except Exception as exc:  # noqa: BLE001
+                    failed += 1
+                    errors.append(f"项目 {pname}: {exc}")
+            continue
+
+        # 未知 sheet（如"说明"）跳过，不当作资产行导入
+        if lower_name not in ("assets", "资产", "default", "Sheet1"):
+            continue
+
+        # assets sheet：宽松解析（任意粘贴格式自动推断列语义）
+        for item in _parse_loose_rows(rows):
+            kind = str(item.get("kind") or "asset")
+            # 表头驱动（域名/子域名/IP）：挂载到当前资产（attach_asset）
+            if kind in ("domain", "subdomain", "ip"):
+                value = str(item.get("value") or "").strip()
+                if not value:
+                    continue
+                if not attach_asset:
+                    failed += 1
+                    errors.append(f"{kind} '{value}': 未指定目标资产（请先选中资产）")
+                    continue
+                try:
+                    if _attach_to_asset(attach_asset, kind, value):
+                        attached += 1
+                except Exception as exc:  # noqa: BLE001
+                    failed += 1
+                    errors.append(f"{kind} '{value}': {exc}")
+                continue
+            name = str(item.get("name") or "").strip()
+            domains = item.get("domains") or []
+            row_pid = item.get("project_id") or project_id
+            if not name:
+                continue  # 空公司名跳过
+            asset_id = _slugify_asset_id(name)
+            if not asset_id:
+                failed += 1
+                errors.append(f"无效公司名: {name!r}")
+                continue
+            if asset_id in seen:
+                failed += 1
+                errors.append(f"重复公司: {name}")
+                continue
+            seen.add(asset_id)
+            row_pid = str(row_pid) if row_pid else None
+            try:
+                _create_asset_graph(asset_id, name, domains, row_pid)
+                created += 1
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                errors.append(f"{name}: {exc}")
+    _invalidate_assets_cache()
+    return {"ok": True, "data": {
+        "created": created, "failed": failed, "errors": errors[:50],
+        "project_id": project_id, "projects": project_upserts,
+        "attached": attached}}
+
+
 @web_app.post("/api/assets")
 async def create_asset(body: dict):
     """创建新 Asset，可选种子根域名。
 
-    body: {"id": "acme-corp", "name": "Acme Corp", "domains": ["acme.com", "acme.cn"]}
+    body: {"id": "acme-corp", "name": "Acme Corp", "domains": ["acme.com", "acme.cn"],
+           "project_id": "1"}  # project_id 可空 = 未归属
     """
     asset_id = (body.get("id") or "").strip().lower().replace(" ", "-")
     name = (body.get("name") or body.get("id") or "").strip()
     if not asset_id:
         raise HTTPException(400, "asset id is required")
+    project_id = body.get("project_id")
+    project_id = str(project_id) if project_id not in (None, "") else None
     domains = body.get("domains") or []
     if isinstance(domains, str):
         domains = [d.strip() for d in domains.replace("\n", ",").split(",") if d.strip()]
     try:
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        result = _neo4j_query(
-            """
-            MERGE (a:Asset {id: $aid})
-              ON CREATE SET a.name = $name, a.created_at = $now
-            RETURN a.id AS id, a.name AS name, a.created_at = $now AS created
-            """,
-            aid=asset_id, name=name, now=now,
-        )
-        record = result[0] if result else None
-        created = record.get("created", False) if record else False
-
-        # 种子根域名
-        seeded = 0
-        for domain in domains:
-            domain = domain.strip().lower()
-            if not domain:
-                continue
-            _neo4j_query(
-                """
-                MATCH (a:Asset {id: $aid})
-                MERGE (d:Domain {id: $domain_id})
-                  ON CREATE SET d.value = $domain, d.created_at = $now, d.is_root = true, d.level = 1
-                MERGE (a)-[:HAS_DOMAIN]->(d)
-                """,
-                aid=asset_id, domain_id=f"domain:{domain}", domain=domain, now=now,
-            )
-            seeded += 1
-
-        _cache_store.pop("assets_list", None)  # 清除资产列表缓存
-        return {"ok": True, "data": {
-            "id": record["id"] if record else asset_id,
-            "name": record["name"] if record else name,
-            "created": created,
-            "domains_seeded": seeded,
-        }}
+        result = _create_asset_graph(asset_id, name, domains, project_id)
+        return {"ok": True, "data": result}
     except Exception as exc:
         return _json_error(exc)
 
 
 @web_app.patch("/api/assets/{asset_id}")
 async def update_asset(asset_id: str, body: dict):
-    """更新 Asset 名称。body: {"name": "New Name"}"""
+    """更新 Asset 名称/项目归属。body: {"name": "New Name", "project_id": "1"}
+
+    project_id: "1" 归拢到项目 1；null/"" 移出项目（未归属）。
+    """
     name = (body.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, "name is required")
+    project_id = body.get("project_id", _UNSET)
     try:
+        sets = []
+        args: dict = {"aid": asset_id}
+        if name:
+            sets.append("a.name = $name")
+            args["name"] = name
+        if project_id is not _UNSET:
+            pid = str(project_id) if project_id not in (None, "") else None
+            sets.append("a.project_id = $pid")
+            args["pid"] = pid
+        if not sets:
+            raise HTTPException(400, "name or project_id is required")
         _neo4j_query(
-            "MATCH (a:Asset {id: $aid}) SET a.name = $name RETURN a.id",
-            aid=asset_id, name=name,
+            f"MATCH (a:Asset {{id: $aid}}) SET {', '.join(sets)} RETURN a.id",
+            **args,
         )
-        return {"ok": True, "data": {"id": asset_id, "name": name}}
+        _invalidate_assets_cache()
+        return {"ok": True, "data": {"id": asset_id, "name": name,
+                                     "project_id": str(project_id) if project_id not in (None, "") else None}}
     except Exception as exc:
         return _json_error(exc)
 
@@ -1276,10 +2852,156 @@ async def delete_asset(asset_id: str):
             """,
             aid=asset_id,
         )
-        _cache_store.pop("assets_list", None)  # 清除资产列表缓存
+        # Asset 空壳兜底：子树为空时上面的 WHERE n IS NOT NULL 过滤掉全部行，
+        # DETACH DELETE a 永不执行，残留空 Asset 节点。此处无条件删除 Asset 本体。
+        _neo4j_query(
+            "MATCH (a:Asset {id: $aid}) DETACH DELETE a RETURN count(a)",
+            aid=asset_id,
+        )
+        _invalidate_assets_cache()  # 清除资产列表缓存（含 project_id 键）
         return {"ok": True, "data": {"deleted": 1 if result else 0}}
     except Exception as exc:
         return _json_error(exc)
+
+
+# ============================================================
+# Project API — 项目（多公司资产容器）
+# 元数据存 SQLite projects 表（GRAPHPT_DB，web 层惰性引导）；
+# 资产归属走 Neo4j Asset.project_id（str(项目id)，NULL = 未归属）。
+# ============================================================
+
+_db_bootstrapped = False
+
+
+def _db_path() -> Path:
+    db = os.environ.get("GRAPHPT_DB", "data/db/graphpt.db")
+    p = Path(db)
+    if not p.is_absolute():
+        p = _PROJECT_ROOT / p
+    return p
+
+
+def _ensure_db() -> Path:
+    global _db_bootstrapped
+    p = _db_path()
+    if not _db_bootstrapped:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        from graphpt.db import bootstrap_db
+        try:
+            bootstrap_db(p)
+        finally:
+            # 无论成败都置位：迁移失败不应导致每个请求重复引导（会连锁 500）
+            _db_bootstrapped = True
+    return p
+
+
+_PROJECT_EDITABLE = (
+    "name", "description", "status", "scope_json", "scope_blacklist_json",
+    "scope_mode", "campaign_mode", "campaign_objective",
+    "rules_of_engagement", "risk_budget_json", "agent_overrides",
+)
+
+
+@web_app.get("/api/projects")
+async def list_projects():
+    """项目列表（含每个项目的资产数，Neo4j 聚合）。"""
+    from graphpt.db.conn import open_db
+    conn = open_db(_ensure_db())
+    try:
+        rows = conn.execute(
+            "SELECT * FROM projects ORDER BY id").fetchall()
+        out = [dict(r) for r in rows]
+    finally:
+        conn.close()
+    try:
+        counts = _neo4j_query(
+            "MATCH (a:Asset) WHERE a.project_id IS NOT NULL "
+            "RETURN a.project_id AS pid, count(a) AS c")
+        by_pid = {str(r["pid"]): r["c"] for r in counts}
+        for d in out:
+            d["asset_count"] = by_pid.get(str(d["id"]), 0)
+    except Exception:
+        for d in out:
+            d["asset_count"] = 0
+    return {"ok": True, "data": out}
+
+
+@web_app.post("/api/projects")
+async def create_project(body: dict):
+    """创建项目。body: {name, description?, scope_json?, campaign_mode?}"""
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "project name is required")
+    now = datetime.now(timezone.utc).isoformat()
+    scope_json = json.dumps(body.get("scope_json") or [], ensure_ascii=False)
+    campaign_mode = (body.get("campaign_mode") or "pentest").strip()
+    description = (body.get("description") or "").strip()
+    from graphpt.db.conn import open_db
+    conn = open_db(_ensure_db())
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO projects
+              (name, path, targets, status, description, scope_json,
+               campaign_mode, created_at_utc, updated_at_utc)
+            VALUES (?, ?, '', 'active', ?, ?, ?, ?, ?)
+            """,
+            (name, name, description, scope_json, campaign_mode, now, now),
+        )
+        conn.commit()  # open_db 裸连接不自动提交
+        return {"ok": True, "data": {"id": cur.lastrowid, "name": name}}
+    finally:
+        conn.close()
+
+
+@web_app.patch("/api/projects/{project_id}")
+async def update_project(project_id: int, body: dict):
+    """更新项目可编辑字段。"""
+    sets = []
+    args: list = []
+    for col in _PROJECT_EDITABLE:
+        if col in body:
+            val = body[col]
+            if isinstance(val, (list, dict)):
+                val = json.dumps(val, ensure_ascii=False)
+            sets.append(f"{col} = ?")
+            args.append(str(val))
+    if not sets:
+        raise HTTPException(400, "no editable fields provided")
+    sets.append("updated_at_utc = ?")
+    args.append(datetime.now(timezone.utc).isoformat())
+    args.append(project_id)
+    from graphpt.db.conn import open_db
+    conn = open_db(_ensure_db())
+    try:
+        conn.execute(
+            f"UPDATE projects SET {', '.join(sets)} WHERE id = ?", args)
+        conn.commit()
+        return {"ok": True, "data": {"id": project_id}}
+    finally:
+        conn.close()
+
+
+@web_app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: int):
+    """删除项目。项目下的资产解除归属（保持未归属，不级联删除）。"""
+    from graphpt.db.conn import open_db
+    conn = open_db(_ensure_db())
+    try:
+        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    # 资产解除归属（图侧）
+    try:
+        _neo4j_query(
+            "MATCH (a:Asset {project_id: $pid}) "
+            "REMOVE a.project_id RETURN count(a)",
+            pid=str(project_id),
+        )
+    except Exception:
+        pass
+    return {"ok": True, "data": {"id": project_id}}
 
 
 # ============================================================
@@ -3021,18 +4743,34 @@ async def scan_start(body: dict | None = None):
     进度存在 scheduler._SCAN_STATE（同进程内存），前端轮询 /api/scan/state 即可见。
 
     body.force_rescan: True 时忽略 ScanRun 记录，强制重新扫描所有目标。
+    body.project_id: 提供时对项目下全部资产批量扫描（含未归属？不含——项目级只扫该项目资产）。
     """
     body = body or {}
     asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
     force_rescan = body.get("force_rescan", False)
+    project_id = body.get("project_id")
 
     try:
         from graphpt.collector.scheduler import scan_state, run_full_scan, _SCAN_STATE, _SCAN_STATE_LOCK
 
-        # 检查是否已在运行
-        st = scan_state(asset_id)
-        if st.get("status") == "scanning":
-            return {"ok": False, "error": "scan already running", "data": st}
+        # 项目级：解析项目下资产列表
+        target_assets = [asset_id]
+        if project_id:
+            rows = _neo4j_query(
+                "MATCH (a:Asset {project_id: $pid}) RETURN a.id AS id",
+                pid=str(project_id),
+            )
+            target_assets = [r["id"] for r in rows] or []
+            if not target_assets:
+                return {"ok": False, "error": "project has no assets",
+                        "data": {"project_id": str(project_id)}}
+
+        # 检查是否已在运行（任一目标资产）
+        for aid in target_assets:
+            st = scan_state(aid)
+            if st.get("status") == "scanning":
+                return {"ok": False, "error": "scan already running",
+                        "data": {"asset_id": aid, "state": st}}
 
         # 后台线程启动（不进子进程，状态内存直读）
         import concurrent.futures as _cf
@@ -3041,19 +4779,25 @@ async def scan_start(body: dict | None = None):
             _scan_pool = _cf.ThreadPoolExecutor(max_workers=3, thread_name_prefix="scan")
 
         def _bg_scan():
-            try:
-                _web_log.info("scan_thread_start asset=%s force_rescan=%s", asset_id, force_rescan)
-                result = run_full_scan(asset_id, force_rescan=force_rescan)
-                _web_log.info("scan_thread_done asset=%s status=%s",
-                              asset_id, result.get("status", "?"))
-            except Exception:
-                # run_full_scan 内部已捕获大多数异常，这是最后的安全网
-                _web_log.exception("scan_thread_crashed asset=%s", asset_id)
+            for aid in target_assets:
+                try:
+                    _web_log.info("scan_thread_start asset=%s force_rescan=%s",
+                                  aid, force_rescan)
+                    result = run_full_scan(aid, force_rescan=force_rescan)
+                    _web_log.info("scan_thread_done asset=%s status=%s",
+                                  aid, result.get("status", "?"))
+                except Exception:
+                    # run_full_scan 内部已捕获大多数异常，这是最后的安全网
+                    _web_log.exception("scan_thread_crashed asset=%s", aid)
 
         _scan_pool.submit(_bg_scan)
-        return {"ok": True, "data": {"status": "started", "asset_id": asset_id,
+        return {"ok": True, "data": {
+                "status": "started",
+                "asset_id": asset_id if not project_id else target_assets[0],
+                "project_id": str(project_id) if project_id else None,
+                "assets": target_assets,
                 "force_rescan": force_rescan,
-                "note": "scan running in background thread"}}
+                "note": f"scan running in background thread ({len(target_assets)} assets)"}}
     except Exception as exc:
         return _json_error(exc)
 
@@ -3702,6 +5446,12 @@ def _cached(key: str, ttl: int | None = None) -> dict | None:
     return None
 
 
+def _invalidate_assets_cache() -> None:
+    """清除全部资产列表缓存（含 project_id 后缀键）。"""
+    for k in [k for k in _cache_store if k.startswith("assets_list")]:
+        _cache_store.pop(k, None)
+
+
 def _cache_set(key: str, value: dict) -> None:
     """写入缓存并清理过期条目。"""
     now = _cache_time.time()
@@ -4230,6 +5980,7 @@ _AGENT_LOG_LIMIT = 500
 class _AgentRequest(BaseModel):
     asset_id: str
     prompt: str = ""
+    project_id: str = ""  # 项目级会话：目标 = 项目资产 ∪ 未归属
 
 _agent_sessions: dict[str, dict] = {}
 _agent_stops: dict[str, threading.Event] = {}
@@ -4324,6 +6075,32 @@ def _update_agent_session_on_disk(session_id: str, updates: dict) -> None:
 
 # 启动时清理孤儿会话
 _cleanup_orphaned_sessions()
+
+
+def _archive_root_checkpoints() -> int:
+    """启动时归档项目根的 brutespray checkpoint 漏网文件 → data/logs/brutespray/。
+
+    根治链：Bash 直调 brutespray（无 -checkpoint 注入）会写进程 cwd（项目根）。
+    代码层已注入重定向，这里是最后兜底：历史/漏网文件不留在项目根。
+    """
+    import shutil as _shutil
+    moved = 0
+    _cp_dir = _PROJECT_ROOT / "data" / "logs" / "brutespray"
+    for pat in ("brutespray-checkpoint.json", "brutespray-checkpoint.jsonl"):
+        src = _PROJECT_ROOT / pat
+        if src.exists():
+            try:
+                _cp_dir.mkdir(parents=True, exist_ok=True)
+                dst = _cp_dir / f"archived_{src.name}"
+                _shutil.move(str(src), str(dst))
+                moved += 1
+            except OSError:
+                pass
+    return moved
+
+
+# 启动时归档项目根漏网的 checkpoint 文件
+_archive_root_checkpoints()
 
 
 def _list_agent_session_statuses() -> dict[str, str]:
@@ -4459,9 +6236,62 @@ async def api_agent_run(req: _AgentRequest):
             return _drain_agent_steering(session_id)
 
         try:
+            # 项目级会话：注入项目上下文（目标池 = 项目资产 ∪ 未归属 + 项目 scope/roE）
+            _prompt = req.prompt or ""
+            if req.project_id:
+                try:
+                    rows = _neo4j_query(
+                        "MATCH (a:Asset) "
+                        "WHERE a.project_id = $pid OR a.project_id IS NULL "
+                        "RETURN a.id AS id, coalesce(a.name, a.id) AS name, "
+                        "       a.project_id AS pid ORDER BY a.id",
+                        pid=str(req.project_id),
+                    )
+                    proj_assets = [r for r in rows
+                                   if str(r.get("pid")) == str(req.project_id)]
+                    unassigned = [r for r in rows if r.get("pid") is None]
+                    ctx_parts = [
+                        f"[项目上下文] 当前工作项目 ID={req.project_id}。",
+                        f"项目资产（{len(proj_assets)} 个，均为本次测试目标）: "
+                        + ", ".join(f"{r['name']}({r['id']})" for r in proj_assets),
+                    ]
+                    if unassigned:
+                        ctx_parts.append(
+                            "未归属资产（不属于本项目的悬空目标，可检查/归拢建议）: "
+                            + ", ".join(f"{r['name']}({r['id']})" for r in unassigned))
+                    # 项目元数据（SQLite）
+                    try:
+                        from graphpt.db.conn import open_db as _open_db
+                        _conn = _open_db(_ensure_db())
+                        try:
+                            _row = _conn.execute(
+                                "SELECT name, scope_json, campaign_objective, "
+                                "rules_of_engagement FROM projects WHERE id = ?",
+                                (str(req.project_id),)).fetchone()
+                            if _row:
+                                if _row["name"]:
+                                    ctx_parts.insert(0,
+                                        f"[项目上下文] 项目名: {_row['name']}")
+                                if _row["scope_json"] and _row["scope_json"] not in ("[]", ""):
+                                    ctx_parts.append(
+                                        f"项目范围 scope: {_row['scope_json']}")
+                                if _row["campaign_objective"]:
+                                    ctx_parts.append(
+                                        f"项目目标: {_row['campaign_objective']}")
+                                if _row["rules_of_engagement"]:
+                                    ctx_parts.append(
+                                        f"交战规则: {_row['rules_of_engagement']}")
+                        finally:
+                            _conn.close()
+                    except Exception:
+                        pass
+                    _prompt = "\n".join(ctx_parts) + "\n\n" + _prompt
+                except Exception:
+                    pass
+
             result = run_graph_agent(
                 asset_id=req.asset_id,
-                user_prompt=req.prompt or "",
+                user_prompt=_prompt,
                 workspace_root=_session_workspace,
                 on_status=_on_status,
                 on_token=_on_token,
@@ -4508,6 +6338,22 @@ async def api_agent_run(req: _AgentRequest):
                     )
             except Exception as exc:  # noqa: BLE001
                 _append_agent_log(session_id, f"[报告] 生成失败: {exc}")
+
+            # Agent 漏洞挖掘报告（记录分析过程/攻击链/领域子代理报告/建议）
+            try:
+                from graphpt.web.app import _generate_agent_report
+                agent_rpt_paths = _generate_agent_report(
+                    req.asset_id, session_id, result.final_text,
+                    meta={"tool_calls": result.tool_calls_count,
+                          "verify": verify_summary},
+                    workspace_root=_session_workspace,
+                )
+                if agent_rpt_paths:
+                    _append_agent_log(
+                        session_id,
+                        f"[报告] Agent 挖掘报告生成：{len(agent_rpt_paths)} 个文件")
+            except Exception as exc:  # noqa: BLE001
+                _append_agent_log(session_id, f"[报告] Agent 挖掘报告失败: {exc}")
 
             _update_agent_session(session_id, {
                 "status": "done",

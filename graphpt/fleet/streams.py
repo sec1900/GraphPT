@@ -27,6 +27,22 @@ _MAXLEN = 100_000
 _POLL_MS = 200              # 轮询间隔：Memurai 不支持 XREADGROUP 长阻塞
                             # （服务器端断连），用短轮询兼容（Redis 同样适用）
 
+# 派发优先级（layer → 队列）
+def stream_for_layer(layer: int | None, priority: str = "") -> str:
+    """按层/优先级选流。layer>=6（Vuln/Secret 确认）→ high；
+    layer in (4,5)（端口/端点）→ low；其余 normal。priority 显式时优先。"""
+    if priority in (QUEUE_HIGH, QUEUE_NORMAL, QUEUE_LOW):
+        return priority
+    if priority == "high":
+        return QUEUE_HIGH
+    if priority == "low":
+        return QUEUE_LOW
+    if layer is not None and layer >= 6:
+        return QUEUE_HIGH
+    if layer is not None and layer in (4, 5):
+        return QUEUE_LOW
+    return QUEUE_NORMAL
+
 
 def _r(*, blocking: bool = False):
     # blocking 仅历史兼容保留；短轮询策略下默认连接即可

@@ -35,17 +35,21 @@ def _redis(*, blocking: bool = False):
 
 
 def _start_heartbeat(worker_id: str, stop: threading.Event) -> None:
-    """心跳线程：注册表 + fleet:heartbeat TTL。"""
+    """心跳线程：注册表（含能力表）+ fleet:heartbeat TTL。"""
 
     def _loop():
         r = None
+        caps = None
         while not stop.is_set():
             try:
                 if r is None:
                     r = _redis()
                     r.ping()
                     streams.ensure_groups(r)
-                    registry.register(r, worker_id)
+                    if caps is None:
+                        from graphpt.worker.capabilities import detect_capabilities
+                        caps = detect_capabilities()
+                    registry.register(r, worker_id, capabilities=caps)
                 registry.heartbeat(r, worker_id)
             except Exception as exc:
                 _log.warning("heartbeat_failed: %s", exc)
@@ -84,13 +88,35 @@ def _execute(msg: dict[str, Any]) -> dict[str, Any]:
 
 def _handle(msg: dict[str, Any], r: Any) -> None:
     """执行 + XACK + 事件上报。业务失败同样 XACK（ErrorLog 已在 pipeline 内写）。"""
+    task_id = str(msg["payload"].get("task_id") or "")
+    tool = str(msg["payload"].get("tool") or "")
+
+    # 能力拒领：本机缺工具 → XACK + task_rejected（Master 改判 deferred/重派），不硬跑
+    if tool:
+        from graphpt.collector.tasks import _find_tool
+        if not _find_tool(tool.split(":", 1)[0]):
+            _log.warning("task_rejected missing_tool task_id=%s tool=%s", task_id, tool)
+            try:
+                streams.ack_task(r, msg["stream"], msg["msg_id"])
+            except Exception:
+                pass
+            try:
+                streams.publish_event("task_rejected", {
+                    "task_id": task_id, "tool": tool,
+                    "asset_id": str(msg["payload"].get("asset_id") or ""),
+                    "reason": "missing_tool", "worker": _cur_worker,
+                }, r=r)
+            except Exception:
+                pass
+            return
+
     try:
         result = _execute(msg)
         status = result.get("status", "error")
     except Exception as exc:
         status = "error"
-        result = {"task_id": str(msg["payload"].get("task_id") or ""),
-                  "tool": str(msg["payload"].get("tool") or ""),
+        result = {"task_id": task_id,
+                  "tool": tool,
                   "asset_id": str(msg["payload"].get("asset_id") or ""),
                   "status": "error", "error": str(exc)}
         _log.error("task_crash: %s", exc)
@@ -103,7 +129,7 @@ def _handle(msg: dict[str, Any], r: Any) -> None:
             **result,
             "stream": msg["stream"], "msg_id": msg["msg_id"],
             "worker": _cur_worker,
-        })
+        }, r=r)
     except Exception:
         pass
 
