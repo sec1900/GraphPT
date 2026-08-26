@@ -3055,10 +3055,11 @@ document.querySelectorAll('nav button[data-page]').forEach(btn => {
     document.getElementById('page-' + btn.dataset.page).classList.add('active');
     localStorage.setItem('activeTab', btn.dataset.page);
     if (btn.dataset.page !== 'dashboard') { pollingManager.stopAll(); }
+    if (btn.dataset.page !== 'vulns') { window.Vulnerabilities?.stopVulnPolling?.(); }
     switch(btn.dataset.page) {
       case 'dashboard': window.loadDashboard(); break;
       case 'assets': window.renderAssetsPage(); break;
-      case 'vulns': window.loadVulnerabilities(); break;
+      case 'vulns': window.loadVulnerabilities(); window.Vulnerabilities?.startVulnPolling?.(); break;
       case 'pipelines': window.loadPipelines(); break;
       case 'reports': window.loadReports(); break;
       case 'logs': window.loadLogs(); break;

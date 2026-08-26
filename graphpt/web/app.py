@@ -640,6 +640,28 @@ async def dashboard_counts(asset_id: str = "default"):
             query = NODE_CATALOG[node_type]["count_query"]
             r = _neo4j_query(query, aid=asset_id)
             s[key] = r[0]["c"] if r else 0
+        # 漏洞分级计数（critical/high 用于 Dashboard 顶部告警卡）
+        vuln_rows = _neo4j_query(
+            """
+            MATCH (a:Asset {id: $aid})
+            CALL (a) {
+              MATCH (a)-[:HAS_DOMAIN]->(d:Domain)-[:PARENT_OF*0..]->(sub:Domain)
+                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+                    -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+              RETURN v
+              UNION
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+                    -[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+              RETURN v
+            }
+            RETURN toLower(v.severity) AS sev, count(v) AS c
+            """, aid=asset_id)
+        for row in vuln_rows:
+            sev = row.get("sev", "info")
+            if sev == "critical":
+                s["vulns_critical"] = row["c"]
+            elif sev == "high":
+                s["vulns_high"] = row["c"]
         result = {"ok": True, "data": s}
         _cache_set(cache_key, result)
         return result

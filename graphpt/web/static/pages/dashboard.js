@@ -82,6 +82,18 @@ async function loadAllCards() {
     `<div class="card"><div class="label">HTTP Endpoints</div><div class="value purple">${cnt.http_endpoints || 0}</div></div>`,
   ];
 
+  // 高危漏洞告警卡（critical + high 置顶显示）
+  const critCount = cnt.vulns_critical || 0;
+  const highCount = cnt.vulns_high || 0;
+  if (critCount > 0 || highCount > 0) {
+    cards.unshift(
+      `<div class="card" style="background:rgba(248,81,73,.15);border-left:3px solid var(--red)">
+        <div class="label" style="color:var(--red)">⚠️ 高危漏洞</div>
+        <div class="value" style="color:var(--red)">${critCount} critical / ${highCount} high</div>
+      </div>`
+    );
+  }
+
   // 扫描进度
   if (sp.ok && sp.data && sp.data.layers) {
     let done = 0, total = 0;

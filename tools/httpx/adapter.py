@@ -58,11 +58,18 @@ def _extract_params(url: str, body: str) -> list[dict[str, str]]:
         pass
 
     body_l = (body or "")[:20000]
+    # <input> 有 value 属性：提取 name + value
     for m in re.finditer(r'<input[^>]+name=["\']([^"\']+)["\'][^>]*value=["\']([^"\']*)', body_l, re.IGNORECASE):
         k = m.group(1).strip()
         if k and (k, "body") not in seen:
             seen.add((k, "body"))
             params.append({"name": k, "value": m.group(2), "in": "body"})
+    # <input> 无 value 属性（现代表单）：只提取 name，value 置空（供 sqlmap --data 用）
+    for m in re.finditer(r'<input[^>]+name=["\']([^"\']+)["\']', body_l, re.IGNORECASE):
+        k = m.group(1).strip()
+        if k and (k, "body") not in seen:
+            seen.add((k, "body"))
+            params.append({"name": k, "value": "", "in": "body"})
     return params
 
 

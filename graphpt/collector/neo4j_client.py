@@ -98,6 +98,7 @@ CREATE CONSTRAINT scanrun_id IF NOT EXISTS FOR (n:ScanRun) REQUIRE n.id IS UNIQU
 
 // 索引 — 加速查询
 CREATE INDEX asset_name IF NOT EXISTS FOR (n:Asset) ON (n.name);
+CREATE INDEX asset_project_id IF NOT EXISTS FOR (n:Asset) ON (n.project_id);
 CREATE INDEX subdomain_value IF NOT EXISTS FOR (n:Subdomain) ON (n.value);
 CREATE INDEX ip_value IF NOT EXISTS FOR (n:IP) ON (n.value);
 CREATE INDEX httpendpoint_url IF NOT EXISTS FOR (n:HTTPEndpoint) ON (n.url);
@@ -105,6 +106,19 @@ CREATE INDEX httpendpoint_status IF NOT EXISTS FOR (n:HTTPEndpoint) ON (n.crawl_
 CREATE INDEX apiendpoint_path IF NOT EXISTS FOR (n:ApiEndpoint) ON (n.path);
 CREATE INDEX port_number IF NOT EXISTS FOR (n:Port) ON (n.number);
 CREATE INDEX scanrun_tool_asset IF NOT EXISTS FOR (n:ScanRun) ON (n.tool, n.asset_id);
+
+// ── 攻击链关系类型（红队杀伤链语义）──────────────────────────────
+// 侦察链：Asset -[:HAS_ROOT]-> RootDomain -[:HAS_SUB]-> Subdomain -[:RESOLVES_TO]-> IP -[:HAS_PORT]-> Port -[:EXPOSES]-> HTTPEndpoint
+// 漏洞链：HTTPEndpoint -[:MAY_BE_VULNERABLE_TO]-> Vulnerability
+// 攻击链（新增）：
+//   Vulnerability -[:EXPLOITS]-> Credential/Secret     漏洞利用产出凭据/敏感信息
+//   Vulnerability -[:GRANTS]-> IP/HTTPEndpoint          漏洞获得权限（立足点）
+//   Credential -[:USES_CREDENTIAL]-> IP/Port            凭据复用到其他服务（横向）
+//   Vulnerability -[:PIVOTS_TO]-> IP/Subdomain          漏洞横向移动到其他资产
+//   Vulnerability -[:REQUIRES]-> Vulnerability          漏洞利用前置条件
+//   Vulnerability -[:ENABLES]-> Vulnerability           漏洞利用后解锁新攻击面
+// 证据结构化字段（Vulnerability 节点新增）：
+//   request_raw / response_raw / payload / credentials_obtained / session_obtained
 """
 
 
@@ -860,6 +874,16 @@ class GraphWriter:
         source: str = "",
         status: str = "candidate",
         asset_id: str = "",
+        # 结构化证据字段（红队复现用）
+        request_raw: str = "",
+        response_raw: str = "",
+        payload: str = "",
+        credentials_obtained: str = "",
+        session_obtained: str = "",
+        # 攻击链关系（利用后果）
+        grants_to: str = "",          # 漏洞获得权限的目标节点 id（IP/HTTPEndpoint）
+        exploits_credential: str = "", # 漏洞利用产出的凭据节点 id
+        pivots_to: str = "",           # 横向移动目标节点 id（IP/Subdomain）
         _session: Any | None = None) -> dict[str, Any]:
         """写入 Vulnerability 节点，关联到 HTTPEndpoint 和 Subdomain。
 
@@ -868,6 +892,9 @@ class GraphWriter:
 
         status: candidate（未验证，流量信号/模板命中）→ confirmed（人工/AI 验证）。
         ON MATCH 时 status 只在非空时覆盖 — 已 confirmed 的不会被后续写入降级。
+
+        结构化证据：request_raw/response_raw/payload/credentials_obtained/session_obtained
+        攻击链：grants_to/exploits_credential/pivots_to（建立攻击链关系边）
         """
         import hashlib
 
@@ -903,17 +930,40 @@ class GraphWriter:
                     v.detail = $detail, v.impact = $impact,
                     v.remediation = $remediation, v.tags = $tags,
                     v.evidence = $evidence, v.url = $vuln_url,
+                    v.request_raw = $request_raw, v.response_raw = $response_raw,
+                    v.payload = $payload, v.credentials_obtained = $credentials_obtained,
+                    v.session_obtained = $session_obtained,
                     v.status = CASE WHEN $status <> '' THEN $status ELSE 'candidate' END,
                     v.sources = [$source], v.asset_id = $asset_id,
                     v.first_seen = $now, v.last_seen = $now, v.is_new = true
                   ON MATCH SET v.last_seen = $now,
-                    v.status = CASE WHEN $status <> '' THEN $status ELSE v.status END
+                    v.status = CASE WHEN $status <> '' THEN $status ELSE v.status END,
+                    v.request_raw = CASE WHEN $request_raw <> '' THEN $request_raw ELSE v.request_raw END,
+                    v.response_raw = CASE WHEN $response_raw <> '' THEN $response_raw ELSE v.response_raw END,
+                    v.payload = CASE WHEN $payload <> '' THEN $payload ELSE v.payload END,
+                    v.credentials_obtained = CASE WHEN $credentials_obtained <> '' THEN $credentials_obtained ELSE v.credentials_obtained END,
+                    v.session_obtained = CASE WHEN $session_obtained <> '' THEN $session_obtained ELSE v.session_obtained END
                 WITH v, coalesce(v.sources, []) AS _cur
                 SET v.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
                 WITH v
                 OPTIONAL MATCH (e:HTTPEndpoint {id: $ep_id})
                 FOREACH (_ IN CASE WHEN e IS NOT NULL THEN [1] ELSE [] END |
                   MERGE (e)-[:MAY_BE_VULNERABLE_TO]->(v)
+                )
+                // 攻击链边：漏洞获得权限
+                FOREACH (_ IN CASE WHEN $grants_to <> '' THEN [1] ELSE [] END |
+                  MERGE (gt {id: $grants_to})
+                  MERGE (v)-[:GRANTS]->(gt)
+                )
+                // 攻击链边：漏洞利用产出凭据
+                FOREACH (_ IN CASE WHEN $exploits_credential <> '' THEN [1] ELSE [] END |
+                  MERGE (ec:Credential {id: $exploits_credential})
+                  MERGE (v)-[:EXPLOITS]->(ec)
+                )
+                // 攻击链边：横向移动
+                FOREACH (_ IN CASE WHEN $pivots_to <> '' THEN [1] ELSE [] END |
+                  MERGE (pt {id: $pivots_to})
+                  MERGE (v)-[:PIVOTS_TO]->(pt)
                 )
                 // 通过 root_domain 正确连接 Subdomain 到 Asset 树
                 FOREACH (_ IN CASE WHEN $root_domain <> '' AND $host <> '' THEN [1] ELSE [] END |
@@ -937,6 +987,14 @@ class GraphWriter:
                 host=host, root_domain=root_domain,
                 status=status or "",  # 空串：ON MATCH 不覆盖（防降级），ON CREATE 默认 candidate
                 asset_id=asset_id, now=now,
+                request_raw=request_raw[:8000],  # 截断防超大
+                response_raw=response_raw[:8000],
+                payload=payload,
+                credentials_obtained=credentials_obtained,
+                session_obtained=session_obtained,
+                grants_to=grants_to,
+                exploits_credential=exploits_credential,
+                pivots_to=pivots_to,
             )
             return {"id": vuln_id}
 

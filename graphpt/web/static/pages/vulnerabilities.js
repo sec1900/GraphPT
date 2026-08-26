@@ -82,10 +82,20 @@ function renderVulnerabilityRows(rows) {
     // 确认/驳回按钮（仅 candidate/verified 可操作；已 confirmed/dismissed 显示只读）
     // v.id 是外部数据 — 内联 onclick 用 encodeURIComponent 防引号逃逸（XSS）
     const idEnc = encodeURIComponent(v.id || '');
-    const actions = vStatus === 'confirmed' || vStatus === 'dismissed'
+    const confirmActions = vStatus === 'confirmed' || vStatus === 'dismissed'
       ? '<span style="font-size:11px;color:var(--muted)">终态</span>'
       : `<button class="btn ok small" onclick="event.stopPropagation();Vulnerabilities.setVulnStatus('${idEnc}','confirm',this)">✓ 确认</button>
          <button class="btn outline small" onclick="event.stopPropagation();Vulnerabilities.setVulnStatus('${idEnc}','dismiss',this)">✗ 驳回</button>`;
+
+    // 复现操作按钮（payload/curl/重放/Graph 定位）
+    const reproduceActions = `
+      <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);display:flex;gap:6px;flex-wrap:wrap">
+        ${v.payload ? `<button class="btn outline small" onclick="event.stopPropagation();copyToClipboard('${esc(v.payload)}',this)">📋 复制 payload</button>` : ''}
+        ${buildCurlCmd(v) ? `<button class="btn outline small" onclick="event.stopPropagation();copyToClipboard(\`${buildCurlCmd(v).replace(/`/g, '\\`')}\`,this)">📋 复制 curl</button>` : ''}
+        ${url ? `<button class="btn outline small" onclick="event.stopPropagation();window.open('${esc(url)}','_blank')">🔗 打开链接</button>` : ''}
+        ${v.id ? `<button class="btn outline small" onclick="event.stopPropagation();locateInGraph('${esc(v.id)}')">🗺️ Graph 定位</button>` : ''}
+      </div>`;
+
     return `<tr id="${rowId}" onclick="Vulnerabilities.vulnToggle('${rowId}','${detailId}')" style="cursor:pointer">
       <td style="width:24px;text-align:center;color:var(--muted);font-size:10px" id="${arrowId}">▶</td>
       <td>${severityBadge(v.severity)}</td>
@@ -107,9 +117,12 @@ function renderVulnerabilityRows(rows) {
       <td colspan="6" style="padding:12px 16px">
         ${detail ? '<div style="margin-bottom:8px"><strong>Description:</strong><br>' + esc(detail) + '</div>' : ''}
         ${evidence ? '<div style="margin-bottom:8px"><strong>Evidence:</strong><br><pre style="background:var(--surface);padding:8px;overflow-x:auto;font-size:12px">' + esc(evidence) + '</pre></div>' : ''}
+        ${v.payload ? '<div style="margin-bottom:8px"><strong>Payload:</strong><br><pre style="background:var(--surface);padding:8px;overflow-x:auto;font-size:12px;color:var(--red)">' + esc(v.payload) + '</pre></div>' : ''}
+        ${v.request_raw ? '<div style="margin-bottom:8px"><strong>Request:</strong><br><pre style="background:var(--surface);padding:8px;overflow-x:auto;font-size:12px">' + esc(v.request_raw) + '</pre></div>' : ''}
         ${url ? '<div style="margin-bottom:8px"><strong>URL:</strong> <a href="' + esc(url) + '" target="_blank">' + esc(url) + '</a></div>' : ''}
         <div style="font-size:11px;color:var(--muted);margin-bottom:8px">ID: ${esc(v.id||'')} · Created: ${fmtTime(v.created_at)} · Source: ${esc(v.sources?.join(', ')||'unknown')}</div>
-        <div>${actions}</div>
+        <div>${confirmActions}</div>
+        ${reproduceActions}
       </td>
     </tr>`;
   }).join('');
@@ -143,8 +156,43 @@ function isSafeUrl(u) {
 
 function severityBadge(severity) {
   const sev = (severity || 'info').toLowerCase();
-  const cls = sev === 'critical' || sev === 'high' ? 'err' : sev === 'medium' ? 'warn' : 'ok';
+  // critical 和 high 视觉区分：critical 深红加粗，high 红色
+  const cls = sev === 'critical' ? 'err critical' : sev === 'high' ? 'err' : sev === 'medium' ? 'warn' : 'ok';
   return `<span class="badge ${cls}">${esc(sev)}</span>`;
+}
+
+// 复制到剪贴板
+function copyToClipboard(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    if (btn) { btn.textContent = '✓ 已复制'; setTimeout(() => btn.textContent = '📋 复制', 1500); }
+  }).catch(() => { toast('复制失败', false); });
+}
+
+// 生成 curl 复现命令
+function buildCurlCmd(v) {
+  const url = v.url || '';
+  if (!url) return '';
+  const method = v.method || 'GET';
+  let cmd = `curl -sk -X ${method} "${url}"`;
+  if (v.payload) cmd += ` -d "${v.payload}"`;
+  if (v.request_raw) return v.request_raw;  // 优先用已有的 curl 命令
+  return cmd;
+}
+
+// 在 Graph 中定位漏洞节点
+function locateInGraph(vulnId) {
+  if (!vulnId) return;
+  // 切换到 Graph 页并搜索该漏洞
+  const graphBtn = document.querySelector('nav button[data-page="graph"]');
+  if (graphBtn) graphBtn.click();
+  // 延迟执行搜索（等 Graph 页加载）
+  setTimeout(() => {
+    const searchInput = document.getElementById('global-search');
+    if (searchInput) {
+      searchInput.value = vulnId;
+      searchInput.dispatchEvent(new Event('keyup', { key: 'Enter' }));
+    }
+  }, 500);
 }
 
 function statusBadge(code) {
@@ -166,5 +214,21 @@ export const Vulnerabilities = {
   vulnToggle,
   prevVulnPage,
   nextVulnPage,
-  setVulnStatus
+  setVulnStatus,
+  copyToClipboard,
+  buildCurlCmd,
+  locateInGraph,
 };
+
+// 自动轮询：Findings 页打开时每 5s 刷新（新漏洞即时出现）
+let _vulnPollTimer = null;
+export function startVulnPolling() {
+  stopVulnPolling();
+  _vulnPollTimer = setInterval(() => {
+    const el = document.getElementById('page-vulns');
+    if (el && el.classList.contains('active')) loadVulnerabilities();
+  }, 5000);
+}
+export function stopVulnPolling() {
+  if (_vulnPollTimer) { clearInterval(_vulnPollTimer); _vulnPollTimer = null; }
+}

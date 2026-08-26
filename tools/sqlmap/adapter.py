@@ -31,8 +31,9 @@ class SqlmapAdapter(BaseAdapter):
         if m:
             dbms = m.group(1)
 
-        # Extract injection point
+        # Extract injection point（参数名必须保留 —— 复现的关键）
         url = ""
+        param = ""
         m = re.search(r"GET parameter\s+'([^']+)'\s+is vulnerable|POST parameter\s+'([^']+)'\s+is vulnerable|URI parameter\s+'([^']+)'\s+is vulnerable", text, re.IGNORECASE)
         if m:
             param = m.group(1) or m.group(2) or m.group(3) or ""
@@ -58,6 +59,19 @@ class SqlmapAdapter(BaseAdapter):
         if not target_url:
             return findings
 
+        # 生成复现命令（curl + sqlmap 复现）
+        curl_cmd = ""
+        if param and target_url:
+            # 从 sqlmap 输出提取 payload（如果有的话）
+            payload_m = re.search(r"payload['\"]?\s*[:=]\s*['\"]?([^'\"\n]+)", text, re.IGNORECASE)
+            payload_str = payload_m.group(1) if payload_m else ""
+            if "GET" in text and param:
+                # GET 注入：参数在 URL 里
+                sep = "&" if "?" in target_url else "?"
+                curl_cmd = f'curl -sk "{target_url}{sep}{param}={payload_str or "1"}"'
+            elif "POST" in text and param:
+                curl_cmd = f'curl -sk -X POST "{target_url}" -d "{param}={payload_str or "1"}"'
+
         findings.append({
             "type": "vulnerability",
             "endpoint_id": _endpoint_id_from_url(target_url, method=str(ctx.get("method", "GET"))),
@@ -65,9 +79,13 @@ class SqlmapAdapter(BaseAdapter):
             "title": f"SQL Injection ({', '.join(techniques)}) — {dbms}" if techniques else f"SQL Injection — {dbms}",
             "severity": "critical",
             "detail": text[-2000:],  # tail of output as evidence
-            "evidence": f"DBMS: {dbms}, Techniques: {', '.join(techniques)}",
+            "evidence": f"DBMS: {dbms}, Techniques: {', '.join(techniques)}, Param: {param}",
             "source": "sqlmap",
             "asset_id": asset_id,
+            # 结构化证据字段（红队复现用）
+            "payload": param,           # 注入参数名
+            "request_raw": curl_cmd,    # 复现 curl 命令
+            "response_raw": text[-2000:],  # sqlmap 输出尾部
         })
 
         return findings
