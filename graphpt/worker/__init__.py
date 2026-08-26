@@ -1,7 +1,21 @@
-"""fleet worker —— 从共享 Redis Streams 拉取任务并执行。
+"""fleet worker — 分布式任务执行守护进程。
 
-M0 范围：scan_tool 任务（100% 复用 _run_single_tool_pipeline）+ 心跳 + 崩溃接管。
-启动：python -m graphpt.worker --id worker-test（或 start.py --worker）
+两种模式（自动检测）：
+  HTTP 模式（GRAPHPT_MASTER_URL 已设置）：
+    - 不连 Redis / Neo4j
+    - 通过 HTTP POST /api/fleet/tasks/poll 拉任务
+    - 通过 HTTP POST /api/fleet/tasks/done 上报结果
+    - 通过 HTTP POST /api/fleet/heartbeat 注册 + 心跳
+    - 适合远端小弟服务器（主控只开一个 HTTP 端口，Redis/Neo4j 不对外）
+
+  Redis 直连模式（GRAPHPT_MASTER_URL 未设置，默认/本机）：
+    - XREADGROUP 拉任务，XACK 确认，res:events 推事件
+    - 适合单机 / VPN 内网部署
+
+启动：
+  python start.py --worker --worker-id worker-bj  \\
+    --master-url https://主控域名 --fleet-token xxx   # 远端 HTTP 模式
+  python start.py --worker                            # 本机 Redis 模式
 """
 
 from __future__ import annotations
@@ -137,6 +151,77 @@ def _handle(msg: dict[str, Any], r: Any) -> None:
 _cur_worker = ""
 
 
+def _start_heartbeat_http(worker_id: str, stop: threading.Event,
+                          caps: dict) -> None:
+    """HTTP 模式心跳线程（向主控 /api/fleet/heartbeat 轮询）。"""
+    from graphpt.fleet.http_client import heartbeat as http_heartbeat
+
+    def _loop():
+        while not stop.is_set():
+            try:
+                http_heartbeat(worker_id, caps)
+            except Exception as exc:
+                _log.warning("http_heartbeat_failed: %s", exc)
+            stop.wait(_HEARTBEAT_INTERVAL)
+
+    t = threading.Thread(target=_loop, name="worker-heartbeat-http", daemon=True)
+    t.start()
+
+
+def _main_http(worker_id: str, stop: threading.Event) -> None:
+    """HTTP 模式主循环：poll → 执行 → done（不连 Redis/Neo4j）。"""
+    from graphpt.fleet.http_client import get_asset_config, poll_tasks, report_done
+    from graphpt.worker.capabilities import detect_capabilities
+
+    caps = detect_capabilities()
+    _log.info("[worker] %s started in HTTP mode, master=%s",
+              worker_id, __import__("os").environ.get("GRAPHPT_MASTER_URL"))
+    _start_heartbeat_http(worker_id, stop, caps)
+
+    round_no = 0
+    while not stop.is_set():
+        round_no += 1
+        try:
+            tasks = poll_tasks(worker_id, count=1)
+        except Exception as exc:
+            _log.warning("poll_failed: %s", exc)
+            time.sleep(2)
+            continue
+
+        if not tasks:
+            time.sleep(0.2)
+            continue
+
+        for task in tasks:
+            tool = task.get("tool", "")
+            asset_id = task.get("asset_id", "")
+
+            # 能力拒领
+            if tool:
+                from graphpt.collector.tasks import _find_tool
+                if not _find_tool(tool.split(":", 1)[0]):
+                    _log.warning("http_task_rejected missing_tool task=%s tool=%s",
+                                 task.get("task_id"), tool)
+                    report_done(worker_id, task, status="rejected", error="missing_tool")
+                    continue
+
+            _log.info("http_execute task_id=%s tool=%s asset=%s",
+                      task.get("task_id"), tool, asset_id)
+            try:
+                from graphpt.collector.tasks import _run_single_tool_pipeline
+                result = _run_single_tool_pipeline(
+                    tool, asset_id=asset_id, stage_name=tool,
+                    command=str(task.get("command") or "") or None,
+                    force_rescan=str(task.get("force_rescan") or "0") == "1",
+                )
+                status = result.get("status", "error")
+                findings = (result.get("result") or {}).get("findings", 0) or 0
+            except Exception as exc:
+                _log.error("http_task_crash: %s", exc)
+                status, findings = "error", 0
+            report_done(worker_id, task, status=status, findings=findings)
+
+
 def main() -> None:
     global _cur_worker
     logging.basicConfig(level=logging.INFO,
@@ -144,34 +229,51 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="GraphPT Fleet Worker")
     parser.add_argument("--id", default=default_worker_id(), help="worker 唯一 ID")
     parser.add_argument("--block", type=int, default=200,
-                        help="XREADGROUP 轮询阻塞毫秒数（扫描事件到达延迟上限）")
+                        help="XREADGROUP 轮询阻塞毫秒数（Redis 模式）")
+    parser.add_argument("--master-url", default="",
+                        help="主控 HTTP URL（如 https://主控域名:443）"
+                             "；设置后走 HTTP 模式，不直连 Redis/Neo4j")
+    parser.add_argument("--fleet-token", default="",
+                        help="fleet token（向主控注册/认证用）")
     args = parser.parse_args()
     _cur_worker = args.id
 
+    if args.master_url:
+        os.environ["GRAPHPT_MASTER_URL"] = args.master_url
+    if args.fleet_token:
+        os.environ["GRAPHPT_FLEET_TOKEN"] = args.fleet_token
+
+    from graphpt.fleet.http_client import is_http_mode
+
     stop = threading.Event()
-    _start_heartbeat(args.id, stop)
+    if is_http_mode():
+        _main_http(args.id, stop)
+    else:
+        _main_redis(args.id, stop, block_ms=args.block)
+
+
+def _main_redis(worker_id: str, stop: threading.Event, block_ms: int = 200) -> None:
+    """Redis 直连模式主循环（本机 / VPN 内网）。"""
+    _start_heartbeat(worker_id, stop)
     r = _redis()
     streams.ensure_groups(r)
-    print(f"[worker] {args.id} started (block={args.block}ms), pulling from "
-          + ", ".join(streams.QUEUE_ALL))
+    print(f"[worker] {worker_id} started in Redis mode (block={block_ms}ms)")
 
     round_no = 0
     try:
         while not stop.is_set():
             round_no += 1
             try:
-                msgs = streams.claim_tasks(args.id, block_ms=args.block, r=r)
+                msgs = streams.claim_tasks(worker_id, block_ms=block_ms, r=r)
             except Exception as exc:
-                # 短轮询连接中断（Redis 重启/网络抖动）→ 重建连接后继续
                 _log.warning("claim_failed, reconnecting: %s", exc)
                 r = _redis()
                 streams.ensure_groups(r)
                 time.sleep(1)
                 continue
             if not msgs and round_no % _RECLAIM_EVERY == 0:
-                # broker 空闲时尝试接管滞留任务（崩溃 worker 的 PEL 条目）
                 try:
-                    msgs = streams.recover_stale(args.id, r=r)
+                    msgs = streams.recover_stale(worker_id, r=r)
                 except Exception as exc:
                     _log.warning("recover_stale_failed: %s", exc)
                     r = _redis()
@@ -181,7 +283,7 @@ def main() -> None:
         pass
     finally:
         stop.set()
-        print(f"[worker] {args.id} stopped")
+        print(f"[worker] {worker_id} stopped")
 
 
 if __name__ == "__main__":

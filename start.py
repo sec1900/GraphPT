@@ -237,10 +237,18 @@ def main():
     parser.add_argument('--host', type=str, default='0.0.0.0',
                         help='Web server host (default: 0.0.0.0)')
     parser.add_argument('--worker', action='store_true',
-                        help='Fleet worker mode: 只启动扫描 worker（拉取共享 Redis Streams 任务），'
-                             '不启动 Web 服务（分布式部署见 docs/DISTRIBUTED_SCANNING.md）')
+                        help='Fleet worker mode: only starts the scan worker '
+                             '(no Web UI). See docs/DISTRIBUTED_SCANNING.md')
     parser.add_argument('--worker-id', type=str, default='',
-                        help='Fleet worker 唯一 ID（默认 host-pid）')
+                        help='Fleet worker unique ID (default: host-pid)')
+    parser.add_argument('--master-url', type=str, default='',
+                        help='Master HTTP URL e.g. https://master-host:443 '
+                             'When set the worker uses HTTP mode and does NOT '
+                             'connect to Redis/Neo4j directly (recommended for '
+                             'remote workers - only one HTTPS port needed)')
+    parser.add_argument('--fleet-token', type=str, default='',
+                        help='Fleet auth token issued by master '
+                             '(/api/fleet/tokens/issue). Required in HTTP mode.')
     args = parser.parse_args()
 
     print("GraphPT Services Starting...")
@@ -267,6 +275,10 @@ def main():
         worker_cmd = [sys.executable, "-m", "graphpt.worker"]
         if args.worker_id:
             worker_cmd += ["--id", args.worker_id]
+        if args.master_url:
+            worker_cmd += ["--master-url", args.master_url]
+        if args.fleet_token:
+            worker_cmd += ["--fleet-token", args.fleet_token]
         services.append({"name": "fleet-worker", "cmd": worker_cmd, "port": 0})
     else:
         services.append({

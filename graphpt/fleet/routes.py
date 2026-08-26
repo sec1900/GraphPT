@@ -1,16 +1,29 @@
 """fleet 管理 API — 挂载到 web_app（include_router）。
 
-- GET  /api/fleet/workers  舰队列表（身份/能力/心跳/离线 + deferred 数）
-- GET  /api/fleet/events   事件轮询（游标推进，SSE 前的简单形态）
-- GET  /api/fleet/config   派发策略视图（当前：队列/优先级说明）
+管理接口（UI 用）：
+- GET  /api/fleet/workers  舰队列表
+- GET  /api/fleet/events   事件轮询
+- GET  /api/fleet/config   派发策略视图
+
+Worker HTTP 接口（小弟通过此接口与主控通信，不需要直连 Redis/Neo4j）：
+- POST /api/fleet/heartbeat          worker 注册 + 心跳（含能力表）
+- POST /api/fleet/tasks/poll         worker 拉取一个待执行任务
+- POST /api/fleet/tasks/done         worker 上报执行结果
+- GET  /api/fleet/config/{asset_id}  worker 拉取资产配置
+
+认证：X-Fleet-Token 头（主控签发，worker 启动时配置）。
+Token 存 Redis fleet:tokens:SET，无 Redis 时退化为从环境变量 GRAPHPT_FLEET_TOKEN 校验。
 """
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header, HTTPException
+from pydantic import BaseModel
 
 from graphpt.common.redis_client import get_redis
 from graphpt.fleet import consumer, registry, streams
@@ -18,9 +31,35 @@ from graphpt.fleet import consumer, registry, streams
 fleet_router = APIRouter(prefix="/api/fleet")
 
 
+# ── 认证 ──────────────────────────────────────────────────────────────────
+
+def _verify_fleet_token(token: str) -> None:
+    """验证 fleet token（X-Fleet-Token）。
+
+    优先查 Redis fleet:tokens SET；Redis 不可达时退化为环境变量比对。
+    空 token 或不匹配均返回 403。
+    """
+    if not token:
+        raise HTTPException(status_code=403, detail="missing fleet token")
+    try:
+        r = _r()
+        r.ping()
+        if r.sismember("fleet:tokens", token):
+            return
+        # 允许 Redis 里没有 token 时回退到环境变量（单机调试友好）
+    except Exception:
+        pass
+    env_token = os.environ.get("GRAPHPT_FLEET_TOKEN", "")
+    if env_token and token == env_token:
+        return
+    raise HTTPException(status_code=403, detail="invalid fleet token")
+
+
 def _r():
     return get_redis(decode_responses=True, socket_connect_timeout=2)
 
+
+# ── 管理接口（UI 用）──────────────────────────────────────────────────────
 
 @fleet_router.get("/workers")
 async def fleet_workers():
@@ -30,16 +69,12 @@ async def fleet_workers():
     except Exception as exc:
         return {"ok": False, "error": f"redis_unreachable: {exc}"}
     workers = registry.list_workers(r)
-
-    # 队列深度（各流 pending 计数用 XLEN 代替——消费组 PEL 复杂，按流长度展示）
     queue_depth: dict[str, int] = {}
     for s in streams.QUEUE_ALL:
         try:
             queue_depth[s] = r.xlen(s)
         except Exception:
             queue_depth[s] = 0
-
-    # 各资产 inflight 任务数
     inflight: dict[str, int] = {}
     for key in r.scan_iter(match="fleet:inflight:*", count=100):
         asset = key.rsplit(":", 1)[-1]
@@ -47,23 +82,16 @@ async def fleet_workers():
             inflight[asset] = r.scard(key)
         except Exception:
             inflight[asset] = 0
-
     from graphpt.fleet.dispatcher import deferred_count
-    return {
-        "ok": True,
-        "data": {
-            "workers": workers,
-            "queue_depth": queue_depth,
-            "inflight": inflight,
-            "deferred": deferred_count(r),
-            "ts": int(time.time()),
-        },
-    }
+    return {"ok": True, "data": {
+        "workers": workers, "queue_depth": queue_depth,
+        "inflight": inflight, "deferred": deferred_count(r),
+        "ts": int(time.time()),
+    }}
 
 
 @fleet_router.get("/events")
 async def fleet_events(consumer_id: str = "web-viewer", limit: int = 50):
-    """事件轮询：每次返回该消费者未读的新事件（游标推进）。"""
     try:
         r = _r()
         r.ping()
@@ -75,15 +103,160 @@ async def fleet_events(consumer_id: str = "web-viewer", limit: int = 50):
 
 @fleet_router.get("/config")
 async def fleet_config():
-    """派发策略视图。M1 固定说明；M2 起可配置（并发预算/权重/时区）。"""
-    return {
-        "ok": True,
-        "data": {
-            "queues": {"high": streams.QUEUE_HIGH, "normal": streams.QUEUE_NORMAL,
-                       "low": streams.QUEUE_LOW},
-            "poll_ms": streams._POLL_MS,
-            "dispatch_modes": {"loopback": "本机线程池（默认，零依赖）",
-                               "publish": "Redis Streams 派发给 worker"},
-            "note": "M1 固定策略；M2 支持并发预算/队列权重",
-        },
-    }
+    return {"ok": True, "data": {
+        "queues": {"high": streams.QUEUE_HIGH, "normal": streams.QUEUE_NORMAL,
+                   "low": streams.QUEUE_LOW},
+        "poll_ms": streams._POLL_MS,
+        "dispatch_modes": {"loopback": "本机线程池（默认）",
+                           "publish": "Redis Streams 派发",
+                           "http": "HTTP 接口（远端 worker）"},
+        "note": "M2 HTTP worker 接入",
+    }}
+
+
+# ── Worker HTTP 接口 ───────────────────────────────────────────────────────
+
+class HeartbeatBody(BaseModel):
+    worker_id: str
+    name: str = ""
+    version: str = ""
+    capabilities: dict = {}   # {tools:[...], has_llm:bool, geo:"", slots:2}
+
+
+class PollBody(BaseModel):
+    worker_id: str
+    count: int = 1            # 一次最多拉几条（通常 1）
+
+
+class DoneBody(BaseModel):
+    worker_id: str
+    task_id: str
+    stream: str               # 原消息所在流（XACK 需要）
+    msg_id: str               # Redis Stream msg_id（XACK 需要）
+    status: str               # "ok" | "error"
+    tool: str = ""
+    asset_id: str = ""
+    findings: int = 0
+    error: str = ""
+
+
+@fleet_router.post("/heartbeat")
+async def fleet_heartbeat(body: HeartbeatBody,
+                          x_fleet_token: str = Header(default="")):
+    _verify_fleet_token(x_fleet_token)
+    try:
+        r = _r()
+        registry.register(r, body.worker_id,
+                          name=body.name, version=body.version,
+                          capabilities=body.capabilities or None)
+        registry.heartbeat(r, body.worker_id)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "ts": int(time.time())}
+
+
+@fleet_router.post("/tasks/poll")
+async def fleet_tasks_poll(body: PollBody,
+                           x_fleet_token: str = Header(default="")):
+    """主控从 Redis Streams 取任务，通过 HTTP 下发给 worker。
+
+    worker 不再直连 Redis，只和主控的 HTTPS 通信。
+    返回 {ok, tasks: [{task_id, kind, tool, asset_id, layer, command,
+           force_rescan, stream, msg_id}]}
+    """
+    _verify_fleet_token(x_fleet_token)
+    try:
+        r = _r()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "tasks": []}
+
+    tasks: list[dict[str, Any]] = []
+    try:
+        msgs = streams.claim_tasks(body.worker_id, block_ms=200, r=r,
+                                   count=body.count)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "tasks": []}
+
+    for m in msgs:
+        p = m["payload"]
+        tasks.append({
+            "task_id": p.get("task_id", ""),
+            "kind": p.get("kind", "scan_tool"),
+            "tool": p.get("tool", ""),
+            "asset_id": p.get("asset_id", ""),
+            "layer": p.get("layer", ""),
+            "command": p.get("command", ""),
+            "force_rescan": p.get("force_rescan", "0"),
+            "stream": m["stream"],
+            "msg_id": m["msg_id"],
+        })
+    return {"ok": True, "tasks": tasks}
+
+
+@fleet_router.post("/tasks/done")
+async def fleet_tasks_done(body: DoneBody,
+                           x_fleet_token: str = Header(default="")):
+    """worker 上报执行结果 → 主控 XACK + 发 res:events + 更新 inflight。"""
+    _verify_fleet_token(x_fleet_token)
+    try:
+        r = _r()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+    try:
+        streams.ack_task(r, body.stream, body.msg_id)
+    except Exception:
+        pass
+
+    try:
+        if body.asset_id and body.task_id:
+            r.srem(f"fleet:inflight:{body.asset_id}", body.task_id)
+    except Exception:
+        pass
+
+    try:
+        streams.publish_event("tool_done", {
+            "task_id": body.task_id, "tool": body.tool,
+            "asset_id": body.asset_id, "status": body.status,
+            "findings": str(body.findings), "worker": body.worker_id,
+            "stream": body.stream, "msg_id": body.msg_id,
+        }, r=r)
+    except Exception:
+        pass
+
+    return {"ok": True}
+
+
+@fleet_router.get("/config/{asset_id}")
+async def fleet_asset_config(asset_id: str,
+                             x_fleet_token: str = Header(default="")):
+    """worker 拉取资产扫描配置（scan_config.yaml + 词表路径）。"""
+    _verify_fleet_token(x_fleet_token)
+    try:
+        from graphpt.collector.scan_config import get_scan_config
+        cfg = get_scan_config(asset_id)
+        return {"ok": True, "data": cfg}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "data": {}}
+
+
+# ── Token 管理（调试/一次性生成）─────────────────────────────────────────
+
+@fleet_router.post("/tokens/issue")
+async def fleet_issue_token(name: str = "worker"):
+    """签发 fleet token（通过已有 X-GraphPT-Key 鉴权，在 Web UI 或管理员调用）。
+
+    生产用途：在主控服务器命令行执行后把 token 配置到小弟 GRAPHPT_FLEET_TOKEN。
+    """
+    import secrets
+    token = secrets.token_hex(24)
+    try:
+        r = _r()
+        r.sadd("fleet:tokens", token)
+        r.hset("fleet:token_meta", token, json.dumps({
+            "name": name, "created_at": int(time.time()),
+        }))
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "token": token, "name": name,
+            "note": "把 token 配置到小弟服务器的 GRAPHPT_FLEET_TOKEN 环境变量"}
