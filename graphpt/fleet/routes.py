@@ -103,15 +103,40 @@ async def fleet_events(consumer_id: str = "web-viewer", limit: int = 50):
 
 @fleet_router.get("/config")
 async def fleet_config():
+    from graphpt.fleet.dispatcher import master_role
+    from graphpt.fleet.dispatcher import is_brain
     return {"ok": True, "data": {
         "queues": {"high": streams.QUEUE_HIGH, "normal": streams.QUEUE_NORMAL,
                    "low": streams.QUEUE_LOW},
         "poll_ms": streams._POLL_MS,
+        "master_role": master_role(),
+        "is_brain": is_brain(),
+        "role_desc": {
+            "worker": "主力一体：既当大脑调配，也用本机线程池参与干活（默认）",
+            "brain": "纯大脑：只做派发调配，具体干活全部丢给远端 worker",
+        },
         "dispatch_modes": {"loopback": "本机线程池（默认）",
                            "publish": "Redis Streams 派发",
                            "http": "HTTP 接口（远端 worker）"},
-        "note": "M2 HTTP worker 接入",
+        "note": "角色切换即时生效，不重启",
     }}
+
+
+class RoleBody(BaseModel):
+    role: str   # "worker" | "brain"
+
+
+@fleet_router.post("/config/role")
+async def fleet_set_role(body: RoleBody,
+                         x_fleet_token: str = Header(default="")):
+    """切换主控角色：worker（主力一体）↔ brain（纯大脑只派发）。"""
+    _verify_fleet_token(x_fleet_token)
+    from graphpt.fleet.dispatcher import set_master_role
+    ok = set_master_role(body.role)
+    if not ok:
+        return {"ok": False, "error": "invalid role (worker|brain)"}
+    return {"ok": True, "role": body.role,
+            "hint": "brain 模式下主控本地不执行任何工具，任务全部派发给 worker"}
 
 
 # ── Worker HTTP 接口 ───────────────────────────────────────────────────────

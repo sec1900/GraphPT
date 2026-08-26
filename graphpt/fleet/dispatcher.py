@@ -3,7 +3,12 @@
 - loopback（默认）：现状行为 —— 提交到本机线程池由 _run_one_tool 执行
 - publish：XADD 到 Redis Streams，由远端 worker 拉取执行
 
-单机零回归：scheduler.advance_once 无 fleet 配置时走 loopback，
+主控角色（GRAPHPT_MASTER_ROLE 或 Redis fleet:config:master_role）：
+- worker（默认）：主力一体 —— 既当大脑调配，也用本地线程池参与干活
+- brain：纯大脑 —— 只做派发/调配，任何工具任务都丢给远端 worker，
+  本地 loopback 被强制禁用（无 worker 时任务进入 deferred）
+
+单机零回归：默认 worker 角色 + 无 fleet 配置时走 loopback，
 与现在（Celery 移除后）的线程池路径完全一致。
 """
 
@@ -17,14 +22,53 @@ from typing import Any, Callable
 from graphpt.fleet import streams
 
 _MODE_KEY = "GRAPHPT_DISPATCH_MODE"   # "" | "loopback" | "publish"
+_ROLE_KEY = "GRAPHPT_MASTER_ROLE"     # "" | "worker" | "brain"
 
 # loopback 共享线程池（与调度层各自维护的池隔离，避免重复创建）
 _LOOPBACK_POOL: ThreadPoolExecutor | None = None
 _LOOPBACK_LOCK = threading.Lock()
 
 
+def master_role() -> str:
+    """主控角色：worker（主力一体，默认）| brain（纯大脑只派发）。"""
+    role = os.getenv(_ROLE_KEY, "").strip().lower()
+    if role in ("worker", "brain"):
+        return role
+    # Redis 里的动态设置（舰队面板切换，进程内即时生效）
+    try:
+        from graphpt.common.redis_client import get_redis
+        r = get_redis(decode_responses=True, socket_connect_timeout=1)
+        role = (r.get("fleet:config:master_role") or "").strip().lower()
+        if role in ("worker", "brain"):
+            return role
+    except Exception:
+        pass
+    return "worker"
+
+
+def is_brain() -> bool:
+    """纯大脑模式：本地不执行任何工具，全部派发。"""
+    return master_role() == "brain"
+
+
+def set_master_role(role: str) -> bool:
+    """动态切换主控角色（存 Redis，立即生效）。"""
+    role = role.strip().lower()
+    if role not in ("worker", "brain"):
+        return False
+    try:
+        from graphpt.common.redis_client import get_redis
+        r = get_redis(decode_responses=True, socket_connect_timeout=1)
+        return bool(r.set("fleet:config:master_role", role))
+    except Exception:
+        return False
+
+
 def dispatch_mode() -> str:
     mode = os.getenv(_MODE_KEY, "").strip().lower()
+    # brain 角色：纯派发，不允许本地 loopback
+    if is_brain():
+        return "publish"
     return mode if mode in ("loopback", "publish") else "loopback"
 
 

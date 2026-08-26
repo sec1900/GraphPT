@@ -17,11 +17,47 @@ export function loadFleetPage(manual = false) {
       el.innerHTML = renderFleet(j.data);
       fetchEvents();
       loadFleetAlertStatus();
+      loadFleetRole();
     })
     .catch(err => {
       el.innerHTML = `<div class="loading">Fleet 不可用: ${esc(err.message)}</div>`;
     });
 }
+
+let _currentRole = '';
+
+async function loadFleetRole() {
+  const el = document.getElementById('fleet-role-status');
+  if (!el) return;
+  const res = await fetch('/api/fleet/config').then(r => r.json()).catch(() => ({}));
+  const d = res.data || {};
+  const role = d.master_role || 'worker';
+  _currentRole = role;
+  const desc = role === 'brain'
+    ? '纯大脑：本地不干活，任务全丢 worker'
+    : '主力一体：既调配也参与干活';
+  const token = (window.GRAPHPT_FLEET_TOKEN_FOR_UI || '');
+  el.innerHTML = `<b style="color:${role === 'brain' ? 'var(--red)' : 'var(--green)'}">${role === 'brain' ? '纯大脑（brain）' : '主力一体（worker）'}</b>
+    <span style="margin-left:8px">${desc}</span>
+    <button class="btn outline small" onclick="switchMasterRole()" style="margin-left:10px;font-size:10px">切换</button>`;
+}
+
+window.switchMasterRole = async () => {
+  const next = _currentRole === 'brain' ? 'worker' : 'brain';
+  const token = prompt('Fleet token（/api/fleet/tokens/issue 签发）：', '');
+  if (!token) return;
+  const r = await fetch('/api/fleet/config/role', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-Fleet-Token': token},
+    body: JSON.stringify({role: next})
+  }).then(r => r.json()).catch(e => ({ok: false, error: e.message}));
+  if (r.ok) {
+    toast(`主控角色已切换为 ${next}`, 'success');
+    loadFleetRole();
+  } else {
+    toast('切换失败: ' + (r.error || ''), 'error');
+  }
+};
 
 function renderFleet(d) {
   const ws = d.workers || [];
@@ -58,6 +94,7 @@ function renderFleet(d) {
     <div class="fleet-card">执行中(inflight) <b>${Object.values(inflight).reduce((a,b)=>a+(b||0),0)}</b></div>
     <div class="fleet-card">deferred <b>${d.deferred||0}</b></div>
   </div>
+  <div id="fleet-role-section" style="font-size:12px;color:var(--muted);margin-bottom:10px">主控角色：<span id="fleet-role-status">加载中...</span></div>
   <table class="tbl"><thead><tr><th>Worker</th><th>状态</th><th>能力(tools)</th><th>LLM</th><th>Geo</th><th>心跳</th></tr></thead>
   <tbody>${rows}</tbody></table>
 

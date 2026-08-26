@@ -837,6 +837,18 @@ def run_scan_layer(spec: dict[str, Any], asset_id: str, *,
             st = _SCAN_STATE.get(asset_id, {})
             st["tool"] = tool
         try:
+            # brain 模式（GRAPHPT_MASTER_ROLE=brain）：主控纯大脑，
+            # 本地不执行任何工具，全部经 dispatcher 派发给远端 worker。
+            # 无 worker 能力时 _dispatch → "" → 任务挂 deferred，不阻塞层推进。
+            from graphpt.fleet.dispatcher import is_brain, dispatch_tool
+            if is_brain():
+                return {
+                    "tool": tool, "asset_id": asset_id,
+                    "status": "dispatched",
+                    "task_id": dispatch_tool(_run_one_tool, tool, asset_id,
+                                             layer=layer_num,
+                                             force_rescan=force_rescan),
+                }
             return _run_one_tool(tool, asset_id, force_rescan=force_rescan)
         except ScanAborted:
             raise  # F2: 向上传播，外层处理
