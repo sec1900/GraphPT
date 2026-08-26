@@ -193,7 +193,57 @@ async def fleet_tasks_poll(body: PollBody,
     return {"ok": True, "tasks": tasks}
 
 
-@fleet_router.post("/tasks/done")
+@fleet_router.get("/assets")
+async def fleet_assets(x_fleet_token: str = Header(default="")):
+    """列出所有资产租约（asset → owner worker / TTL）。"""
+    try:
+        r = _r()
+        r.ping()
+    except Exception as exc:
+        return {"ok": False, "error": f"redis_unreachable: {exc}"}
+    from graphpt.fleet.ownership import list_leases
+    return {"ok": True, "data": list_leases(r)}
+
+
+class AssetClaimBody(BaseModel):
+    worker_id: str
+    ttl: int = 300
+    force: bool = False   # True = Master 强制接管（覆盖当前 owner）
+
+
+@fleet_router.post("/assets/{asset_id}/claim")
+async def fleet_asset_claim(asset_id: str, body: AssetClaimBody,
+                            x_fleet_token: str = Header(default="")):
+    """为 worker 分配资产所有权租约。"""
+    _verify_fleet_token(x_fleet_token)
+    try:
+        r = _r()
+        from graphpt.fleet.ownership import claim
+        ok = claim(r, asset_id, body.worker_id, ttl=body.ttl, force=body.force)
+        if ok:
+            return {"ok": True, "asset_id": asset_id, "owner": body.worker_id}
+        # 已被其他 worker 占用
+        from graphpt.fleet.ownership import get_owner
+        current = get_owner(r, asset_id)
+        return {"ok": False, "error": "asset_already_claimed",
+                "current_owner": current}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+@fleet_router.post("/assets/{asset_id}/release")
+async def fleet_asset_release(asset_id: str, worker_id: str,
+                              x_fleet_token: str = Header(default="")):
+    """释放资产所有权租约（只有 owner 能释放）。"""
+    _verify_fleet_token(x_fleet_token)
+    try:
+        r = _r()
+        from graphpt.fleet.ownership import release
+        ok = release(r, asset_id, worker_id)
+        return {"ok": ok, "asset_id": asset_id,
+                "error": "" if ok else "not_owner"}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
 async def fleet_tasks_done(body: DoneBody,
                            x_fleet_token: str = Header(default="")):
     """worker 上报执行结果 → 主控 XACK + 发 res:events + 更新 inflight。"""

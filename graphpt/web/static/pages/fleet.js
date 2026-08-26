@@ -59,6 +59,12 @@ function renderFleet(d) {
   </div>
   <table class="tbl"><thead><tr><th>Worker</th><th>状态</th><th>能力(tools)</th><th>LLM</th><th>Geo</th><th>心跳</th></tr></thead>
   <tbody>${rows}</tbody></table>
+
+  <div style="margin-top:14px;font-size:11px;color:var(--muted)">资产归属（ownership lease）</div>
+  <div id="fleet-assets-section">
+    <div class="loading" style="font-size:11px">Loading asset leases...</div>
+  </div>
+
   <div style="margin-top:14px;font-size:11px;color:var(--muted)">队列深度</div>
   <table class="tbl"><thead><tr><th>流</th><th>长度</th></tr></thead><tbody>
     <tr><td>high</td><td>${qs['scan:queue:high']||0}</td></tr>
@@ -81,6 +87,25 @@ function fetchEvents() {
         box.insertAdjacentHTML('beforeend', esc(line) + '\n');
       });
       box.scrollTop = box.scrollHeight;
+    })
+    .catch(() => {});
+
+  // 同步拉资产租约
+  fetch('/api/fleet/assets')
+    .then(r => r.json())
+    .then(j => {
+      const sec = document.getElementById('fleet-assets-section');
+      if (!sec) return;
+      if (!j.ok) { sec.innerHTML = '<div style="font-size:11px;color:var(--red)">租约 API 不可达</div>'; return; }
+      const leases = j.data || [];
+      if (!leases.length) {
+        sec.innerHTML = '<div style="font-size:11px;color:var(--muted)">无活跃资产租约（所有资产空闲）</div>';
+        return;
+      }
+      const rows = leases.map(l =>
+        `<tr><td>${esc(l.asset_id)}</td><td>${esc(l.owner)}</td><td>${l.ttl}s</td></tr>`
+      ).join('');
+      sec.innerHTML = `<table class="tbl"><thead><tr><th>资产</th><th>Owner worker</th><th>租约剩余</th></tr></thead><tbody>${rows}</tbody></table>`;
     })
     .catch(() => {});
 }
