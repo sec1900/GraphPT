@@ -207,12 +207,16 @@ def _main_http(worker_id: str, stop: threading.Event) -> None:
                     report_done(worker_id, task, status="rejected", error="missing_tool")
                     continue
 
-            _log.info("http_execute task_id=%s tool=%s asset=%s",
-                      task.get("task_id"), tool, asset_id)
+            _log.info("http_execute task_id=%s tool=%s asset=%s targets=%d",
+                      task.get("task_id"), tool, asset_id,
+                      len(task.get("targets") or []))
             try:
                 from graphpt.collector.tasks import _run_single_tool_pipeline
+                # HTTP 模式下主控已在 poll 时查好目标（target_overrides），
+                # worker 不再查 Neo4j —— 直接执行兜底任务
+                targets = task.get("targets") or None
                 result = _run_single_tool_pipeline(
-                    tool, asset_id=asset_id, stage_name=tool,
+                    tool, targets=targets, asset_id=asset_id, stage_name=tool,
                     command=str(task.get("command") or "") or None,
                     force_rescan=str(task.get("force_rescan") or "0") == "1",
                 )

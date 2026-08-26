@@ -158,11 +158,15 @@ async def fleet_heartbeat(body: HeartbeatBody,
 @fleet_router.post("/tasks/poll")
 async def fleet_tasks_poll(body: PollBody,
                            x_fleet_token: str = Header(default="")):
-    """主控从 Redis Streams 取任务，通过 HTTP 下发给 worker。
+    """主控从 Redis Streams 取任务，解析目标列表后通过 HTTP 下发给 worker。
 
-    worker 不再直连 Redis，只和主控的 HTTPS 通信。
-    返回 {ok, tasks: [{task_id, kind, tool, asset_id, layer, command,
-           force_rescan, stream, msg_id}]}
+    worker 不再直连 Redis/Neo4j —— 主控在这里：
+      1. 取一条任务（消费组互斥）
+      2. 查询该 tool+asset 的未扫目标（复用 _query_targets，含 ScanRun 去重）
+      3. 目标列表随任务下发（worker 用 target_overrides 直接执行，不查图）
+      4. 目标列表暂存 Redis（fleet:task_targets:{task_id}），done 时写 ScanRun
+
+    返回 {ok, tasks: [{task_id, tool, asset_id, targets, ...}]}
     """
     _verify_fleet_token(x_fleet_token)
     try:
@@ -179,14 +183,48 @@ async def fleet_tasks_poll(body: PollBody,
 
     for m in msgs:
         p = m["payload"]
+        task_id = p.get("task_id", "")
+        tool = p.get("tool", "")
+        asset_id = p.get("asset_id", "")
+
+        # 主控查目标列表（含 ScanRun 去重）—— worker 不再查图
+        targets: list[dict] = []
+        try:
+            from graphpt.collector.pipeline import PipelineExecutor
+            ex = PipelineExecutor({"stages": []}, asset_id=asset_id,
+                                  params={}, target_overrides=None)
+            ex.ctx["asset_id"] = asset_id
+            targets = ex._query_targets(tool)
+        except Exception as exc:
+            _log.warning("poll_target_query_failed task=%s tool=%s err=%s",
+                         task_id, tool, exc)
+            targets = []
+
+        # 无目标：直接 XACK 跳过（已全扫完或查询失败，避免 worker 空转）
+        if not targets or targets == [{}]:
+            try:
+                streams.ack_task(r, m["stream"], m["msg_id"])
+            except Exception:
+                pass
+            continue
+
+        # 目标列表暂存：done 时据此写 ScanRun（Wait：写入 task payload 即可，也存 Redis 防丢失）
+        try:
+            import json as _json
+            r.setex(f"fleet:task_targets:{task_id}", 3600,
+                    _json.dumps(targets, default=str))
+        except Exception:
+            pass
+
         tasks.append({
-            "task_id": p.get("task_id", ""),
+            "task_id": task_id,
             "kind": p.get("kind", "scan_tool"),
-            "tool": p.get("tool", ""),
-            "asset_id": p.get("asset_id", ""),
+            "tool": tool,
+            "asset_id": asset_id,
             "layer": p.get("layer", ""),
             "command": p.get("command", ""),
             "force_rescan": p.get("force_rescan", "0"),
+            "targets": targets,
             "stream": m["stream"],
             "msg_id": m["msg_id"],
         })
@@ -249,7 +287,10 @@ async def fleet_asset_release(asset_id: str, worker_id: str,
 @fleet_router.post("/tasks/done")
 async def fleet_tasks_done(body: DoneBody,
                            x_fleet_token: str = Header(default="")):
-    """worker 上报执行结果 → 主控 XACK + 发 res:events + 更新 inflight。"""
+    """worker 上报执行结果 → 主控 XACK + 写 ScanRun + 发 res:events + 更新 inflight。
+
+    worker 不连 Neo4j，所以 ScanRun（已扫标记）由主控代写。
+    """
     _verify_fleet_token(x_fleet_token)
     try:
         r = _r()
@@ -258,6 +299,32 @@ async def fleet_tasks_done(body: DoneBody,
 
     try:
         streams.ack_task(r, body.stream, body.msg_id)
+    except Exception:
+        pass
+
+    # 主控代写 ScanRun：从 poll 时暂存的目标列表还原已扫标记
+    # （防止该 worker 下次轮询同一任务时又拿到同样目标）
+    try:
+        import json as _json
+        raw = r.get(f"fleet:task_targets:{body.task_id}")
+        if raw:
+            targets = _json.loads(raw)
+            from graphpt.collector.pipeline import PipelineExecutor
+            ex = PipelineExecutor({"stages": []}, asset_id=body.asset_id)
+            labels = []
+            for t in targets:
+                if isinstance(t, dict):
+                    v = t.get("{targets_file}") or t.get("targets_file") or \
+                        t.get("{url}") or t.get("url") or \
+                        next(iter(t.values()), "")
+                    if v:
+                        labels.append(str(v))
+            if labels and body.status == "ok":
+                try:
+                    ex._mark_scanned_batch(body.tool, labels, int(body.findings or 0))
+                except Exception:
+                    pass
+            r.delete(f"fleet:task_targets:{body.task_id}")
     except Exception:
         pass
 
