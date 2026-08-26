@@ -603,7 +603,15 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
                     break
             task_id = None
             if dispatch:
-                task_id = _dispatch_tool(item["tool"], asset_id)
+                # 派发落点抽象：默认 loopback（本机线程池，等于现状行为），
+                # GRAPHPT_DISPATCH_MODE=publish 时发 Redis Streams 由远端 worker 拉取。
+                # 注：历史遗留的 _dispatch_tool 从未定义（Celery 移除后残留调用），
+                # 此处实际是修复 + 抽象一步到位（见 docs/DISTRIBUTED_SCANNING.md M0）。
+                from graphpt.fleet.dispatcher import dispatch_tool as _fleet_dispatch
+                task_id = _fleet_dispatch(
+                    _run_one_tool, item["tool"], asset_id,
+                    layer=spec["layer"],
+                )
                 if task_id:
                     if _r:
                         _r.setex(lock_key, _LOCK_TTL, task_id)

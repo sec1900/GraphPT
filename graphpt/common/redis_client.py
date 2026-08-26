@@ -31,11 +31,16 @@ def _redis_config() -> dict:
     return _parse_broker_url(url)
 
 
-def get_redis(*, decode_responses: bool = False, socket_connect_timeout: int = 2):
+def get_redis(*, decode_responses: bool = False, socket_connect_timeout: int = 2,
+              socket_timeout: float | None = None):
     """获取 Redis 客户端。
 
     优先用 GRAPHPT_REDIS_URL。
     所有模块统一调用此函数，不再各自硬编码 host/port。
+
+    socket_timeout: None 时保持默认（= socket_connect_timeout）。
+    长阻塞命令（如 XREADGROUP BLOCK）必须传 socket_timeout=None，
+    否则阻塞时长超过默认 2s 会触发读取超时。
     """
     import redis as _redis
     cfg = _redis_config()
@@ -46,6 +51,7 @@ def get_redis(*, decode_responses: bool = False, socket_connect_timeout: int = 2
         ssl=cfg["ssl"],
         decode_responses=decode_responses,
         socket_connect_timeout=socket_connect_timeout,
-        socket_timeout=socket_connect_timeout,
+        socket_timeout=(socket_timeout if socket_timeout is not None
+                        else socket_connect_timeout),
         socket_keepalive=True,
     )

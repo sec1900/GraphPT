@@ -236,6 +236,11 @@ def main():
                         help='Web server port (default: 8080)')
     parser.add_argument('--host', type=str, default='0.0.0.0',
                         help='Web server host (default: 0.0.0.0)')
+    parser.add_argument('--worker', action='store_true',
+                        help='Fleet worker mode: 只启动扫描 worker（拉取共享 Redis Streams 任务），'
+                             '不启动 Web 服务（分布式部署见 docs/DISTRIBUTED_SCANNING.md）')
+    parser.add_argument('--worker-id', type=str, default='',
+                        help='Fleet worker 唯一 ID（默认 host-pid）')
     args = parser.parse_args()
 
     print("GraphPT Services Starting...")
@@ -243,6 +248,8 @@ def main():
     print(f"Python:  {sys.executable}")
     if args.debug:
         print(f"Mode:    DEBUG (no checks, no restart)")
+    if args.worker:
+        print(f"Mode:    FLEET WORKER (id={args.worker_id or 'auto'})")
     print()
 
     # 检查依赖服务（Neo4j + Redis）- debug 模式跳过
@@ -254,16 +261,22 @@ def main():
         print("[DEBUG] Skipping dependency checks and Redis cleanup")
         print()
 
-    services = [
-        {
+    services = []
+    if args.worker:
+        # worker 模式：不启动 Web 端口，只跑任务拉取执行
+        worker_cmd = [sys.executable, "-m", "graphpt.worker"]
+        if args.worker_id:
+            worker_cmd += ["--id", args.worker_id]
+        services.append({"name": "fleet-worker", "cmd": worker_cmd, "port": 0})
+    else:
+        services.append({
             "name": "web-server",
             "cmd": [
                 sys.executable, "-m", "uvicorn", "graphpt.web.app:web_app",
                 "--host", args.host, "--port", str(args.port),
             ],
             "port": args.port,
-        },
-    ]
+        })
 
     with ThreadPoolExecutor(max_workers=len(services)) as pool:
         futures = [pool.submit(run_service, s["name"], s["cmd"], str(PROJECT), s.get("port", 0), args.debug)
