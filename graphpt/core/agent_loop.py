@@ -14,8 +14,9 @@ import os
 import re
 
 # LLM 调用硬超时（秒）：同步路径兜底（见 _call_ai 中的线程看门狗）。
-# 180s 覆盖推理模型大上下文慢响应；超时即强制放弃本轮调用走 failover/报错。
-_LLM_CALL_HARD_TIMEOUT_S = int(os.environ.get("GRAPHPT_AI_CALL_TIMEOUT", "180"))
+# 420s 覆盖深推理档（GRAPHPT_REASONING_EFFORT=high/xhigh）复杂请求的分钟级
+# 响应；超时即强制放弃本轮调用走 failover/报错，绝不静默。
+_LLM_CALL_HARD_TIMEOUT_S = int(os.environ.get("GRAPHPT_AI_CALL_TIMEOUT", "420"))
 import sqlite3
 import threading
 import time
