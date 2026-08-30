@@ -56,7 +56,17 @@ class Dispatcher:
             return len(self.board.recent_facts(self.project, limit=10000))
 
     def _hints_count(self) -> int:
-        return 0  # hints 表未建（Phase 预留），暂恒 0
+        """外部人工指引条数（hints 表，2026-08-30 落地）。
+
+        人工/上游注入 hints 会构成"新态势"→ 触发 reason 重新研判。
+        """
+        if not self.board.ok:
+            return 0
+        try:
+            return self.board.hints_count(self.project)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("dispatcher hints_count failed: %s", e)
+            return 0
 
     def _open_count(self) -> int:
         return len(self.board.open_intents(self.project))

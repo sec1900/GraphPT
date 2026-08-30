@@ -28,6 +28,27 @@ _DEFAULT_TIMEOUT_S = 900
 _DEFAULT_MAX_ITERS = 18  # 短会话（审计教训：35 轮后半程全是重放；18 轮保前段有效探索）
 
 
+class _RollingBuf:
+    """容量封顶的滚动文本缓冲：承接主循环工具输出的流式快照（供 steering 识别）。"""
+
+    def __init__(self, cap: int):
+        self.cap = max(200, int(cap))
+        self._parts: list[str] = []
+        self._total = 0
+
+    def push(self, s: str) -> None:
+        s = (s or "")[:8000]
+        if not s:
+            return
+        self._parts.append(s)
+        self._total += len(s)
+        while self._parts and self._total > self.cap:
+            self._total -= len(self._parts.pop(0))
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+
 @dataclass
 class AgentTask:
     target: str
@@ -46,6 +67,10 @@ class AgentTask:
     # prompt 覆盖（任务装配）：None = 统一生成；非 None = 用任务专属 prompt
     system_prompt_override: str | None = None
     user_prompt_override: str | None = None
+    # 组件经验卡注入开关：仅当会话域允许（如 SRC 实战）时开启。
+    # CTF 域保持 False——earned 卡是跨任务沉淀，违反盲测原则
+    # （ctf/prompts 盲测：不注入跨任务沉淀）。
+    kb_inject: bool = False
 
     def board_project(self) -> str:
         return self.project or self.target
@@ -231,6 +256,15 @@ class AgentSession:
         wrap_state = {"sent": False}
         t0 = time.monotonic()
 
+        # 组件经验注入准备（kb_inject 且 env 开启时）：滚动缓冲承接主循环
+        # 工具输出的流式快照，steering 每轮识别组件 → 命中 earned 卡注入一次。
+        _recent_out = _RollingBuf(12000)
+        _kb_injected: set[str] = set()
+        _kb_enabled = (
+            bool(task.kb_inject)
+            and os.environ.get("GRAPHPT_KBCARD_INJECT", "1") != "0"
+        )
+
         def _watchdog():
             while not stop_evt.is_set():
                 if time.monotonic() >= deadline:
@@ -248,6 +282,18 @@ class AgentSession:
                 except Exception:  # noqa: BLE001 — 用户 steering 失败不终止会话
                     _log.warning("[agent:%s] steering provider failed", task.target,
                                  exc_info=True)
+            # 组件经验注入（仅自身经验卡；同卡只注入一次；失败静默）
+            if _kb_enabled:
+                try:
+                    from graphpt.search.components import earned_block
+                    blk = earned_block(_recent_out.text())
+                    if blk and blk not in _kb_injected:
+                        _kb_injected.add(blk)
+                        messages.append(
+                            "【组件经验·命中】会话中识别到此前成功处理过的组件/技术，"
+                            "以下为自身经验参考（同组件优先按已知链打）：\n" + blk)
+                except Exception as e:  # noqa: BLE001
+                    _log.warning("[agent:%s] kb steering failed: %s", task.target, e)
             if not wrap_state["sent"] and time.monotonic() >= wrap_up_at:
                 wrap_state["sent"] = True
                 messages.append(
@@ -279,6 +325,9 @@ class AgentSession:
                 force_tool_use=True,
                 prior_messages=prior_messages,
                 steering_provider=_steering,
+                tool_output_sink=(
+                    _recent_out.push if _kb_enabled else None
+                ),
             )
             res.final_text = loop_result.final_text or ""
             res.iterations = loop_result.iterations

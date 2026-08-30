@@ -180,6 +180,8 @@ def run_graph_agent(
         system_prompt_override=_build_system_prompt(asset_id),
         user_prompt_override=user_prompt,
         tool_schemas=_get_tool_schemas(asset_id),
+        # SRC/实战域开放组件经验注入（同组件 earned 卡；CTF 域盲测默认关）
+        kb_inject=True,
     )
     sess = AgentSession(task, ai_config=ai_config,
                         conclude_system=_load_src_conclude())

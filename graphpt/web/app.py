@@ -6701,6 +6701,54 @@ def api_agent_pool_status():
     return pool_status()
 
 
+@web_app.post("/api/search/hints")
+def api_search_add_hints(body: dict):
+    """给某个 search 项目注入外部人工指引（hints）。
+
+    注入后构成"新态势"→ 池下轮 trigger reason 重新研判。
+    body: {"project": "...", "hints": ["...", ...] 或 "hint": "单条"}
+    """
+    project = (body.get("project") or "").strip()
+    if not project:
+        raise HTTPException(400, "project required")
+    items = body.get("hints") or []
+    if isinstance(items, str):
+        items = [items]
+    if "hint" in body and not items:
+        items = [body["hint"]]
+    items = [str(x).strip() for x in items if str(x).strip()]
+    if not items:
+        raise HTTPException(400, "hints/hint required")
+    from graphpt.search.board import Board
+    b = Board()
+    try:
+        n = 0
+        for h in items:
+            if b.add_hint(project, h, creator="web"):
+                n += 1
+        return {"added": n, "project": project}
+    finally:
+        b.close()
+
+
+@web_app.get("/api/search/hints")
+def api_search_list_hints(project: str = ""):
+    """列出某项目最近的外部指引（无 project 则列出全部项目各自最近）。"""
+    from graphpt.search.board import Board
+    b = Board()
+    try:
+        if project:
+            return {"project": project, "hints": b.latest_hints(project)}
+        # 全量：按项目聚合（粗放：每个项目最多 3 条）
+        rows = []
+        for row in b._ok and b._conn.execute(
+                "SELECT DISTINCT project FROM board_hints ORDER BY id DESC LIMIT 200").fetchall() or []:
+            rows.append({"project": row[0], "hints": b.latest_hints(row[0], limit=3)})
+        return {"projects": rows}
+    finally:
+        b.close()
+
+
 @web_app.post("/api/agent/pool/start")
 def api_agent_pool_start(body: dict):
     """拉起一个 agent 任务（空槽直接跑，无空槽入队）。"""

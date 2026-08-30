@@ -62,6 +62,15 @@ CREATE TABLE IF NOT EXISTS board_handoffs (
 );
 CREATE INDEX IF NOT EXISTS idx_board_handoffs_project ON board_handoffs(project, id);
 
+CREATE TABLE IF NOT EXISTS board_hints (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project TEXT NOT NULL,
+  content TEXT NOT NULL,
+  creator TEXT NOT NULL DEFAULT 'human',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_hints_project ON board_hints(project, id);
+
 CREATE TABLE IF NOT EXISTS board_intents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   project TEXT NOT NULL,
@@ -256,6 +265,65 @@ class Board:
         if not body:
             return ""
         return body[:limit_chars]
+
+    # ---------- hints（外部人工指引，图外输入；态势触发之一） ----------
+
+    def add_hint(self, project: str, content: str, *, creator: str = "human") -> bool:
+        """追加一条外部指引（人类/上游注入）。append-only，同 handoffs。"""
+        content = (content or "").strip()
+        if not content or not self._ok:
+            return False
+        try:
+            with self._lock:
+                cur = self._conn.execute(
+                    "INSERT INTO board_hints (project, content, creator, created_at) "
+                    "VALUES (?,?,?,?)",
+                    (project, content[:1000], creator,
+                     time.strftime("%Y-%m-%dT%H:%M:%S")))
+                self._conn.commit()
+                return cur.rowcount > 0
+        except Exception as e:  # noqa: BLE001
+            _log.error("board add_hint failed: %s", e)
+            return False
+
+    def latest_hints(self, project: str, limit: int = 8) -> list[dict]:
+        """最近的外部指引（旧→新）。"""
+        if not self._ok:
+            return []
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT id, content, creator, created_at FROM board_hints "
+                    "WHERE project=? ORDER BY id DESC LIMIT ?",
+                    (project, max(1, int(limit)))).fetchall()
+            return [dict(r) for r in reversed(rows)]
+        except Exception as e:  # noqa: BLE001
+            _log.error("board latest_hints failed: %s", e)
+            return []
+
+    def hints_text(self, project: str, limit: int = 8) -> str:
+        """紧凑文本视图（供 prompt 注入）。"""
+        hs = self.latest_hints(project, limit=limit)
+        if not hs:
+            return ""
+        lines = []
+        for h in hs:
+            lines.append(f"h{h['id']:03d} [{h.get('creator') or 'human'}] {h['content']}")
+        return "\n".join(lines)
+
+    def hints_count(self, project: str) -> int:
+        """该项目的提示条数（态势对比用，防全量拉取）。"""
+        if not self._ok:
+            return 0
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) FROM board_hints WHERE project=?",
+                    (project,)).fetchone()
+            return int(row[0]) if row else 0
+        except Exception as e:  # noqa: BLE001
+            _log.error("board hints_count failed: %s", e)
+            return 0
 
     # ---------- intents ----------
 

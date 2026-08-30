@@ -33,6 +33,19 @@ from pathlib import Path
 
 _log = logging.getLogger("graphpt.search.pool")
 
+# 轮询 daemon 日志去重（吸收 Cairn _log_changed：状态变化优先）：同一 scope
+# 的日志在 interval 内只打一次，防"平台挂了/孤儿扫描持续失败"类错误每 tick 刷屏。
+_log_ts: dict[str, float] = {}
+_LOG_ONCE_S = 30.0
+
+
+def _log_once(scope: str, level: int, msg: str, *args, interval_s: float = _LOG_ONCE_S) -> None:
+    now = time.time()
+    if now - _log_ts.get(scope, -1e9) < interval_s:
+        return
+    _log_ts[scope] = now
+    _log.log(level, msg, *args)
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _POOL_FILE = os.environ.get(
     "GRAPHPT_POOL_FILE", ""
@@ -405,7 +418,8 @@ def _next_decision(slot: dict, ch: str, idx: int, st: dict) -> None:
                 slot["completed"] = True
                 _clear_slot(slot)
             else:
-                _log.warning("[pool] slot%d %s dispatcher 判 done 但平台未完成——忽略，继续调度", idx, ch)
+                _log_once(f"done_no_platform:{ch}", logging.WARNING,
+                          "[pool] slot%d %s dispatcher 判 done 但平台未完成——忽略，继续调度", idx, ch)
             return
         if action == "wait":
             slot["phase"] = "idle"
@@ -481,7 +495,8 @@ def _platform_done(challenge: str) -> bool:
                     return bool(x.is_completed)
         return False
     except Exception as e:  # noqa: BLE001
-        _log.warning("[pool] platform_done(%s) 查询失败（按未完成处理）: %s", challenge, e)
+        _log_once(f"platform_done:{challenge}", logging.WARNING,
+                  "[pool] platform_done(%s) 查询失败（按未完成处理）: %s", challenge, e)
         return False
 
 
@@ -529,7 +544,7 @@ def _reclaim_orphans(st: dict) -> int:
         if isinstance(procs, dict):
             procs = [procs]
     except Exception as e:  # noqa: BLE001
-        _log.warning("孤儿扫描失败: %s", e)
+        _log_once("orphan_scan_fail", logging.WARNING, "孤儿扫描失败: %s", e)
         return 0
     alive = {int(s.get("pid") or 0) for s in st["slots"] if s.get("pid")}
     # 注意：graphpt.ctf.driver 是有意的回收目标（旧调度器，与 pool 互斥——driver 侧
@@ -558,7 +573,7 @@ def pool_tick(st: dict | None = None) -> dict:
     try:
         _reclaim_orphans(st)
     except Exception as e:  # noqa: BLE001
-        _log.warning("孤儿回收异常: %s", e)
+        _log_once("orphan_reap_fail", logging.WARNING, "孤儿回收异常: %s", e)
     n = int(st["config"].get("slots", DEFAULT_SLOTS))
     for i in range(n):
         _poll_slot(i, st)

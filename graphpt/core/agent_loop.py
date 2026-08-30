@@ -1115,6 +1115,7 @@ def run_agent_loop(
     force_tool_use: bool = True,
     prior_messages: list[dict[str, Any]] | None = None,
     steering_provider: Callable[[], list[str]] | None = None,
+    tool_output_sink: Callable[[str], None] | None = None,
 ) -> AgentLoopResult:
     """执行 Agent ReAct 循环。
 
@@ -1481,6 +1482,13 @@ def run_agent_loop(
                     _diag = ""
             if _diag:
                 tool_result_str = tool_result_str + _diag
+
+            # 流式工具快照（steering 侧组件识别/知识卡注入用；失败静默）
+            if tool_output_sink is not None:
+                try:
+                    tool_output_sink(tool_result_str)
+                except Exception:  # noqa: BLE001 — sink 失败不影响主循环
+                    pass
 
             # S3: 用 XML 标签隔离工具输出与指令，防止提示注入
             wrapped = f"<tool_output>{tool_result_str}</tool_output>"

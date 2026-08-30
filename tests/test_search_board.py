@@ -435,6 +435,43 @@ def test_reason_empty_open_forced() -> None:
     b.close()
 
 
+def test_board_hints() -> None:
+    """hints 外部指引：append-only、计数、态势文本注入。"""
+    b, _d = _fresh_board()
+    b.add_fact("p-1", "发现 /admin", source="session", verified=1)
+    check("hint add", b.add_hint("p-1", "优先验证登录接口弱口令", creator="web"))
+    check("hint add second", b.add_hint("p-1", "已确认网关 WAF，换路径绕过"))
+    hs = b.latest_hints("p-1")
+    check("latest_hints ordered", len(hs) == 2 and hs[-1]["content"].startswith("已确认"))
+    check("hints_count", b.hints_count("p-1") == 2)
+    txt = b.hints_text("p-1")
+    check("hints_text has creator + content",
+          "h001 [web]" in txt and "弱口令" in txt)
+    check("hints scoped per project", b.hints_count("p-2") == 0)
+    check("hint empty rejected", not b.add_hint("p-1", "   "))
+    b.close()
+
+
+def test_dispatcher_hints_trigger() -> None:
+    """hints 数量变化构成新态势 → reason 触发。"""
+    from graphpt.search.dispatcher import Dispatcher
+    b, _d = _fresh_board()
+    b.add_fact("p-1", "事实 1", source="session", verified=1)
+    d = Dispatcher(b, project="p-1", bootstrap_done=True)
+    dec = d.decide()
+    check("no-hint first decide is reason", dec["action"] == "reason")
+    d2 = Dispatcher(b, project="p-1", bootstrap_done=True)
+    d2.restore(d.state())
+    dec2 = d2.decide()
+    check("no change -> wait", dec2["action"] == "wait")
+    b.add_hint("p-1", "人工指引：登录口重点")
+    d3 = Dispatcher(b, project="p-1", bootstrap_done=True)
+    d3.restore(d.state())
+    dec3 = d3.decide()
+    check("hint added -> reason again", dec3["action"] == "reason", str(dec3))
+    b.close()
+
+
 def main() -> int:
     test_board_local()
     test_board_degraded_path()
@@ -449,6 +486,8 @@ def main() -> int:
     test_board_intent_dedup()
     test_reason_payload_normalize()
     test_reason_empty_open_forced()
+    test_board_hints()
+    test_dispatcher_hints_trigger()
     print()
     if _FAILURES:
         print(f"FAILED: {len(_FAILURES)} -> {_FAILURES}")

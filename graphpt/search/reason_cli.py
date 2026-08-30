@@ -43,10 +43,13 @@ REASON_SYSTEM = """你是攻防任务的「态势研判员」（全新视角，�
 
 
 def build_reason_user(project: str, facts_text: str, open_intents: list[dict],
-                      concluded: list[dict], objective: str = "") -> str:
+                      concluded: list[dict], objective: str = "",
+                      hints_text: str = "") -> str:
     parts = []
     if objective:
         parts.append(f"目标: {objective[:400]}")
+    if hints_text:
+        parts.append("外部人工指引（权威方向，优先遵循）:\n" + hints_text)
     parts.append("已确认事实板:\n" + (facts_text or "(空)"))
     oi = open_intents or []
     if oi:
@@ -89,9 +92,12 @@ def run_reason_eval(llm, *, project: str, objective: str = "",
         facts = b.recent_facts(project, limit=50)
         open_intents = b.open_intents(project)
         concluded = b.intent_conclusions(project)
+        hints_text = b.hints_text(project)
     finally:
         b.close()
-    user = build_reason_user(project, facts_text, open_intents, concluded, objective)
+    user = build_reason_user(
+        project, facts_text, open_intents, concluded, objective,
+        hints_text=hints_text)
     from graphpt.search.phases import parse_json
     text = llm.chat(REASON_SYSTEM, user, max_tokens=4000, temperature=0.2,
                     timeout=timeout)

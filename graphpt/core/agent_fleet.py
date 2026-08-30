@@ -101,7 +101,13 @@ def master_agent_decide_and_dispatch(asset_id: str) -> dict[str, Any]:
 
 
 def _read_graph_state(writer: Any, asset_id: str) -> dict[str, Any]:
-    """主控 Agent 读图：看有什么漏洞/凭据/攻击面。"""
+    """主控 Agent 读图：看有什么漏洞/凭据/攻击面。
+
+    图模型注：EXPLOITS / GRANTS / USES_CREDENTIAL 是合法关系类型
+    （neo4j_client.py 模型图106-108）；Neo4j 对"从未写入过该类型的库"
+    会发 'relationship type does not exist' warning——那是类型未落数据，
+    不是查询写错，无需改这里。
+    """
     try:
         with writer._driver.session() as s:
             r = s.run(
@@ -221,13 +227,8 @@ def worker_agent_execute_mission(mission: dict[str, Any], asset_id: str) -> dict
     这是 worker 侧的 agent 执行逻辑：
       1. 看图（读资产状态）
       2. 决策（该干什么）
-      3. 执行（调用工具）
-      4. 写图（记录结果）
-
-    现状（2026-08-30）：执行体未实现 → **显式 disabled，不写假结果图**。
-    三个执行体（漏洞利用/横向移动/续扫）是下一阶段工作，当前使命派发了也只返回
-    disabled 让主控可见，杜绝"status=ok, findings=0"的假成功写进 Neo4j
-    （历史教训：假结果会污染图查询与凭据复用决策）。
+      3. 执行（委托 graph_agent 真实执行——同一会话骨架，时间盒收口）
+      4. 写图（记录 AgentResult）
     """
     from graphpt.collector.neo4j_client import get_graph_writer
 
@@ -242,29 +243,99 @@ def worker_agent_execute_mission(mission: dict[str, Any], asset_id: str) -> dict
     # 2. 决策（worker 侧简单决策，复杂决策由主控做）
     action = mission.get("action", "none")
 
-    # 3. 执行（执行体未实现 → disabled；主控决策侧应据此不再派发同类使命）
-    result = {"action": action, "status": "disabled",
-              "reason": "执行体未实现（agent_fleet 下一阶段），不落地假结果"}
+    # 3. 执行（真实委托 graph_agent；异常 → error 状态，不写假 ok）
+    result = {"action": action, "status": "pending"}
+    try:
+        if action == "exploit_vuln":
+            result = _execute_exploit_vuln(writer, asset_id)
+        elif action == "lateral_movement":
+            result = _execute_lateral_movement(writer, asset_id)
+        elif action == "continue_scan":
+            result = _execute_continue_scan(writer, asset_id)
+        else:
+            result = {"action": action, "status": "skipped", "reason": "unknown_action"}
+    except Exception as e:  # noqa: BLE001
+        _log.error("agent_mission_execute_failed asset=%s action=%s err=%s",
+                   asset_id, action, e)
+        result = {"action": action, "status": "error", "reason": str(e)[:300]}
+
+    # 4. 写图（记录真实执行结果）
+    if result.get("status") == "ok":
+        _write_agent_result(writer, asset_id, mission, result)
 
     return result
 
 
+# 单次使命时间盒（秒）：explore 短会话的 2 倍——挖洞任务要给足利用展开空间，
+# 但必须可收口（长任务阻塞 worker 轮询线程，无界会话会挂死 worker）。
+_MISSION_TIMEBOX_S = 1200
+
+
+def _run_agent_mission(asset_id: str, user_prompt: str,
+                       timebox_s: int = _MISSION_TIMEBOX_S) -> dict[str, Any]:
+    """委托 graph_agent（同 AgentSession 骨架）真实执行，watchdog 时间盒收口。
+
+    graph_agent 内部循环无界，必须 stop_event + 外部超时线程收口
+    （同 explore_runner._run_src_explore 的收口模式）。
+    """
+    import threading
+    import time as _time
+
+    from graphpt.core.graph_agent import run_graph_agent
+
+    stop_evt = threading.Event()
+
+    def _kill():
+        _deadline = _time.monotonic() + timebox_s
+        while not stop_evt.is_set():
+            if _time.monotonic() >= _deadline:
+                stop_evt.set()
+                return
+            _time.sleep(1.0)
+
+    wd = threading.Thread(target=_kill, daemon=True)
+    wd.start()
+    try:
+        r = run_graph_agent(asset_id=asset_id, user_prompt=user_prompt,
+                            stop_event=stop_evt)
+    except Exception as e:  # noqa: BLE001
+        return {"status": "error", "reason": str(e)[:300]}
+    finally:
+        stop_evt.set()
+        wd.join(timeout=2)
+    return {
+        "status": "ok",
+        "findings": int(getattr(r, "tool_calls_count", 0) or 0),
+        "final": (getattr(r, "final_text", "") or "")[:400],
+        "timebox_s": timebox_s,
+    }
+
+
 def _execute_exploit_vuln(writer: Any, asset_id: str) -> dict[str, Any]:
-    """执行漏洞利用（拿凭据）。【未实现】下一阶段接入：
-    对该资产 verified/candidate 漏洞跑 verify_replay / sqlmap / graph_agent 会话。"""
-    raise NotImplementedError("agent_fleet 执行体未实现（见 worker_agent_execute_mission）")
+    """执行漏洞利用（拿凭据）：graph_agent 聚焦已标记漏洞做利用验证。"""
+    return _run_agent_mission(
+        asset_id,
+        f"针对资产 {asset_id} 上已标记的漏洞（verified/candidate）执行利用验证。"
+        f"目标：确认漏洞可复现性，并获取可利用的凭据/立足点；"
+        f"成功后用 save_vulnerability 与凭据工具把证据落库。")
 
 
 def _execute_lateral_movement(writer: Any, asset_id: str) -> dict[str, Any]:
-    """执行横向移动。【未实现】下一阶段接入：
-    用图上已有凭据对可及目标做 brutespray/hydra/凭据复用。"""
-    raise NotImplementedError("agent_fleet 执行体未实现（见 worker_agent_execute_mission）")
+    """执行横向移动：graph_agent 用图上已有凭据向可及服务推进。"""
+    return _run_agent_mission(
+        asset_id,
+        f"资产 {asset_id} 的图上已有可用凭据或立足点。执行横向移动："
+        f"用已有凭据尝试登录其他服务/主机（复用、爆破邻近目标），"
+        f"每步落实证据（谁/哪台/用什么凭据/拿到什么）；无凭据时先挖掘。")
 
 
 def _execute_continue_scan(writer: Any, asset_id: str) -> dict[str, Any]:
-    """执行继续扫描。【未实现】下一阶段接入：
-    触发 collector 对未覆盖攻击面补扫（或派 scan_tool 使命）。"""
-    raise NotImplementedError("agent_fleet 执行体未实现（见 worker_agent_execute_mission）")
+    """执行继续扫描：graph_agent 对未覆盖攻击面补扫（图驱动）。"""
+    return _run_agent_mission(
+        asset_id,
+        f"对资产 {asset_id} 继续渗透扫描：先查图数据库了解已覆盖的攻击面，"
+        f"找出未覆盖的端口/服务/端点/凭据面，补齐扫描与指纹，"
+        f"用图里的事实决定下一步推进。")
 
 
 def _write_agent_result(writer: Any, asset_id: str, mission: dict[str, Any],
