@@ -227,6 +227,19 @@ def build_unified_user(task: AgentTask) -> str:
         lines.append("\n【本任务此前已执行过的命令】（别重复；从其结论的下一步开始，换新输入/新路径）")
         lines.extend("$ " + str(c)[:160] for c in tried)
     lines.append("现在开始。推荐先拿首页/指纹，形成可证伪的假设再验证。")
+    # 环境剧本 + 题型专家（CTF/SRC 通用注入；文件缺失/异常跳过——纯增益）。
+    # 环境剧本：OpenVPN/代理劫持/IP 重建/动态端口（靶场环境级经验，盲测安全）；
+    # 题型专家：按 objective 关键词推断题型给方法论视角（agent 自身经验库）。
+    try:
+        from graphpt.ctf.prompts import _expert_block, _playbook_block
+        pb = _playbook_block()
+        if pb:
+            lines.append("\n【靶场环境剧本（环境级知识，先读）】\n" + pb)
+        ex = _expert_block(task.objective or "")
+        if ex:
+            lines.append(ex)
+    except Exception:  # noqa: BLE001 — 注入失败不阻塞会话
+        pass
     return "\n".join(lines)
 
 

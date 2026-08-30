@@ -61,6 +61,71 @@ def _board_quick_count(project: str, field: str, extra_where: str = "") -> int:
         b.close()
 
 
+def _verified_submitter(workdir: str, submit_fn: callable) -> callable:
+    """三重校验提交门（6300 战术恢复）：候选 flag 先过 FlagVerifier
+    （grounding 代码门 + 怀疑者多票否定 + 逐项追问），rejected 直接剔除；
+    其余写回 FLAG 文件后再交基础提交器。防错提交浪费 wrong>3 封顶丢题。
+    """
+    from graphpt.ctf.verify import FlagVerifier, FlagClaim, _VerifierLLM
+
+    def _extract_candidates() -> tuple[list[str], str]:
+        cands: list[str] = []
+        for name in ("FLAG", "flag.txt", "FLAG.txt"):
+            p = os.path.join(workdir, name)
+            try:
+                if os.path.isfile(p):
+                    with open(p, encoding="utf-8", errors="ignore") as f:
+                        for line in f:
+                            v = line.strip()
+                            if "{" in v and v.endswith("}") and len(v) <= 4096:
+                                cands.append(v)
+            except OSError:
+                pass
+        obs = ""
+        try:
+            p = os.path.join(workdir, "session_0.log")
+            if os.path.isfile(p):
+                obs = open(p, encoding="utf-8", errors="ignore").read()[:200_000]
+        except OSError:
+            pass
+        from graphpt.ctf.extract import extract_flags
+        for f in extract_flags(obs, "flag{...}"):
+            if f not in cands:
+                cands.append(f)
+        return cands, obs
+
+    def _submit() -> dict:
+        cands, obs = _extract_candidates()
+        if not cands:
+            return {"submitted": 0, "correct": 0, "wrong": 0, "verified_skip": 0}
+        llm = _VerifierLLM.from_env()
+        verifier = FlagVerifier(llm, skeptic_votes=1)
+        keep: list[str] = []
+        skip = 0
+        for v in cands:
+            claim = verifier.verify(FlagClaim(value=v, observed_output=obs[-120_000:],
+                                              flag_format="flag{...}"))
+            if claim.verdict == "rejected":
+                skip += 1
+                _log.info("[relay] 校验剔除候选 %s...（%s）", v[:16],
+                          "; ".join(claim.reasons[:1]))
+            else:
+                keep.append(v)
+        if keep:
+            p = os.path.join(workdir, "FLAG")
+            try:
+                os.makedirs(workdir, exist_ok=True)
+                with open(p, "w", encoding="utf-8") as f:
+                    f.write("\n".join(keep) + "\n")
+            except OSError:
+                pass
+        out = dict(submit_fn() or {})
+        out["verified_skip"] = skip
+        return out
+
+    return _submit
+
+
 def run_relay(
     *,
     target: str,
@@ -216,7 +281,7 @@ def main() -> int:
         project=args.project or args.target,
         objective=objective,
         rounds=rounds,
-        submit_each_round=platform["submitter"] if platform else None,
+        submit_each_round=_verified_submitter(workdir, platform["submitter"]) if platform else None,
         platform_done=(lambda: False) if not platform else None,
     )
     if platform:
