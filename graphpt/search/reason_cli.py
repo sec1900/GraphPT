@@ -23,6 +23,9 @@ import sys
 
 _log = logging.getLogger("graphpt.search.reason_cli")
 
+# 单轮 reason 提案意图上限（意图爆炸防护，吸收 Cairn max_intents 硬截断）。
+MAX_INTENTS = 8
+
 REASON_SYSTEM = """你是攻防任务的「态势研判员」（全新视角，不携带解题历史）。
 
 输入：已确认事实板、正在进行/已结论的探索意图、目标。
@@ -35,8 +38,8 @@ REASON_SYSTEM = """你是攻防任务的「态势研判员」（全新视角，�
 
 规则：
 - complete=true 只在事实板上已有足够事实证明目标达成时输出（complete_from 必须引用板上的事实描述）。
-- 未完成时 intents 提案 1-3 个独立、高价值、不重复的探索方向；若 open intents 已覆盖所有线索可 noop=true。
-- 禁止编造板上不存在的事实。"""
+- 未完成时 intents 提案 1-3 个独立、高价值、不重复的探索方向。
+- 禁止 noop：open 意图为空时禁止 noop=true（无方向也必须提一个广度摸排方向）。"""
 
 
 def build_reason_user(project: str, facts_text: str, open_intents: list[dict],
@@ -57,6 +60,25 @@ def build_reason_user(project: str, facts_text: str, open_intents: list[dict],
     return "\n\n".join(parts)
 
 
+def _normalize_reason_payload(d: dict | None) -> dict | None:
+    """契约双形态归一（吸收 Cairn contracts._unwrap_wrapped_payload）：
+
+    - 接受 {"accepted": true, "data": {...}} 包装形态（模型偶尔复制 API 样例）
+    - 兼容单数 intent 键（{"intent": {...}}，Cairn 向后兼容同款）
+    """
+    if not isinstance(d, dict):
+        return None
+    if "data" in d and not any(k in d for k in ("complete", "intents", "noop")):
+        inner = d.get("data")
+        if isinstance(inner, dict):
+            d = inner
+    if isinstance(d.get("intents"), dict) and not isinstance(d.get("intents"), list):
+        d["intents"] = [d["intents"]]
+    elif isinstance(d.get("intent"), dict) and not isinstance(d.get("intents"), list):
+        d["intents"] = [d["intent"]]
+    return d
+
+
 def run_reason_eval(llm, *, project: str, objective: str = "",
                     timeout: int = 60) -> dict | None:
     """LLM 读图研判，返回解析后的决策 dict 或 None（失败降级）。"""
@@ -73,7 +95,7 @@ def run_reason_eval(llm, *, project: str, objective: str = "",
     from graphpt.search.phases import parse_json
     text = llm.chat(REASON_SYSTEM, user, max_tokens=4000, temperature=0.2,
                     timeout=timeout)
-    d = parse_json(text)
+    d = _normalize_reason_payload(parse_json(text))
     if not d or "complete" not in d:
         _log.warning("[reason] %s 解析失败 len=%s", project, len(text or ""))
         return None
@@ -98,6 +120,18 @@ def run_reason_eval(llm, *, project: str, objective: str = "",
             d["complete"] = False
             d.setdefault("intents", []).append(
                 {"description": f"继续推进 {project}（完成声明缺少可核验事实引用）"})
+    # 意图爆炸防护：单轮提案硬截断（提示词预算 1-3 条，此处是兜底上限）。
+    if isinstance(d.get("intents"), list) and len(d["intents"]) > MAX_INTENTS:
+        _log.warning("[reason] %s intents 截断 %d→%d", project,
+                     len(d["intents"]), MAX_INTENTS)
+        d["intents"] = d["intents"][:MAX_INTENTS]
+    # 空 open 强制产出（吸收 Cairn contracts：open 为空时不允许偷懒 no-op）：
+    # 若完全无 open 意图且不判 complete 且未提案 → 补一条广度摸排意图。
+    # 否则池会 wait→止损把题换掉（reason 偷懒 = 丢题）。
+    if (not d.get("complete") and not open_intents and not d.get("intents")):
+        _log.warning("[reason] %s open 意图为空且未提案——补默认广度摸排意图", project)
+        d["intents"] = [{"description": f"继续推进 {project}：对未覆盖攻击面做广度摸排（reason 未提案方向）"}]
+        d["noop"] = False
     return d
 
 

@@ -350,6 +350,91 @@ def test_board_claim_expiry() -> None:
     b.close()
 
 
+def test_parse_json_robust() -> None:
+    """吸收 Cairn output_parser：{ 位置 raw_decode 回溯（叙事包裹/病 JSON）。"""
+    # 前后夹带叙事文本的病 JSON（整体 loads 失败，raw_decode 应命中）
+    check("parse narrated json",
+          parse_json("好的，这是分析结果：\n{'a': 1} 说明如下") is not None or
+          parse_json("好的，这是分析结果：\n{\"a\": 1} 说明如下") == {"a": 1})
+    # 标准 JSON 前有脏文本 + 标准 JSON 后有噪音
+    check("parse prefix noise", parse_json("xxx\n{\"complete\": false, \"why\": \"w\"}\nyyy") is not None)
+    # 多个 { 但第一个不是 JSON 对象（数组/嵌套），raw_decode 扫到第二个命中
+    check("parse multi-brace", parse_json("prefix [1,2] suffix\n{\"k\": \"v\"} tail") is not None)
+    # 纯垃圾仍 None
+    check("parse still garbage -> None", parse_json("这不是 json 没有任何花括号") is None)
+
+
+def test_board_intent_dedup() -> None:
+    """意图去重：uq_board_intents_desc 唯一索引 + INSERT OR IGNORE。"""
+    b, _d = _fresh_board()
+    iid1, ok1 = b.create_intent("p-1", "验证候选 XSS")
+    check("intent create first", ok1 and iid1 > 0)
+    iid2, ok2 = b.create_intent("p-1", "验证候选 XSS")
+    check("intent dedup same description", not ok2 and iid2 == 0)
+    # 不同项目允许同名意图
+    iid3, ok3 = b.create_intent("p-2", "验证候选 XSS")
+    check("intent allowed across projects", ok3 and iid3 > 0 and iid3 != iid1)
+    b.close()
+
+
+def test_reason_payload_normalize() -> None:
+    """契约双形态（accepted 包装 / 裸形态 / 单数 intent）归一。"""
+    from graphpt.search.reason_cli import _normalize_reason_payload
+    # 裸形态原样
+    bare = {"complete": False, "intents": [{"description": "a"}], "noop": False}
+    r = _normalize_reason_payload(bare)
+    check("bare payload passes through", r is bare)
+    # accepted 包装形态 → 解包 data
+    wrapped = {"accepted": True, "data": {"complete": True, "complete_from": ["f"], "why": "w"}}
+    r2 = _normalize_reason_payload(wrapped)
+    check("wrapped payload unwrapped", r2 is not None and r2.get("complete") is True)
+    # 有 complete 键的字符串{…}形状不误解包
+    fake = {"complete": False, "data": {"complete": True}}
+    r3 = _normalize_reason_payload(fake)
+    check("complete-key payload not unwrapped", r3.get("complete") is False)
+    # 单数 intent 键
+    single = {"complete": False, "intent": {"description": "单条"}, "noop": False}
+    r4 = _normalize_reason_payload(single)
+    check("singular intent key accepted",
+          isinstance(r4.get("intents"), list) and r4["intents"][0]["description"] == "单条")
+    # 垃圾
+    check("payload garbage -> None", _normalize_reason_payload("nope") is None)
+
+
+def test_reason_empty_open_forced() -> None:
+    """空 open 强制产出 + max_intents 截断（吸收 Cairn contracts）。"""
+    from graphpt.search.reason_cli import MAX_INTENTS, run_reason_eval
+    b, _d = _fresh_board()
+
+    class _SysLlm(FakeLLM):
+        def __init__(self, responses):
+            super().__init__(responses)
+            self.system_seen = []
+
+        def chat(self, system, user, **kw):
+            self.system_seen.append((str(system)[:60], len(user)))
+            return super().chat(system, user, **kw)
+
+    import json as _json
+    # 场景1：空 open + 无 complete + 无 intents（模型偷懒 noop）→ 强制补广度意图
+    llm1 = _SysLlm([_json.dumps({"complete": False, "intents": [], "noop": True, "why": "没想法"})])
+    d1 = run_reason_eval(llm1, project="p-1")
+    check("empty-open forced intent created",
+          d1 is not None and d1.get("noop") is False and len(d1.get("intents") or []) == 1,
+          str(d1))
+
+    # 场景2：意图数超上限 → 截断
+    many = {"complete": False,
+            "intents": [{"description": f"方向{i}"} for i in range(MAX_INTENTS + 5)],
+            "noop": False}
+    llm2 = _SysLlm([_json.dumps(many)])
+    d2 = run_reason_eval(llm2, project="p-1")
+    check("intents truncated to MAX_INTENTS",
+          d2 is not None and len(d2["intents"]) == MAX_INTENTS,
+          f"got {len(d2['intents'])}")
+    b.close()
+
+
 def main() -> int:
     test_board_local()
     test_board_degraded_path()
@@ -360,6 +445,10 @@ def main() -> int:
     test_prompt_block_injection()
     test_session_flow_without_model()
     test_board_claim_expiry()
+    test_parse_json_robust()
+    test_board_intent_dedup()
+    test_reason_payload_normalize()
+    test_reason_empty_open_forced()
     print()
     if _FAILURES:
         print(f"FAILED: {len(_FAILURES)} -> {_FAILURES}")

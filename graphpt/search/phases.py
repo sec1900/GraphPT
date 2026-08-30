@@ -22,6 +22,35 @@ _JSON_RX = re.compile(r"\{.*\}", re.DOTALL)
 # ---------------------------------------------------------------------------
 
 
+def _try_loads(s: str) -> dict | None:
+    try:
+        d = json.loads(s)
+        return d if isinstance(d, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _raw_decode_scan(s: str, limit_chars: int = 50_000) -> dict | None:
+    """{ 位置 raw_decode 回溯（吸收 Cairn output_parser.py:29-35）。
+
+    模型输出常在 JSON 前后夹带叙事文本/脏字节，json.loads 整体失败时，
+    枚举每个 `{` 位置做 JSONDecoder.raw_decode，命中第一个可解码对象。
+    仅接受 dict；扫描体积受限防 O(n²) 失控。
+    """
+    s = s[:limit_chars]
+    dec = json.JSONDecoder()
+    for i, ch in enumerate(s):
+        if ch != "{":
+            continue
+        try:
+            d, _end = dec.raw_decode(s[i:])
+        except ValueError:
+            continue
+        if isinstance(d, dict):
+            return d
+    return None
+
+
 def parse_json(text: str | None) -> dict | None:
     if not text:
         return None
@@ -36,12 +65,14 @@ def parse_json(text: str | None) -> dict | None:
         frag = m.group(0)
         cands += [frag, frag[: frag.rfind("}") + 1]]
     for c in cands:
-        try:
-            d = json.loads(c)
-            if isinstance(d, dict):
-                return d
-        except Exception:
-            continue
+        d = _try_loads(c)
+        if d is not None:
+            return d
+    # 一级容错全败 → raw_decode 回溯扫 `{` 位置（容忍叙事包裹/病 JSON 制品）
+    for c in cands:
+        d = _raw_decode_scan(c)
+        if d is not None:
+            return d
     return None
 
 

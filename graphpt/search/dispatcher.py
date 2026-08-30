@@ -125,6 +125,14 @@ class Dispatcher:
         return {"action": "wait", "intent_id": None, "why": "静默检测"}
 
     # ---------- 状态持久化（pool 跨进程重启恢复） ----------
+    #
+    # 对齐 Cairn ReasonCheckpoint（models.py:20-25）：基线三元组
+    # (fact_count, hint_count, open 有无) 随槽状态持久化，只按"新态势"触发 reason。
+    # 与 Cairn 的差异（有意）：reason lease 不持久化——
+    # Cairn 服务端 lease + 惰性过期防的是多 worker 并发双 reason；
+    # GraphPT 每槽同时一个子进程（pool 串行），双 reason 不可能，
+    # 且进程崩溃后 lease 保持反而会把题拖进 wait→止损。故 `_reason_running`
+    # 保持内存态，崩溃重启后由态势对比自然收敛。
 
     def state(self) -> dict:
         """可 JSON 序列化的调度状态（供 pool 槽存储）。"""

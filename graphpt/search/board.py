@@ -75,6 +75,8 @@ CREATE TABLE IF NOT EXISTS board_intents (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_board_intents_project ON board_intents(project, status, id);
+-- 注意：uq_board_intents_desc 唯一索引不在这里建（老库重复数据会令
+-- executescript 整体失败）——见 __init__ 中的独立容错创建。
 """
 
 _FACT_LIMIT = 2000
@@ -108,6 +110,16 @@ class Board:
             with self._lock:
                 self._conn.executescript(_SCHEMA)
                 self._conn.commit()
+            # 意图去重索引独立建：老库若已积累重复意图 → 唯一索引失败，
+            # 只记录错误降级（去重失效），不拖垮整个 board（INSERT OR IGNORE 需索引才生效）。
+            try:
+                with self._lock:
+                    self._conn.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_board_intents_desc "
+                        "ON board_intents(project, description)")
+                    self._conn.commit()
+            except Exception as e:  # noqa: BLE001
+                _log.error("board 意图去重索引建立失败（库中可能存在重复意图）: %s", e)
             self._ok = True
         except Exception as e:  # noqa: BLE001 — 黑板故障不应拖垮解题
             _log.error("board init failed (%s): %s", self.path, e)
