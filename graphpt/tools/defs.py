@@ -594,6 +594,10 @@ def _exec_update_todos(
 
 # 子代理无工具黑名单
 _SUBAGENT_EXCLUDED_TOOLS: frozenset[str] = frozenset()
+# 子代理总时间盒（2026-08-31）：嵌套 loop 无独立超时时的兜底看门狗阈值。
+# 实测长探测子代理可静默跑 15 分钟（如 xss-injection 全站 XSS 测试），
+# 阈值取 1800s（30 分钟）——兜底切断"真死循环"，不误杀长任务。
+_SUBAGENT_TIMEOUT_S = 1800
 
 
 def _build_predefined_subagents() -> dict[str, str]:
@@ -800,6 +804,33 @@ def _exec_dispatch_agent(
         return msgs
 
     try:
+        # 子代理总时间盒看门狗（2026-08-31）：嵌套 loop 原本无独立超时——
+        # 子代理卡死在某次调用时整个主线程陪死且无兜底（testfire 挖洞三次
+        # 卡死死活均在派发子代理之后，日志静默/CPU 0）。设独立 sub_stop：
+        # 超时或主 stop 触发 → 终止嵌套 loop，把控制权还给主代理。
+        import threading as _th
+        import time as _time
+        sub_stop = _th.Event()
+        _deadline = _time.monotonic() + _SUBAGENT_TIMEOUT_S
+
+        def _sub_watchdog():
+            while not sub_stop.is_set():
+                if (_time.monotonic() >= _deadline
+                        or (stop_event is not None and stop_event.is_set())):
+                    sub_stop.set()
+                    return
+                _time.sleep(1.0)
+
+        _th.Thread(target=_sub_watchdog, daemon=True).start()
+        _timed_out = {"v": False}
+
+        def _sub_status_wrap(msg: str, *, _l: str = sub_label, _cb: Callable[[str], None] | None = _parent_status) -> None:
+            if _cb is not None:
+                try:
+                    _cb(f"↳ [{_l}] {msg}")
+                except Exception:  # noqa: BLE001
+                    pass
+
         result = run_agent_loop(
             ai_config=ctx["ai_config"],
             system_prompt=sub_system_prompt,
@@ -810,13 +841,16 @@ def _exec_dispatch_agent(
             db_file=db_file,
             task_id=0,  # 子代理用 0：内部工具事件不发主屏 SSE（对齐 Claude Code 折叠子代理过程），
                         # 中间步骤也不落库——它是隔离临时上下文，只回传 summary 给主代理。
-            stop_event=stop_event,
+            stop_event=sub_stop,
             session_role=f"subagent:{desc_key}",  # 领域溯源：save_vulnerability 标记 agent_source
             hooks=sub_hooks,
-            on_status=sub_on_status,
+            on_status=_sub_status_wrap if _parent_status is not None else None,
             steering_provider=_sub_steering,
         )
+        if sub_stop.is_set() and _time.monotonic() >= _deadline:
+            _timed_out["v"] = True
     finally:
+        sub_stop.set()
         if progress:
             try:
                 progress["end"]()
@@ -877,6 +911,17 @@ def _exec_dispatch_agent(
         if str(rec.get("tool_name", "")) == "save_vulnerability":
             saved_directly += 1
     no_output = (ingested == 0 and saved_directly == 0)
+
+    if _timed_out["v"]:
+        return {
+            "success": False,
+            "error": "subagent_timeout",
+            "message": f"子代理 {desc_key} 超过 {_SUBAGENT_TIMEOUT_S}s 总时间盒被强制终止",
+            "summary": (result.final_text or "")[:500] if result else "",
+            "findings_ingested": ingested,
+            "saved_directly": saved_directly,
+            "depth": depth + 1,
+        }
 
     summary = (result.final_text or "").strip() or "[子代理未产出文字结论]"
     return {
