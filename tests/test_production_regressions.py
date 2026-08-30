@@ -342,7 +342,10 @@ def test_graph_agent_wires_effective_prompt_tools_and_steering(monkeypatch, tmp_
 
     task = captured["task"]
     assert result.final_text == "done"
-    assert task.system_prompt_override == "prompt:asset-a"
+    # 2026-08-31 合并后：graph_agent 不再覆盖 system/user 提示词（走统一
+    # build_unified_system/user，单一事实源 agent_prompt.yaml）——见 graph_agent 注释
+    assert task.system_prompt_override is None
+    assert task.user_prompt_override is None
     assert task.tool_schemas == [{"asset": "asset-a"}]
     assert task.session_role == "graph_agent:asset-a"
     assert task.db_file.endswith("graphpt.db")

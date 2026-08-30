@@ -126,12 +126,18 @@ def run_graph_agent(
     stop_event: threading.Event | None = None,
     prior_messages: list[dict[str, Any]] | None = None,
     steering_provider: Callable[[], list[str]] | None = None,
+    max_iterations: int = 18,
+    timebox_s: int = 900,
 ) -> GraphAgentResult:
     """启动渗透测试 Agent（统一会话骨架的薄适配器）。
 
     阶段门禁/伪状态机已废除：全部收敛到 AgentSession（唯一会话骨架，
     模式 B：零中途干预，reason 调度层执行，conclude 落板）。
     本函数保留外部签名，内部委托 graphpt.search.agent_session.AgentSession。
+
+    max_iterations / timebox_s 可调：默认 18 轮/900s 为短会话预算
+    （审计教训：35 轮后半程全是重放）。需要完整"侦察→利用→落库"全链
+    的深挖任务（如挖洞能力测试）应显式加大，如 80 轮/2700s。
     """
     from graphpt.cli.app import build_ai_config
     from graphpt.common.settings import AppSettings
@@ -167,6 +173,11 @@ def run_graph_agent(
         )
 
     # ---- 统一会话骨架 ----
+    # 2026-08-31 真正合并：不再覆盖 system/user 提示词（SRC 曾单独一套
+    # graph_agent 模板，与 CTF 的 build_unified_* 双轨）。现在全部走
+    # build_unified_system/user（已并入 schema_knowledge + Attack 指令，
+    # 单一事实源 config/agent_prompt.yaml）；域差异只保留在 conclude
+    # （SRC_CONCLUDE_SYSTEM）与 kb_inject 等外围。
     from graphpt.search.agent_session import AgentTask, AgentSession
     task = AgentTask(
         target=asset_id,
@@ -177,9 +188,9 @@ def run_graph_agent(
         db_file=str(db_file),
         task_id=synthetic_task_id,
         session_role=f"graph_agent:{asset_id}",
-        system_prompt_override=_build_system_prompt(asset_id),
-        user_prompt_override=user_prompt,
         tool_schemas=_get_tool_schemas(asset_id),
+        max_iterations=max_iterations,
+        timebox_s=timebox_s,
         # SRC/实战域开放组件经验注入（同组件 earned 卡；CTF 域盲测默认关）
         kb_inject=True,
     )

@@ -1039,12 +1039,15 @@ class PipelineExecutor:
                         WITH sr, row
                         MATCH (asset:Asset {id: $asset_id})
                         MERGE (asset)-[:HAS_SCAN_RUN]->(sr)
-                        CALL (sr, row) {
+                        WITH sr, row
+                        CALL {
+                          WITH sr, row
                           UNWIND row.node_ids AS node_id
                           MATCH (target {id: node_id})
                           MERGE (sr)-[:RAN]->(target)
                           RETURN count(*) AS linked
                         }
+                        RETURN count(sr) AS marked
                         """,
                         rows=rows, tool=tool, asset_id=self.asset_id,
                         fc=findings_count, now=now,

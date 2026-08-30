@@ -162,8 +162,32 @@ def build_unified_system(task: AgentTask) -> str:
         "- 确认的漏洞证据写工作区证据文件（如 EVIDENCE.md 追加：命令+响应片段）。\n"
         "- 没有把握的结论不写，宁缺毋滥。"
     )
+    # 图模式知识 + 单阶段 Attack 指令（2026-08-31 并入：这是 SRC/实战挖洞的
+    # 核心提示词（graph_agent 曾单独维护一套），合并后 CTF/SRC 共用同一主干，
+    # 消除"两条提示词路径"——唯一事实源 config/agent_prompt.yaml。
+    graph_block = ""
+    try:
+        from graphpt.core.graph_agent_prompt import GRAPH_SCHEMA_KNOWLEDGE
+        import yaml as _yaml
+        _cfg = {}
+        try:
+            _p = Path(__file__).resolve().parents[1] / "config" / "agent_prompt.yaml"
+            if _p.exists():
+                _cfg = _yaml.safe_load(_p.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            _cfg = {}
+        schema = _cfg.get("schema_knowledge") or GRAPH_SCHEMA_KNOWLEDGE
+        attack = _cfg.get("attack_instruction") or ""
+        if schema or attack:
+            graph_block = (
+                "\n## 图数据库工作模式（已联网资产/已扫描数据）\n"
+                + str(schema) + "\n"
+                + (str(attack) if attack else "")
+            )
+    except Exception as e:  # noqa: BLE001
+        _log.warning("build_unified_system graph_block failed: %s", e)
     return (identity + "\n\n" + methodology + "\n" + common_methodology
-            + "\n" + spec_block).strip()
+            + "\n" + spec_block + graph_block).strip()
 
 
 def build_unified_user(task: AgentTask) -> str:
