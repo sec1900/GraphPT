@@ -248,6 +248,25 @@ def _sync_stop_event(
     return stop_event.is_set()
 
 
+def _drop_oldest_round(messages: list[dict[str, Any]]) -> int:
+    """丢弃最早的一轮对话（跳过开头 system）：assistant(+tool_calls)+tool 与其后的 user。
+
+    上下文超限压缩的第二级手段：整轮剪掉比截断单条更快降体积。
+    返回丢弃的消息数；无 assistant 时返回 0。
+    """
+    for i, m in enumerate(messages):
+        if m.get("role") != "assistant":
+            continue
+        j = i
+        while j < len(messages) and messages[j].get("role") in ("assistant", "tool"):
+            j += 1
+        if j < len(messages) and messages[j].get("role") == "user":
+            j += 1
+        del messages[i:j]
+        return j - i
+    return 0
+
+
 def _stopped_tool_result() -> dict[str, Any]:
     """统一的停止结果，便于审计与前端展示。"""
     return {
@@ -1198,6 +1217,7 @@ def run_agent_loop(
 
     from graphpt.common.settings import is_debug as _is_debug
     _debug = _is_debug()
+    _ctx_budget = {"n": 0}  # 上下文超限 429 启发式压缩次数预算（见 retryable 分支）
 
     tool_names = [t.get("function", {}).get("name", "?") for t in tools] if tools else []
     _log.info("agent_loop_start", extra={
@@ -1352,6 +1372,32 @@ def run_agent_loop(
                                   "retryable": bool(err["retryable"]), "error_detail": err["detail"]})
             # 可重试错误（429/500/502/503/504/网络/超时）：跳过本次迭代，继续循环
             if err.get("retryable"):
+                # 【上下文超限 429 专治】中转站对超长上下文直接 429 拒绝（429 语义
+                # 在这里是"上下文超限"，不是瞬时限流——不减少上下文的重试=死循环，
+                # 门户日志常见 status_code=429 context too long 刷屏）。
+                # 命中特征时：1) 激进压缩工具输出 2) 整轮剪除 3) 最多两次启发式，
+                # 仍失败显式终止（绝不静默空转）。
+                _ctx_hit = (
+                    err.get("code") == "429"
+                    and any(k in str(exc).lower() for k in
+                           ("上下文", "context", "too long", "过长", "length", "limit"))
+                )
+                if _ctx_hit:
+                    _ctx_budget["n"] = _ctx_budget.get("n", 0) + 1
+                    if _ctx_budget["n"] <= 2:
+                        n1 = _compact_old_tool_outputs(
+                            messages, keep_recent_tools=4, head_chars=200)
+                        if n1 == 0:
+                            _drop_oldest_round(messages)
+                        _log.warning(
+                            "agent_loop_ctx_overflow_compress",
+                            extra={"task_id": task_id, "step_id": step_id,
+                                   "iteration": iteration,
+                                   "compact_round": _ctx_budget["n"], "dropped": n1})
+                        continue
+                    result.final_text = (
+                        f"[AI 上下文超限且压缩后仍失败: {err['summary']}]")
+                    break
                 _log.info("agent_loop_ai_call_retryable", extra={
                     "task_id": task_id, "step_id": step_id,
                     "iteration": iteration, "error_code": err["code"],
