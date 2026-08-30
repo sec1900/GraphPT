@@ -182,10 +182,11 @@ def _spawn_task(task_type: str, challenge: str, slot_idx: int, st: dict,
             env = dict(os.environ)
             env["PYTHONIOENCODING"] = "utf-8"
             if task_type in ("driver", "src"):
-                # 【统一入口】全部任务走 run_task（一套 agent/提示词/执行；无任务类型差异）。
-                cmd = [sys.executable, "-u", "-m", "graphpt.search.run_task",
+                # 【统一入口】多轮接力驱动器（6300 战术现代形态）：短会话多轮 +
+                # board handoff 续力 + 递增时间盒 + 干跑止损。CTF/SRC 一套。
+                cmd = [sys.executable, "-u", "-m", "graphpt.search.relay_runner",
                        "--target", challenge,
-                       "--timebox", str(min(timebox, 600)),
+                       "--rounds", "600,900,1500",
                        "--objective", objective]
             elif task_type == "reason":
                 cmd = [sys.executable, "-u", "-m", "graphpt.search.reason_cli",
