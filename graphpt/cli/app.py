@@ -503,6 +503,8 @@ def _build_turn_context(browser_task_id: int | None = None) -> str:
 # 项目记忆文件（对齐 Claude Code）：CLI 启动时读入并注入系统提示，让模型遵循
 # 项目自带的工作纪律/目录约定/测试要求，无需用户每轮重述。
 # 顺序即优先级：CLAUDE.md（主指令）→ AGENTS.md（目录归属/风险边界）→ .claude/rules/*.md。
+# 注（2026-08-30）：CLAUDE.md/AGENTS.md 已在 codex 重构中移除，当前实际加载源是
+# .claude/rules/*.md；机制保留——未来写回 CLAUDE.md 时自动生效，文件缺失逐个跳过。
 
 
 def _load_project_memory() -> str:

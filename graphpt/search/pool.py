@@ -15,7 +15,8 @@
                 正常完成自动从队列补下一题
 - 状态：data/agent_pool.json（JSON 文件，进程重启可恢复）
 
-Phase 1 将把本池并入 web/fleet（/api/agent/pool 端点），此处先提供系统级 CLI+守护。
+已接 web/fleet（/api/agent/pool/{status,start,suspend,resume,destroy,queue} 端点 +
+前端 agent 池面板），本模块同时提供 CLI 与 daemon 入口。
 """
 
 from __future__ import annotations

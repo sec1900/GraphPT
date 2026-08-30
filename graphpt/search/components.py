@@ -6,7 +6,12 @@
 - 指纹表：组件名 → 正则（Server 头 / 页面特征 / 路径特征 / JS 特征）
 - identify_components(snapshot) : 对侦察快照（响应头+body 片段）识别组件列表
 - component_block(names) : 命中组件的卡片文本（限长，优先命中组件）
-- 接线：SRC/CTF 域在侦察到指纹时注入（graph_agent steering 或 ctf prompt）
+- 接线状态（2026-08-30）：
+    * 沉淀侧已接：agent_session.run() 会话成功（flag 形态证据）→ earn_card_from_success
+    * 注入侧待接：earned_block/component_block 的调用点需要"会话中途的侦察快照"，
+      主循环 steering 支持流式工具输出（快照进 steering）时在此挂载；
+      在此之前卡片文件由 earn 沉淀，人工可编辑作为方向参考
+- earned 卡（自身经验）注入盲测合法；archive 卡永不自动注入
 
 数据：data/kb/components/<name>.md（本模块提供指纹表，卡片文件与之一一对应）。
 """
@@ -87,7 +92,10 @@ def earn_card_from_success(evidence_window: str, *, timeout: int = 60) -> str | 
     - 输入：成功会话的证据窗口（命令+输出，去掉 flag 值）
     - 输出：写入 earned/<component>.md（组件 slug 由识别或 LLM 命名）
     - 纯自身经验泛化（盲测合法）；失败静默返回 None
+    - GRAPHPT_EARN_CARDS=0 可整体关闭（测试环境避免写仓库）
     """
+    if os.environ.get("GRAPHPT_EARN_CARDS", "1") == "0":
+        return None
     try:
         from graphpt.search.llm_mini import MiniLLM
         from graphpt.search.phases import parse_json

@@ -37,23 +37,3 @@ def build_evidence_section(project: str, max_facts: int = 100) -> str:
         return "\n".join(lines)
     finally:
         b.close()
-
-
-def append_evidence_to_md(md_path: str, project: str) -> bool:
-    """把证据链段追加进已生成的 md 报告文件（幂等：含标记则跳过）。"""
-    try:
-        if not os.path.isfile(md_path):
-            return False
-        with open(md_path, encoding="utf-8") as f:
-            raw = f.read()
-        if "## 证据链（事实板）" in raw:
-            return False
-        sec = build_evidence_section(project)
-        if not sec:
-            return False
-        with open(md_path, "a", encoding="utf-8") as f:
-            f.write("\n" + sec)
-        return True
-    except Exception as e:  # noqa: BLE001
-        _log.warning("append_evidence_to_md failed: %s", e)
-        return False

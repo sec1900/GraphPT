@@ -132,24 +132,16 @@ class SrcSearchHook:
 
         返回 {"facts_added": n, "conclude": concl|None}；任何失败安全降级。
         """
-        from graphpt.search.phases import run_conclude
+        from graphpt.search.phases import run_conclude_retry
         concl = None
         if self.llm is not None and (log_tail or "").strip():
-            for _size in (12000, 4000):
-                try:
-                    concl = run_conclude(
-                        self.llm,
-                        objective=self.objective,
-                        facts_text=self.board.facts_text(self.asset_id, limit=20),
-                        log_tail=(log_tail or "")[-_size:],
-                        system=SRC_CONCLUDE_SYSTEM,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    _log.warning("[src:%s] conclude failed: %s", self.asset_id, e)
-                    concl = None
-                if concl is not None:
-                    break
-                _log.warning("[src:%s] conclude %d 字符输入失败，降级重试", self.asset_id, _size)
+            concl = run_conclude_retry(
+                self.llm,
+                objective=self.objective,
+                facts_text=self.board.facts_text(self.asset_id, limit=20),
+                log_tail=log_tail or "",
+                system=SRC_CONCLUDE_SYSTEM,
+            )
         n_added = 0
         if concl:
             n_added = len(self.board.add_facts(self.asset_id, concl.get("facts") or [],
@@ -165,16 +157,6 @@ class SrcSearchHook:
             f"（{int(time.monotonic() - self.t0)}s）；原始输出见会话日志",
             source="conclude", session_idx=0)
         return {"facts_added": n_added, "conclude": concl}
-
-
-def build_src_conclude_user(objective: str, facts_text: str, log_tail: str) -> str:
-    """SRC conclude 的 user 组装（与 ctf 版一致：只喂尾部最新段）。"""
-    parts = []
-    if objective:
-        parts.append(f"任务目标/资产信息: {objective[:500]}")
-    parts.append("此前已确认事实（避免重复）:\n" + (facts_text or "(空)"))
-    parts.append("本次会话工具输出日志（已截断，尾部最新）:\n" + (log_tail[-12000:] or "(空)"))
-    return "\n\n".join(parts)
 
 
 def record_verify_results(board, asset_id: str, report: dict) -> int:

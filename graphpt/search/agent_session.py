@@ -301,21 +301,14 @@ class AgentSession:
             wd.join(timeout=2)
 
         # ---- conclude 收尾审计：失败也有产出（模式 B：只在会话结束时） ----
-        from graphpt.search.phases import run_conclude
+        from graphpt.search.phases import run_conclude_retry
         concl = None
-        if mini_llm is not None and res.observed_output.strip():
-            for _size in (12000, 4000):
-                try:
-                    concl = run_conclude(
-                        mini_llm, objective=task.objective or task.target,
-                        facts_text=board.facts_text(task.board_project(), limit=20),
-                        log_tail=res.observed_output[-_size:],
-                        system=self.conclude_system)
-                except Exception as e:  # noqa: BLE001
-                    _log.warning("[agent:%s] conclude failed: %s", task.target, e)
-                    concl = None
-                if concl is not None:
-                    break
+        if res.observed_output.strip():
+            concl = run_conclude_retry(
+                mini_llm, objective=task.objective or task.target,
+                facts_text=board.facts_text(task.board_project(), limit=20),
+                log_tail=res.observed_output,
+                system=self.conclude_system)
         if concl:
             res.facts_added = len(board.add_facts(
                 task.board_project(), concl.get("facts") or [],
@@ -336,4 +329,15 @@ class AgentSession:
         from graphpt.ctf.extract import extract_flags
         res.flags = list(dict.fromkeys(extract_flags(res.observed_output, "flag{...}")))
         _log.info("[agent:%s] flag 形态候选 %d 个", task.target, len(res.flags))
+
+        # ---- 组件经验沉淀（components 闭环的沉淀侧）：成功 → 自动泛化自学习卡 ----
+        # 拿到 flag 形态证据 = 本次会话具有真实成功脚印 → 沉淀到 data/kb/earned/
+        # （同组件后学注入由下一阶段 steering 流式快照支持；失败静默零副作用，
+        #  GRAPHPT_EARN_CARDS=0 可关——测试环境避免写仓库）。
+        if res.flags and res.observed_output.strip():
+            try:
+                from graphpt.search.components import earn_card_from_success
+                earn_card_from_success(res.observed_output[-8000:])
+            except Exception:  # noqa: BLE001
+                _log.warning("[agent:%s] earn card failed", task.target)
         return res

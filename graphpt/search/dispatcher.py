@@ -157,29 +157,3 @@ class Dispatcher:
 
     def reason_release(self) -> None:
         self._reason_running = False
-
-    # ---------- 任务结果回写 ----------
-
-    def on_reason_result(self, result: dict | None) -> None:
-        """reason 结果落图：{'complete': bool, 'intents': [desc...], 'noop': bool}。
-
-        complete=True 时由调用方写 complete fact；intents 落 board。
-        """
-        if not result:
-            return
-        if result.get("complete"):
-            if not any(f.get("source") == "complete" for f in
-                       self.board.recent_facts(self.project, limit=10)):
-                self.board.add_fact(
-                    self.project, "任务完成判定（reason）",
-                    source="complete", grounding="reason", verified=1)
-            return
-        for desc in result.get("intents") or []:
-            self.board.create_intent(self.project, str(desc)[:2000])
-
-    def on_explore_result(self, intent_id: int, fact_id: int | None) -> None:
-        """explore 结果：conclude intent（成功）或 release（失败，回 open）。"""
-        if fact_id:
-            self.board.conclude_intent(intent_id, fact_id)
-        else:
-            self.board.release_intent(intent_id)

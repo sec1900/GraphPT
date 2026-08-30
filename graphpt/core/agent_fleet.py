@@ -223,6 +223,11 @@ def worker_agent_execute_mission(mission: dict[str, Any], asset_id: str) -> dict
       2. 决策（该干什么）
       3. 执行（调用工具）
       4. 写图（记录结果）
+
+    现状（2026-08-30）：执行体未实现 → **显式 disabled，不写假结果图**。
+    三个执行体（漏洞利用/横向移动/续扫）是下一阶段工作，当前使命派发了也只返回
+    disabled 让主控可见，杜绝"status=ok, findings=0"的假成功写进 Neo4j
+    （历史教训：假结果会污染图查询与凭据复用决策）。
     """
     from graphpt.collector.neo4j_client import get_graph_writer
 
@@ -237,48 +242,38 @@ def worker_agent_execute_mission(mission: dict[str, Any], asset_id: str) -> dict
     # 2. 决策（worker 侧简单决策，复杂决策由主控做）
     action = mission.get("action", "none")
 
-    # 3. 执行
-    result = {"action": action, "status": "pending"}
-
-    if action == "exploit_vuln":
-        # 利用漏洞拿凭据
-        result = _execute_exploit_vuln(writer, asset_id)
-    elif action == "lateral_movement":
-        # 横向移动
-        result = _execute_lateral_movement(writer, asset_id)
-    elif action == "continue_scan":
-        # 继续扫描
-        result = _execute_continue_scan(writer, asset_id)
-    else:
-        result = {"action": action, "status": "skipped", "reason": "unknown_action"}
-
-    # 4. 写图（记录结果）
-    _write_agent_result(writer, asset_id, mission, result)
+    # 3. 执行（执行体未实现 → disabled；主控决策侧应据此不再派发同类使命）
+    result = {"action": action, "status": "disabled",
+              "reason": "执行体未实现（agent_fleet 下一阶段），不落地假结果"}
 
     return result
 
 
 def _execute_exploit_vuln(writer: Any, asset_id: str) -> dict[str, Any]:
-    """执行漏洞利用（拿凭据）。"""
-    # TODO: 实际执行漏洞利用逻辑
-    return {"action": "exploit_vuln", "status": "ok", "findings": 0}
+    """执行漏洞利用（拿凭据）。【未实现】下一阶段接入：
+    对该资产 verified/candidate 漏洞跑 verify_replay / sqlmap / graph_agent 会话。"""
+    raise NotImplementedError("agent_fleet 执行体未实现（见 worker_agent_execute_mission）")
 
 
 def _execute_lateral_movement(writer: Any, asset_id: str) -> dict[str, Any]:
-    """执行横向移动。"""
-    # TODO: 实际执行横向移动逻辑
-    return {"action": "lateral_movement", "status": "ok", "findings": 0}
+    """执行横向移动。【未实现】下一阶段接入：
+    用图上已有凭据对可及目标做 brutespray/hydra/凭据复用。"""
+    raise NotImplementedError("agent_fleet 执行体未实现（见 worker_agent_execute_mission）")
 
 
 def _execute_continue_scan(writer: Any, asset_id: str) -> dict[str, Any]:
-    """执行继续扫描。"""
-    # TODO: 实际执行继续扫描逻辑
-    return {"action": "continue_scan", "status": "ok", "findings": 0}
+    """执行继续扫描。【未实现】下一阶段接入：
+    触发 collector 对未覆盖攻击面补扫（或派 scan_tool 使命）。"""
+    raise NotImplementedError("agent_fleet 执行体未实现（见 worker_agent_execute_mission）")
 
 
 def _write_agent_result(writer: Any, asset_id: str, mission: dict[str, Any],
                         result: dict[str, Any]) -> None:
-    """写 agent 执行结果到图。"""
+    """写 agent 执行结果到图。
+
+    当前未接线（执行体未实现 → disabled 不写图）；执行体落地后由
+    worker_agent_execute_mission 在真实执行后调用。写上标记避免误判为死代码。
+    """
     try:
         with writer._driver.session() as s:
             s.run(

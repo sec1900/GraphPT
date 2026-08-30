@@ -92,7 +92,12 @@ def build_reason_user(objective: str, facts_text: str, recent_log: str,
 
 def run_reason(llm, *, objective: str = "", facts_text: str = "",
                recent_log: str = "", session_stats: str = "", timeout: int = 40) -> dict | None:
-    """返回 {"direction_ok", "verdict", "next_move", "dead"} 或 None（任何失败）。"""
+    """返回 {"direction_ok", "verdict", "next_move", "dead"} 或 None（任何失败）。
+
+    【DEPRECATED】生产 reason 已迁移到 graphpt.search.reason_cli.run_reason_eval
+    （complete/intents 契约 + 完成代码门），本函数及其 REASON_SYSTEM 仅保留给
+    离线测试（direction_ok 会话内审计语义已按用户决策移除，勿在生产接线）。
+    """
     if llm is None:
         return None
     # deepseek-v4-flash 为推理型（先产 reasoning_content 再产 content），
@@ -205,3 +210,30 @@ def run_conclude(llm, *, objective: str = "", facts_text: str = "",
         "candidate_flags": flags,
         "handoff": handoff,
     }
+
+
+# ---------------------------------------------------------------------------
+# conclude 重试包装 —— 长日志超时/解析失败时的降级重试（共享实现）
+# ---------------------------------------------------------------------------
+
+def run_conclude_retry(llm, *, objective: str = "", facts_text: str = "",
+                       log_tail: str = "", system: str | None = None,
+                       sizes: tuple[int, ...] = (12000, 4000)) -> dict | None:
+    """先喂大窗口，超时/失败时降级用更小窗口重试；全部失败返回 None。
+
+    agent_session / src_domain 共用同一段降级逻辑（2026-08-30 收敛，
+    此前两处各自内联实现，行为漂移风险）。llm 为 None 时直接返回 None。
+    """
+    if llm is None:
+        return None
+    for _size in sizes:
+        try:
+            concl = run_conclude(llm, objective=objective, facts_text=facts_text,
+                                 log_tail=(log_tail or "")[-_size:], system=system)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("conclude failed@%d: %s", _size, e)
+            concl = None
+        if concl is not None:
+            return concl
+        _log.warning("conclude %d 字符输入失败，降级重试", _size)
+    return None
