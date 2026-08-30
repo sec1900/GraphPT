@@ -205,6 +205,9 @@ def run_solve_session(
             timebox_s=session_seconds,
             max_iterations=max_iterations,
             tried_commands=tuple(tried_commands or []),
+            # 2026-08-31 政策（用户拍板）：允许自产知识卡——组件级 earned 卡
+            # （自身经验沉淀，非外部知识）在 CTF 域注入，同组件题可复用打法。
+            kb_inject=True,
         )
         r = AgentSession(atask, ai_config=ai_config).run(
             on_status=on_status, stop_event=stop_event)

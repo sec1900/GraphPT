@@ -191,9 +191,12 @@ def build_task_prompt(
 
     board_block = _board_block(task)
 
-    # 【盲测原则】不再注入跨任务沉淀：MEMORY.md/kb 卡片可能含旧任务实例测出的
-    # 解法配方（等于把答案写进提示词）。agent 只依赖模型自身知识与本次任务
-    # 内产生的笔记（artifacts.json / board 本任务 facts）。
+    # 【知识注入政策 2026-08-31（用户拍板）】允许自产知识卡：
+    # - 禁止：外部解法卡（等于把答案写进提示词）
+    # - 允许：earned 卡（自身经验沉淀，components 机制，按同组件/同技术命中
+    #   在会话中注入；CTF 域 AgentTask.kb_inject=True 已开启）
+    # 其余跨任务上下文（MEMORY.md/kb 题码卡）维持不注入——agent 只依赖模型
+    # 自身知识与本次任务内笔记（artifacts.json / board 本任务 facts）。
     # P1-⑧ 结构化工件交接：上轮 artifacts.json（凭据/token/flag 候选/已写文件）
     artifacts_block = _artifacts_block(task.workdir)
 
