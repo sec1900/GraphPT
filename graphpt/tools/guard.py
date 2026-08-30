@@ -95,16 +95,21 @@ def reset_task(task_id: int) -> None:
 
 
 def _is_ctf_session() -> bool:
-    """CTF/靶场会话（session_role 前缀 ctf:）→ 放宽重复类护栏。
+    """agent 会话（CTF/挖洞/子代理）→ 放宽重复类护栏。
 
-    靶场多 flag 题要求对同一端点做 payload 变体枚举、精确重放取证——
+    靶场与授权挖洞都要求对同一端点做 payload 变体枚举、精确重放取证——
     通用会话的"同命令 ≥2 拦截 / 同模式 >3 硬切换"会把这些合法动作拦死
-    （P1-⑨）。安全底线（全网段扫描禁、破坏性写库禁）保持不放宽。
+    （P1-⑨；gzky VSB9 验证被 guard_blocked 实锤误伤）。安全底线
+    （全网段扫描禁、破坏性写库禁）保持不放宽。
     """
     try:
         from graphpt.core.agent_loop import _AGENT_RUN_CONTEXT
         ctx = _AGENT_RUN_CONTEXT.get({})
-        return str(ctx.get("session_role") or "").startswith("ctf:")
+        role = str(ctx.get("session_role") or "")
+        return (role.startswith("ctf:")
+                or role.startswith("graph_agent:")
+                or role.startswith("agent:")
+                or role.startswith("subagent:"))
     except Exception:
         return False
 
