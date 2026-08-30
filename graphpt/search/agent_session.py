@@ -227,14 +227,13 @@ def build_unified_user(task: AgentTask) -> str:
         lines.append("\n【本任务此前已执行过的命令】（别重复；从其结论的下一步开始，换新输入/新路径）")
         lines.extend("$ " + str(c)[:160] for c in tried)
     lines.append("现在开始。推荐先拿首页/指纹，形成可证伪的假设再验证。")
-    # 环境剧本 + 题型专家（CTF/SRC 通用注入；文件缺失/异常跳过——纯增益）。
-    # 环境剧本：OpenVPN/代理劫持/IP 重建/动态端口（靶场环境级经验，盲测安全）；
-    # 题型专家：按 objective 关键词推断题型给方法论视角（agent 自身经验库）。
+    # 环境剧本 + 题型专家（CTF/SRC 通用注入）。
+    # 环境剧本按 Cairn 纪律不内联正文（曾达 924 字占满 user 指令区）：
+    # 只给路径，agent 遇 VPN/代理/动态端口/IP 重建异常时 Read 按需取。
     try:
-        from graphpt.ctf.prompts import _expert_block, _playbook_block
-        pb = _playbook_block()
-        if pb:
-            lines.append("\n【靶场环境剧本（环境级知识，先读）】\n" + pb)
+        from graphpt.ctf.prompts import _expert_block
+        lines.append("【靶场环境剧本（如遇 VPN/代理劫持/动态端口/IP 重建等环境异常，"
+                     "先 Read 该文件再继续）：E:/GraphPT/data/ctf/playbooks/common.md】")
         ex = _expert_block(task.objective or "")
         if ex:
             lines.append(ex)
