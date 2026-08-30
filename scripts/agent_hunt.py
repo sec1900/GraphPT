@@ -63,6 +63,22 @@ def main() -> int:
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO)
+    # 取证：faulthandler 注册 SIGBREAK（Ctrl+Break）dump 线程栈，卡死时可外部取证；
+    # 同时注册 faulthandler.dump_traceback_later 兜底（每 9 分钟自动 dump 一次到 stderr，
+    # 卡死时日志里会留下最后线程栈——定位卡点而非盲猜）。
+    try:
+        import faulthandler
+        faulthandler.enable()
+        if sys.platform == "win32":
+            import signal as _sig
+            faulthandler.register(_sig.SIGBREAK, all_threads=True)
+        faulthandler.dump_traceback_later(9 * 60, repeat=True, exit_on_error=False)
+    except Exception:  # noqa: BLE001
+        pass
+
+    def _on_status(text: str) -> None:
+        print(f"[hunt:{args.tag or args.focus}] {text}", flush=True)
+
     from graphpt.core.graph_agent import run_graph_agent
 
     stop_evt = threading.Event()
@@ -82,6 +98,7 @@ def main() -> int:
         asset_id=args.asset,
         user_prompt=prompt,
         stop_event=stop_evt,
+        on_status=_on_status,
         max_iterations=args.iters,
         timebox_s=args.timebox,
     )
