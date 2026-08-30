@@ -129,6 +129,11 @@ def check_bash(cmd: str, task_id: int = 0, *, repeat_cap: int = 3, lenient: bool
             return ("【硬约束】全网段/全端口扫描越界且低效：只对目标主机做定向探测，"
                     "用 `nmap -sT --top-ports 100 <host>` 或单端口测试，别扫段。")
         if _ENCODING_RX.search(s) and not _ENCODING_OK_RX.search(s):
+            if lenient:
+                # agent 会话放宽编码护栏：中文高校站/教务系统普遍 GBK 编码，
+                # 转码处理是目标特性动作而非"编码泥潭死循环"（gzky KINGOSOFT
+                # 验证被此护栏误拦实锤）。http_test 内置编码处理仍是首选工具。
+                return None
             st.encoding_count += 1
             if st.encoding_count > 2:
                 return ("【硬约束】编码调试已超 2 次——编码是工具问题不是漏洞，不产出结果。"
