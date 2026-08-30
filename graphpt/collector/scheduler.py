@@ -1397,7 +1397,7 @@ def _notify_completion(asset_id: str, status: str, round_num: int,
             try:
                 _vuln_cands = count_candidate_vulns(asset_id)
                 scan_result_to_intents(
-                    _bb, f"scan:{asset_id}",
+                    _bb, asset_id,
                     {"vuln_candidates": _vuln_cands or total_findings,
                      "new_assets": [asset_id]})
             finally:

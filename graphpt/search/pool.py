@@ -531,6 +531,8 @@ def _reclaim_orphans(st: dict) -> int:
         _log.warning("孤儿扫描失败: %s", e)
         return 0
     alive = {int(s.get("pid") or 0) for s in st["slots"] if s.get("pid")}
+    # 注意：graphpt.ctf.driver 是有意的回收目标（旧调度器，与 pool 互斥——driver 侧
+    # 启动会检测 pool daemon 端口并拒启；这里作为防手动残留的最后一层保险）
     markers = ("graphpt.ctf.driver", "graphpt.search.reason_cli",
                "graphpt.search.explore_runner", "POOL_CHALLENGE")
     killed = 0

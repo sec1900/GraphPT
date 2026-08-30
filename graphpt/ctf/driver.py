@@ -1,5 +1,11 @@
 """CTF 调度驱动：拉题 → 启动容器 → 解题会话 → 校验 → 提交 → 关闭，多轮递增重访。
 
+**弃用状态（2026-08-30）**：推荐调度器已迁移到 `graphpt.search.pool`（daemon + 3 槽 +
+web 端点 /api/agent/pool/*）。本命令保留为**批量战役模式**（按难度/分数选题、多轮
+时间盒、干跑止损），但与 pool daemon **显式互斥**——pool 的孤儿回收会把本命令启动的
+进程（marker `graphpt.ctf.driver`）当作残留杀掉，因此检测到 pool daemon 在跑时本命令
+拒绝启动（退出码 4）。
+
 调度模型（移植 hxbai 榜一机制，适配 GraphPT 引擎）：
 - 递增时间盒：round_timeboxes = [600, 900, 1500]，难题挂起后续轮以更长会话重访
 - 接力续力：每次会话的 <Handoff> 写入 MEMORY.md，下轮 prompt 内联，不重复侦察
@@ -28,6 +34,27 @@ from .session import run_solve_session
 
 _KB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
                        "data", "ctf", "kb")
+
+
+def _pool_daemon_running() -> bool:
+    """pool daemon（新调度器）是否在跑：检测其单实例端口绑定。
+
+    daemon 持有 127.0.0.1:27590 的 LISTEN socket（GRAPHPT_POOL_DAEMON_PORT 可覆盖），
+    connect 成功即视为在跑。在跑时本命令拒绝启动——pool 的孤儿回收
+    （graphpt.search.pool _reclaim_orphans）会把 driver 进程当残留杀掉（无声互杀），
+    这里把互杀变成启动期的显式拒绝。
+    """
+    import socket
+    port = int(os.environ.get("GRAPHPT_POOL_DAEMON_PORT", "27590"))
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.settimeout(1.0)
+        s.connect(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
 
 
 def _dump_runtime_state(states, path: str) -> None:
@@ -333,6 +360,13 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
 
 def main() -> int:
     load_dotenv()
+    # 显式互斥：pool daemon（新调度器）在跑时拒启，防进程互杀（见 _pool_daemon_running）。
+    if _pool_daemon_running():
+        port = os.environ.get("GRAPHPT_POOL_DAEMON_PORT", "27590")
+        log.error("pool daemon 正在运行（127.0.0.1:%s）—— driver 与 pool 互斥。\n"
+                  "请改用 pool 模式（web 面板 /api/agent/pool/* 或 python -m graphpt.search.pool），"
+                  "或先停止 pool daemon 再运行本命令。", port)
+        return 4
     ap = argparse.ArgumentParser(prog="graphpt.ctf.driver")
     ap.add_argument("--only", default=os.environ.get("CTF_ONLY_CODES", ""),
                     help="只跑这些题（逗号分隔 unique_code）")

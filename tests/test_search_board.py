@@ -298,6 +298,58 @@ def test_session_flow_without_model() -> None:
             os.environ.pop(k, None)
 
 
+def test_board_claim_expiry() -> None:
+    """租约过期复活：claimed 的 intent 超阈值后惰性回 open（P0.3 回归）。"""
+    b, _d = _fresh_board()
+    _, ok = b.create_intent("p-1", "验证候选 XSS")
+    check("create intent", ok)
+    ints = b.open_intents("p-1")
+    check("open intent visible", len(ints) == 1 and ints[0]["status"] == "open")
+    iid = ints[0]["id"]
+
+    check("claim ok", b.claim_intent(iid, "w1"))
+    it = b.open_intents("p-1")[0]
+    check("claimed by w1", it["status"] == "claimed" and it["claimed_by"] == "w1")
+
+    # 新鲜 claim 不复活
+    check("fresh claim kept", b.open_intents("p-1")[0]["status"] == "claimed")
+
+    # 把 claimed_at 拨回过去 → 下次读惰性复活
+    import sqlite3
+    conn = sqlite3.connect(b.path)
+    conn.execute("UPDATE board_intents SET claimed_at='2020-01-01T00:00:00' WHERE id=?",
+                 (iid,))
+    conn.commit()
+    conn.close()
+    revived = b.open_intents("p-1")[0]
+    check("stale claim revived to open",
+          revived["status"] == "open" and revived.get("claimed_by") is None)
+
+    # project 过滤器边界：另一项目的过期 claim 不受影响（用 SQL 直查，避免
+    # open_intents 自身的惰性过期副作用干扰断言）
+    _, ok2 = b.create_intent("p-2", "另一项目意图")
+    check("p-2 create", ok2)
+    p2 = [x for x in b.open_intents("p-2") if x["description"] == "另一项目意图"][0]
+    check("p-2 claim ok", b.claim_intent(p2["id"], "w2"))
+    conn = sqlite3.connect(b.path)
+    conn.execute("UPDATE board_intents SET claimed_at='2020-01-01T00:00:00' WHERE id=?",
+                 (p2["id"],))
+    conn.commit()
+    conn.close()
+    n = b.expire_stale_claims("p-1", stale_s=1)  # 只复活 p-1（已复活 → 0）
+    check("project-scoped expiry only p-1", n == 0)
+    q = sqlite3.connect(b.path).execute(
+        "SELECT status FROM board_intents WHERE id=?", (p2["id"],)).fetchone()
+    check("p-2 stale claim untouched by p-1 expiry", q[0] == "claimed")
+    n2 = b.expire_stale_claims("p-2", stale_s=1)
+    check("p-2 scoped expiry revives 1", n2 == 1)
+    q2 = sqlite3.connect(b.path).execute(
+        "SELECT status, claimed_by FROM board_intents WHERE id=?", (p2["id"],)).fetchone()
+    check("p-2 revived after scoped expiry",
+          q2[0] == "open" and q2[1] is None)
+    b.close()
+
+
 def main() -> int:
     test_board_local()
     test_board_degraded_path()
@@ -307,6 +359,7 @@ def main() -> int:
     test_conclude_flow()
     test_prompt_block_injection()
     test_session_flow_without_model()
+    test_board_claim_expiry()
     print()
     if _FAILURES:
         print(f"FAILED: {len(_FAILURES)} -> {_FAILURES}")

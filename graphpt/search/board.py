@@ -80,6 +80,11 @@ CREATE INDEX IF NOT EXISTS idx_board_intents_project ON board_intents(project, s
 _FACT_LIMIT = 2000
 _GROUNDING_LIMIT = 600
 
+# claimed 租约过期阈值：explore 时间盒上限 600s（可配置）+ 收尾/排空余量。
+# 无进程调用 heartbeat_intent（claimed_at 即静止心跳），进程被杀时无法 release，
+# 超过该阈值即视为 claim 失效 → 惰性复活回 open。
+_STALE_CLAIM_S = 1800
+
 
 class Board:
     """事实黑板。方法全部安全降级：任何 DB 异常记日志返回空，绝不抛出。"""
@@ -267,10 +272,55 @@ class Board:
             _log.error("board create_intent failed: %s", e)
             return 0, False
 
+    def expire_stale_claims(self, project: str | None = None,
+                            stale_s: int = _STALE_CLAIM_S) -> int:
+        """租约过期复活：claimed 且 claimed_at 早于 now-stale_s 的 intent 回 open。
+
+        仿 Cairn `expire_workers`（服务端读请求惰性清理，无后台任务）：explore/
+        reason 进程被强杀（止损 kill、平台超时、断电）时 release_intent 无法执行，
+        若无本回收该 intent 永久卡 claimed，且会被 open_intents 计入态势
+        （污染 reason 的"open→0"判定与 open 计数）。本方法在 open_intents 读路径
+        内惰性触发，一条 UPDATE 搞定，本地库成本可忽略。
+        """
+        if not self._ok:
+            return 0
+        try:
+            from datetime import datetime, timedelta
+            cutoff = (datetime.now() - timedelta(seconds=max(60, int(stale_s)))
+                      ).strftime("%Y-%m-%dT%H:%M:%S")
+            with self._lock:
+                if project:
+                    cur = self._conn.execute(
+                        "UPDATE board_intents SET status='open', claimed_by=NULL, "
+                        "claimed_at=NULL, heartbeat_at=NULL "
+                        "WHERE status='claimed' AND claimed_at < ? AND project=?",
+                        (cutoff, project))
+                else:
+                    cur = self._conn.execute(
+                        "UPDATE board_intents SET status='open', claimed_by=NULL, "
+                        "claimed_at=NULL, heartbeat_at=NULL "
+                        "WHERE status='claimed' AND claimed_at < ?",
+                        (cutoff,))
+                self._conn.commit()
+                n = cur.rowcount
+            if n:
+                _log.info("board stale claims 复活 %d 条（%s）", n, project or "*")
+            return int(n)
+        except Exception as e:  # noqa: BLE001
+            _log.error("board expire_stale_claims failed: %s", e)
+            return 0
+
     def open_intents(self, project: str) -> list[dict]:
-        """当前 open 的意图（未 claimed 或已 claimed 未结论）。"""
+        """当前 open 的意图（未 claimed 或已 claimed 未结论）。
+
+        惰性挂载租约回收：每次读先复活过期 claim（成本一条 UPDATE）。
+        """
         if not self._ok:
             return []
+        try:
+            self.expire_stale_claims(project)
+        except Exception as e:  # noqa: BLE001
+            _log.error("board open_intents expire failed: %s", e)
         try:
             with self._lock:
                 rows = self._conn.execute(

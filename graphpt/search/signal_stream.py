@@ -10,9 +10,14 @@
 - 任何异常静默（扫描稳定性第一）
 
 用法：
-    signal = SignalStream(board_project_prefix="scan")
+    signal = SignalStream()
     signal.emit("asset-X", {"new_endpoints": [...], "vuln_candidates": n})
     # 后台线程自动每 30s 聚合写 intent
+
+project key 约定（2026-08-30 修复）：emit 的 project 参数就是 board 的 project 键，
+与 pool/explore_runner/dispatcher 使用的键**同一命名空间**（裸 asset_id / challenge）。
+历史版本曾在内部拼 `scan:` 前缀，导致扫描桥产出的 intent 永远不被 explore 认领，
+已根治为"生产侧与消费侧同一键"。
 """
 
 from __future__ import annotations
@@ -28,9 +33,8 @@ _COALESCE_S = float(os.environ.get("GRAPHPT_SIGNAL_COALESCE_S", "30"))
 
 
 class SignalStream:
-    def __init__(self, coalesce_s: float = _COALESCE_S, project_prefix: str = "scan"):
+    def __init__(self, coalesce_s: float = _COALESCE_S):
         self._coalesce_s = coalesce_s
-        self._prefix = project_prefix
         self._queue: dict[str, dict] = {}   # project → 累计快照
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -41,7 +45,7 @@ class SignalStream:
     def emit(self, project: str, snapshot: dict) -> None:
         """扫描侧增量信号。只做内存累计，立即返回。"""
         try:
-            key = f"{self._prefix}:{project}"
+            key = project
             with self._lock:
                 cur = self._queue.setdefault(key, {})
                 for k, v in (snapshot or {}).items():
