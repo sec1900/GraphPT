@@ -12,6 +12,10 @@ import collections
 import json
 import os
 import re
+
+# LLM 调用硬超时（秒）：同步路径兜底（见 _call_ai 中的线程看门狗）。
+# 180s 覆盖推理模型大上下文慢响应；超时即强制放弃本轮调用走 failover/报错。
+_LLM_CALL_HARD_TIMEOUT_S = int(os.environ.get("GRAPHPT_AI_CALL_TIMEOUT", "180"))
 import sqlite3
 import threading
 import time
@@ -29,7 +33,7 @@ from graphpt.core.hooks import HookEvent, HookManager
 from graphpt.common.log import get_logger
 from graphpt.common.task_state import is_stop_signal
 # approval imports removed
-from graphpt.core.runner import AiConfig, ChatResult, _build_reasoning_patch, _extract_reasoning_content, _iter_ai_configs, _join_url, _should_failover_ai_error, _should_inject_reasoning, call_ai_raw, call_ai_raw_stream, serialize_ai_error
+from graphpt.core.runner import AiConfig, AiCallError, ChatResult, _build_reasoning_patch, _extract_reasoning_content, _iter_ai_configs, _join_url, _should_failover_ai_error, _should_inject_reasoning, call_ai_raw, call_ai_raw_stream, serialize_ai_error
 from graphpt.core.wire_adapter import convert_tools_for_messages as _convert_tools_for_messages, convert_tools_for_responses as _convert_tools_for_responses, parse_chat_result, parse_messages_result, parse_responses_result
 from graphpt.core.sse import sse_publish
 from graphpt.tools.core import (
@@ -342,13 +346,44 @@ def _call_ai_with_tools(
                 continue
 
         # ---- 原有同步路径 ----
+        # LLM 调用硬看门狗（2026-08-31）：同步路径底层 urlopen 超时形同虚设
+        # 时（实测网关保持连接不发数据、socket 超时不触发），整个会话会静默
+        # 挂死——testfire relay 两次都在首轮工具后第二轮 LLM 调用挂住（无日志、
+        # 无错误、CPU 0）。这里用线程 + 总超时兜底：超过 LLM_CALL_HARD_TIMEOUT_S
+        # 仍未返回 → 抛 AiCallError 让调用方 failover/报错，绝不静默。
         try:
-            j = call_ai_raw(candidate, url, payload)
+            _call_result: dict | None = None
+            _call_error: BaseException | None = None
+
+            def _sync_call() -> None:
+                nonlocal _call_result, _call_error
+                try:
+                    _call_result = call_ai_raw(candidate, url, payload)
+                except BaseException as e:  # noqa: BLE001
+                    _call_error = e
+
+            import threading as _th
+            _worker = _th.Thread(target=_sync_call, daemon=True,
+                                 name="llm-sync-call")
+            _worker.start()
+            _worker.join(timeout=_LLM_CALL_HARD_TIMEOUT_S)
+            if _worker.is_alive():
+                _log.error("ai_call_hard_timeout_after_%ss candidate=%s — 强制放弃本轮调用",
+                           _LLM_CALL_HARD_TIMEOUT_S, getattr(candidate, "base_url", "?"))
+                raise AiCallError(
+                    f"ai_call_hard_timeout_{_LLM_CALL_HARD_TIMEOUT_S}s",
+                    category="timeout",
+                    message=f"LLM 调用超过 {_LLM_CALL_HARD_TIMEOUT_S}s 未返回",
+                    retryable=True,
+                )
+            if _call_error is not None:
+                raise _call_error
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             if not _should_failover_ai_error(exc):
                 raise
             continue
+        j = _call_result
 
         # 提取 Token 用量
         usage = j.get("usage") if isinstance(j, dict) else None

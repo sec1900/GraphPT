@@ -162,6 +162,17 @@ def run_relay(
 def main() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s")
+    # 取证：每 180s 自动 dump 全线程栈（卡死时日志留下精确调用点），
+    # Ctrl+Break 也可手动触发。
+    try:
+        import faulthandler
+        faulthandler.enable()
+        if sys.platform == "win32":
+            import signal as _sig
+            faulthandler.register(_sig.SIGBREAK, all_threads=True)
+        faulthandler.dump_traceback_later(180, repeat=True)
+    except Exception:  # noqa: BLE001 — dump 是可选的取证手段
+        pass
     try:
         from dotenv import load_dotenv
         load_dotenv()

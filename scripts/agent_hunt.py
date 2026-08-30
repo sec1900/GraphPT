@@ -72,7 +72,7 @@ def main() -> int:
         if sys.platform == "win32":
             import signal as _sig
             faulthandler.register(_sig.SIGBREAK, all_threads=True)
-        faulthandler.dump_traceback_later(9 * 60, repeat=True, exit_on_error=False)
+        faulthandler.dump_traceback_later(9 * 60, repeat=True)
     except Exception:  # noqa: BLE001
         pass
 

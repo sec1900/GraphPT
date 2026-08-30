@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""提取 hunt_fuzz1.log 的 faulthandler 线程 dump（取证卡死点）。"""
+"""提取 relay_testfire2.log 的 faulthandler 线程 dump（取证卡死点）。"""
 import re
 import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-raw = open("E:/GraphPT/data/hunt_fuzz1.log", encoding="utf-8", errors="replace").read()
+raw = open("E:/GraphPT/data/relay_testfire2.log", encoding="utf-8", errors="replace").read()
 idx = raw.find("Thread 0x")
 print("dump found:", idx >= 0)
 if idx < 0:
