@@ -70,7 +70,7 @@ GRAPH_AGENT_METHODOLOGY = """
 
 ### 阶段 4：横向（Lateral Movement）
 - 目标：从当前立足点扩展到其他资产
-- 关注：Vulnerability -[:PIVOTS_TO]-> IP/Subdomain 关系
+- 关注：Vulnerability -[:PIVOTS_TO]-> IP/Domain 关系
 - 检查：同网段其他 IP、共享凭据、内部服务
 
 ### 阶段 5：影响（Impact）

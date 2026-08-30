@@ -1,8 +1,9 @@
 selectors:
   dns_zonetransfer:
-    desc: "DNS 域传送 — 对 RootDomain 的 NS 服务器尝试 AXFR"
+    consumes: {node_type: Domain, domain_scope: root}
+    desc: "DNS 域传送 — 对 根 Domain 的 NS 服务器尝试 AXFR"
     query: |
-      MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
+      MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(rd:Domain)
       WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = rd.value }
       RETURN rd.value AS value
     mapping:

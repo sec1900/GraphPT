@@ -6,34 +6,20 @@ from urllib.parse import urlparse
 
 
 class WebpackAnalyzerAdapter(BaseAdapter):
+    output_fields = ('api_signals', 'asset_id', 'context', 'frameworks', 'from_js', 'method', 'params', 'parent_id', 'roles', 'source', 'source_url', 'type', 'url')
     """Webpack Bundle API 提取适配器
 
     从打包的 JS 文件中提取 API 接口（包括动态拼接的路径和参数）。
-    输出：api_endpoint 节点，关联到源 File。
+    输出：带 api role 的 HTTPEndpoint，关联到源 File。
     """
 
     tool_name = "webpack_analyzer"
-
-    @staticmethod
-    def _endpoint_id_from_url(url: str, method: str = "GET") -> str:
-        """生成 HTTPEndpoint 的 id（统一走共享助手 — 路径级身份）。
-
-        历史版本用 md5 规则（与 write_http_endpoint 不一致），已修正。
-        """
-        from graphpt.collector.adapter import _endpoint_id_from_url as _shared
-        return _shared(url, method)
-
-    @staticmethod
-    def _file_id_from_url(url: str) -> str:
-        """生成 File 的 id：file:md5(url)[:16]"""
-        import hashlib
-        return f"file:{hashlib.md5(url.encode()).hexdigest()[:16]}" if url else ""
 
     def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:
         """解析 webpack_analyzer.py 的 JSONL 输出
 
         输入格式（JSON lines）:
-            {"type":"api_endpoint","method":"POST","path":"/api/user/login","params":["username","password"],
+            {"type":"http_endpoint","roles":["api"],"method":"POST","path":"/api/user/login","params":["username","password"],
              "source_url":"...","frameworks":["webpack"],"context":"..."}
 
         返回 findings 列表，每个 finding 包含：
@@ -61,7 +47,7 @@ class WebpackAnalyzerAdapter(BaseAdapter):
                 continue
 
             ftype = obj.get("type", "")
-            if ftype != "api_endpoint":
+            if ftype != "http_endpoint":
                 continue
 
             method = obj.get("method", "GET")
@@ -88,103 +74,22 @@ class WebpackAnalyzerAdapter(BaseAdapter):
             seen_urls.add(full_url)
 
             findings.append({
-                "node_type": "HTTPEndpoint",
+                "type": "http_endpoint",
                 "url": full_url,
                 "method": method,
                 "params": params,
+                "parent_id": ctx.get("parent_id", ""),
                 "source_url": source_url,
+                "from_js": source_url,
                 "frameworks": frameworks,
+                "api_signals": ["from_js", *[f"framework:{name}" for name in frameworks]],
+                "roles": ["api"],
                 "context": context,
                 "source": "webpack_analyzer",
                 "asset_id": asset_id,
             })
 
         return findings
-
-    def to_cypher(self, findings: list[dict[str, Any]]) -> list[tuple[str, dict]]:
-        """生成 Cypher 语句，将 API 写入图
-
-        工作流程：
-        1. 输入：用户提供的 URL（网站首页，如 https://example.com/）
-        2. 工具访问首页，自动发现并分析所有 JS 文件
-        3. 从 JS 中提取 API 路径
-        4. 输出：新的 HTTPEndpoint 节点（API 端点）
-
-        关系：(entry:HTTPEndpoint)-[:DISCOVERED_API]->(api:HTTPEndpoint)
-        - entry: 用户输入的入口 URL（网站首页）
-        - api: 从 JS 中发现的 API 端点
-        """
-        statements = []
-
-        for finding in findings:
-            if finding.get("node_type") != "HTTPEndpoint":
-                continue
-
-            url = finding.get("url", "")
-            method = finding.get("method", "GET")
-            params = finding.get("params", [])
-            source_url = finding.get("source_url", "")  # JS 文件的 URL（中间产物）
-            frameworks = finding.get("frameworks", [])
-            context = finding.get("context", "")
-            asset_id = finding.get("asset_id", "")
-
-            if not url:
-                continue
-
-            # 计算新 API 端点的 id（包含 method）
-            api_id = self._endpoint_id_from_url(url, method)
-
-            cypher = """
-            MERGE (api:HTTPEndpoint {id: $api_id})
-            ON CREATE SET
-                api.url = $url,
-                api.method = $method,
-                api.params = $params,
-                api.frameworks = $frameworks,
-                api.context = $context,
-                api.from_js = $source_url,
-                api.discovered_by = 'webpack_analyzer',
-                api.discovered_at = datetime(),
-                api.asset_id = $asset_id,
-                api.sources = ['webpack_analyzer']
-            ON MATCH SET
-                api.params = CASE
-                    WHEN api.params IS NULL THEN $params
-                    WHEN size($params) > size(api.params) THEN $params
-                    ELSE api.params
-                END,
-                api.frameworks = CASE
-                    WHEN api.frameworks IS NULL THEN $frameworks
-                    WHEN size($frameworks) > 0 THEN $frameworks
-                    ELSE api.frameworks
-                END,
-                api.context = CASE
-                    WHEN api.context IS NULL OR api.context = '' THEN $context
-                    ELSE api.context
-                END,
-                api.from_js = CASE
-                    WHEN api.from_js IS NULL THEN $source_url
-                    ELSE api.from_js
-                END,
-                api.sources = CASE
-                    WHEN 'webpack_analyzer' IN coalesce(api.sources, []) THEN api.sources
-                    ELSE coalesce(api.sources, []) + ['webpack_analyzer']
-                END
-            """
-
-            statements.append((cypher, {
-                "api_id": api_id,
-                "url": url,
-                "method": method,
-                "params": params,
-                "frameworks": frameworks,
-                "context": context,
-                "source_url": source_url,
-                "asset_id": asset_id,
-            }))
-
-        return statements
-
 
 # 注册适配器
 register_adapter("webpack_analyzer", WebpackAnalyzerAdapter)

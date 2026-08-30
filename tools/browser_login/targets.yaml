@@ -1,5 +1,6 @@
 selectors:
   browser_login:
+    scheduled: false
     desc: "辅助工具占位（CLI 手动触发，调度器永不派发 — 条件恒假）"
     query: |
       MATCH (a:Asset {id: $asset_id})

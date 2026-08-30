@@ -152,7 +152,7 @@ def search_hunter(
             "ip": str(item.get("ip", "")),
             "port": str(item.get("port", "")),
             "domain": str(item.get("domain", "")),
-            "title": str(item.get("web_title", "")),
+            "title": str(item.get("title") or item.get("web_title") or ""),
             "status_code": str(item.get("status_code", "")),
             "component": str(item.get("component", [])),
         })

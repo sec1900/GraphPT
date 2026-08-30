@@ -1,5 +1,5 @@
 """GraphPT 服务启动器 — 启动 Web 服务器。"""
-import subprocess, sys, time, os, socket, argparse
+import subprocess, sys, time, os, socket, argparse, shutil
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent
@@ -84,15 +84,25 @@ def _start_redis() -> bool:
     except OSError:
         pass
 
-    # 找可执行文件：优先项目自带 Memurai，其次 PATH 里的 redis-server
-    candidates = []
-    memurai_exe = PROJECT / "infra" / "memurai" / "memurai.exe"
-    if memurai_exe.exists():
-        candidates.append(("Memurai (bundled)", str(memurai_exe), str(memurai_exe.parent)))
-    candidates.append(("System redis-server", "redis-server", str(PROJECT)))
+    # Redis 是项目内唯一运行时，不再探测系统安装或维护第二套 Memurai。
+    redis_dir = PROJECT / "infra" / "redis"
+    redis_exe = redis_dir / "redis-server.exe"
+    redis_config = redis_dir / "graphpt.conf"
+    if not redis_exe.is_file() or not redis_config.is_file():
+        print("[X]  Project Redis runtime is incomplete at infra/redis/")
+        return False
+    # 该 Windows fork 基于 MSYS，配置路径必须使用 /cygdrive/<drive>/...。
+    resolved = redis_config.resolve()
+    drive = resolved.drive.rstrip(":").lower()
+    redis_config_arg = f"/cygdrive/{drive}/{resolved.as_posix().split(':', 1)[1].lstrip('/')}"
+    candidates = [(
+        "Project Redis",
+        [str(redis_exe), redis_config_arg],
+        str(redis_dir),
+    )]
 
-    for label, exe, cwd in candidates:
-        print(f"[init] Starting {label}: {exe} ...")
+    for label, command, cwd in candidates:
+        print(f"[init] Starting {label}: {' '.join(command)} ...")
         try:
             # 不在控制台窗口里显示 Redis 的输出（STARTF_USESHOWWINDOW）
             si = None
@@ -100,10 +110,10 @@ def _start_redis() -> bool:
                 si = subprocess.STARTUPINFO()
                 si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
                 si.wShowWindow = subprocess.SW_HIDE
-            subprocess.Popen([exe], cwd=cwd, startupinfo=si,
+            subprocess.Popen(command, cwd=cwd, startupinfo=si,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except FileNotFoundError:
-            print(f"       {exe} not found, trying next...")
+            print(f"       {command[0]} not found, trying next...")
             continue
         except Exception as exc:
             print(f"       failed to start: {exc}")
@@ -137,11 +147,17 @@ def _start_neo4j() -> bool:
         return False
 
     if os.name == "nt":
+        neo4j_ps1 = neo4j_dir / "bin" / "neo4j.ps1"
         neo4j_bat = neo4j_dir / "bin" / "neo4j.bat"
-        if neo4j_bat.exists():
+        pwsh = shutil.which("pwsh")
+        if pwsh and neo4j_ps1.exists():
+            # Neo4j 5.26 的管理模块依赖 PowerShell 7 对重复 JVM 配置键的
+            # 正确处理；Windows PowerShell 5 会报 duplicate key。
+            cmd = [pwsh, "-NoProfile", "-NonInteractive", "-File", str(neo4j_ps1), "console"]
+        elif neo4j_bat.exists():
             cmd = [str(neo4j_bat), "console"]
         else:
-            print("[X]  Neo4j batch file not found")
+            print("[X]  Neo4j launcher not found")
             return False
     else:
         neo4j_bin = neo4j_dir / "bin" / "neo4j"
@@ -176,7 +192,7 @@ def _check_dependencies():
     if not _start_redis():
         missing.append("Redis/Memurai")
         print("[X] Redis/Memurai could not be started")
-        print("    Manual: infra\\memurai\\memurai.exe  or  redis-server")
+        print("    Manual: infra\\redis\\redis-server.exe infra\\redis\\graphpt.conf")
 
     if missing:
         print(f"\n[ERROR] Failed to start: {', '.join(missing)}")
@@ -204,13 +220,17 @@ def _trim_uvicorn_log(max_bytes: int = 100 * 1024 * 1024, keep_tail: int = 10 * 
 
 
 def _clean_redis_on_startup():
-    """清理上次非正常退出残留的调度锁、槽位和扫描恢复标记，防止误恢复。"""
+    """清理上次进程遗留的瞬时调度锁。
+
+    ``scan:resume:*`` 是 Web 启动恢复的持久检查点，不能在启动器阶段删除；
+    旧实现先清掉检查点再启动 Web，导致自动恢复逻辑永远拿不到数据。
+    """
     try:
         from graphpt.common.redis_client import get_redis
         _r = get_redis(socket_connect_timeout=2)
         _r.ping()
         removed = 0
-        for pattern in ("scheduler:*", "scan:resume:*"):
+        for pattern in ("scheduler:*",):
             cursor = 0
             while True:
                 cursor, keys = _r.scan(cursor, match=pattern, count=100)
@@ -220,7 +240,7 @@ def _clean_redis_on_startup():
                 if cursor == 0:
                     break
         if removed:
-            print(f"[init] Cleaned {removed} stale keys from Redis (scheduler + scan:resume)")
+            print(f"[init] Cleaned {removed} stale scheduler keys from Redis")
     except Exception:
         pass  # 已在 _check_dependencies 检查过
 

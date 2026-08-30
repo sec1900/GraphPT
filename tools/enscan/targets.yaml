@@ -1,5 +1,6 @@
 selectors:
   enscan:
+    consumes: {node_type: Asset}
     desc: ICP备案/分支机构域名收集 — 取公司名(Asset.name)
     query: |
       MATCH (a:Asset {id: $asset_id})

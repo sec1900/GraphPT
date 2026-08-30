@@ -5,20 +5,17 @@ import json
 
 
 def _extract_root_domain(hostname: str) -> str:
-    """从 hostname 提取根域名（最后两段）。单标签返回自身。"""
-    host = hostname.strip().lower().rstrip(".")
-    if not host or host.replace(".", "").isdigit():
-        return host
-    labels = host.split(".")
-    if len(labels) >= 2:
-        return ".".join(labels[-2:])
-    return host
+    """从 hostname 提取 PSL 可注册根域。"""
+    from graphpt.common.asset_identity import registrable_domain
+
+    return registrable_domain(hostname)
 
 
 _MAX_AXFR_FINDINGS = 500  # 单次 AXFR 输出上限，防止扩散失控
 
 
 class DnsZonetransferAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'parent_id', 'source', 'type', 'value')
     """dns_zonetransfer adapter — 解析 AXFR 输出，统一 Domain 节点。"""
 
     tool_name = "dns_zonetransfer"

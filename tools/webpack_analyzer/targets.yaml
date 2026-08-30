@@ -1,5 +1,6 @@
 selectors:
   webpack_analyzer:
+    consumes: {node_type: Endpoint}
     desc: "Webpack Bundle 分析 — 对所有 HTTPEndpoint 做 JS bundle 提取"
     query: |
       MATCH (a:Asset {id: $asset_id})

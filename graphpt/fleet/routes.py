@@ -247,12 +247,15 @@ async def fleet_tasks_poll(body: PollBody,
         asset_id = p.get("asset_id", "")
 
         # 主控查目标列表（含 ScanRun 去重）—— worker 不再查图
+        # 注意：force_rescan 任务跳过 ScanRun 去重，否则已扫目标永远不会再派发
         targets: list[dict] = []
         try:
             from graphpt.collector.pipeline import PipelineExecutor
             ex = PipelineExecutor({"stages": []}, asset_id=asset_id,
                                   params={}, target_overrides=None)
             ex.ctx["asset_id"] = asset_id
+            force = str(p.get("force_rescan") or "0") == "1"
+            ex.ctx["force_rescan"] = force
             targets = ex._query_targets(tool)
         except Exception as exc:
             _log.warning("poll_target_query_failed task=%s tool=%s err=%s",

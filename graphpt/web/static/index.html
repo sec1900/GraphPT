@@ -196,7 +196,7 @@
           <tr><td>nmap</td><td>port</td><td style="color:var(--green)">{ports} {ip} → {urls}</td></tr>
           <tr><td>httpx</td><td>http_endpoint</td><td style="color:var(--green)">{urls} {urls_file}</td></tr>
           <tr><td>katana</td><td>file / http_endpoint</td><td style="color:var(--green)">{urls}</td></tr>
-          <tr><td>gobuster / ffuf</td><td>dir_entry</td><td style="color:var(--muted)">(writes to Neo4j directly)</td></tr>
+          <tr><td>gobuster / ffuf</td><td>HTTP endpoint (directory role)</td><td style="color:var(--muted)">统一写入 Neo4j</td></tr>
         </table>
       </div>
       <div class="cfg-layout">
@@ -275,6 +275,11 @@
         <option value="force">力导向</option>
         <option value="radial">径向</option>
       </select>
+      <select id="graph-budget-sel" onchange="loadGraph()" title="图展示预算" style="min-width:120px">
+        <option value="1500,3000,16" selected>标准图</option>
+        <option value="5000,10000,24">大型图</option>
+        <option value="10000,20000,32">完整图</option>
+      </select>
       <span style="margin-left:12px;font-size:11px;color:var(--muted)">过滤:</span>
       <div id="graph-type-filters" style="display:inline-flex;gap:4px;margin-left:4px;flex-wrap:wrap"></div>
       <span class="spacer"></span>
@@ -284,6 +289,7 @@
       <div id="graph-container" style="width:100%;height:calc(100vh - 180px);border:1px solid var(--border);border-radius:8px;background:var(--bg)"></div>
       <div id="graph-info" style="position:absolute;right:16px;top:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:12px;max-width:320px;display:none;z-index:10;box-shadow:0 4px 12px rgba(0,0,0,.4)"></div>
       <div id="graph-legend" style="position:absolute;left:16px;bottom:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 12px;font-size:11px;z-index:10;display:flex;gap:12px;flex-wrap:wrap"></div>
+      <div id="graph-warn" style="position:absolute;left:16px;bottom:52px;background:rgba(160,120,0,.12);border:1px solid #b8860b;border-radius:8px;padding:6px 12px;font-size:11px;color:#d4a017;z-index:10;display:none"></div>
     </div>
     <div class="loading" id="graph-loading">Loading graph...</div>
   </div>

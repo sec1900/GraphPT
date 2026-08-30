@@ -8,6 +8,7 @@ from urllib.parse import urlsplit as _urlsplit
 
 
 class SecretfinderAdapter(BaseAdapter):
+    output_fields = ('api_signals', 'asset_id', 'crawl_status', 'evidence', 'from_js', 'line', 'method', 'params', 'parent_id', 'roles', 'secret_type', 'source', 'source_url', 'type', 'url', 'value', 'value_preview')
     """secretfinder JSONL 输出适配器 → secret / http_endpoint / domain（统一 Domain 节点）。
 
     secretfinder 抓取 File / HTTPEndpoint 内容做敏感信息检测（筛网式），
@@ -58,10 +59,10 @@ class SecretfinderAdapter(BaseAdapter):
                     "secret_type": obj.get("secret_type", ""),
                     "value_preview": obj.get("value_preview", ""),
                     "line": obj.get("line", 0),
-                    "evidence_path": obj.get("evidence", ""),
+                    "evidence": obj.get("evidence", ""),
                 })
 
-            elif ftype == "subdomain":
+            elif ftype == "domain":
                 host = str(obj.get("value") or "").strip().strip(".").lower()
                 if not host or host in seen_hosts:
                     continue
@@ -83,27 +84,11 @@ class SecretfinderAdapter(BaseAdapter):
                     "type": "http_endpoint",
                     "url": url,
                     "method": obj.get("method", "GET"),
-                    "parent_id": f"sub:{host}" if host else "",
-                    "crawl_status": "not_fetched",
-                    "source": "secretfinder",
-                    "asset_id": asset_id,
-                })
-
-            elif ftype == "api_endpoint":
-                # 废弃 ApiEndpoint 节点，改用 HTTPEndpoint（统一所有 HTTP 端点）
-                url = str(obj.get("url") or "").strip()
-                if not url or url in seen_urls:
-                    continue
-                seen_urls.add(url)
-                host = (_split(url).hostname or "").strip(".").lower()
-                findings.append({
-                    "type": "http_endpoint",  # 改为 http_endpoint
-                    "url": url,
-                    "method": obj.get("method", "GET"),
-                    "parent_id": f"sub:{host}" if host else "",
-                    "params": obj.get("params", []),  # API 参数
-                    "api_signals": obj.get("api_signals", []),  # API 判定信号
-                    "from_js": source_url,  # 来源 JS 文件
+                    "parent_id": ctx.get("parent_id") or (f"domain:{host}" if host else ""),
+                    "params": obj.get("params", []),
+                    "api_signals": obj.get("api_signals", []),
+                    "roles": obj.get("roles", []),
+                    "from_js": source_url,
                     "crawl_status": "not_fetched",
                     "source": "secretfinder",
                     "asset_id": asset_id,

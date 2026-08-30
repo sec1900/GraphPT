@@ -1,40 +1,21 @@
 selectors:
   httpx:
-    desc: "Web指纹探测 — 全量(子域名 + IP:Port, 兼容旧调用)"
+    consumes: {node_type: Domain, domain_scope: all}
+    desc: "Web指纹探测 — 扫描任意层级 Domain"
     query: |
-      MATCH (a:Asset {id: $asset_id})
-      CALL (a, a) {
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
-        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.value }
-        RETURN s.value AS target
-        UNION
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(p:Port)
-        WITH ip.value + ':' + toString(p.number) AS target
-        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
-        RETURN target
-        UNION
-        MATCH (a)-[:HAS_IP]->(ip:IP)-[:HAS_PORT]->(p:Port)
-        WITH ip.value + ':' + toString(p.number) AS target
-        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
-        RETURN target
-      }
-      RETURN DISTINCT target AS url
-    mapping:
-      url: "{urls_file}"
-  httpx:subdomain:
-    desc: "Web指纹探测 — Layer 2: 仅扫子域名"
-    query: |
-      MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(s:Subdomain)
+      MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(s:Domain)
       WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.value }
       RETURN s.value AS url
     mapping:
       url: "{urls_file}"
   httpx:port:
+    consumes:
+      node_type: Port
     desc: "Web指纹探测 — Layer 4: 仅扫IP:Port（排除内网地址）"
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(p:Port)
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(ip:IP)-[:HAS_PORT]->(p:Port)
         WHERE NOT ip.value STARTS WITH '127.' AND NOT ip.value STARTS WITH '10.' AND NOT ip.value STARTS WITH '192.168.' AND NOT ip.value STARTS WITH '172.1'
         WITH ip.value + ':' + toString(p.number) AS target
         WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }

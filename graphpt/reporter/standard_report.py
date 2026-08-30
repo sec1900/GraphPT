@@ -231,13 +231,14 @@ def to_standard_report(
         interactions = _evidence_interactions(row["evidence_paths"], workspace_root)
         replay_cmds = _evidence_replay_commands(row["evidence_paths"], workspace_root)
         if not interactions:
-            # 无结构化证据时构造最小交互（request 可构造，status_code 未知则省略）
+            # 无结构化证据：显式标注"无流量记录"，不合成伪交互块
+            # （伪造协议块的 REQUEST/RESPONSE 比空白更具误导性，可被判定数据造假）
             interactions = [{
                 "seq": 1,
-                "label": f"请求记录: {row['http_method'] or 'GET'} {url}",
-                "request": {"method": row["http_method"] or "GET", "url": url,
-                            "headers": {}, "body": None},
+                "label": "无流量记录（该漏洞无结构化证据，需人工复核）",
+                "request": {"method": "", "url": url, "headers": {}, "body": None},
                 "response": {"status_code": None, "headers": {}, "body": ""},
+                "synthetic_note": True,
             }]
 
         vulns.append({

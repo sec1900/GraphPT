@@ -7,10 +7,8 @@ from typing import Any
 
 
 class FfufAdapter(BaseAdapter):
-    """ffuf JSONL 输出适配器 → HTTPEndpoint Finding。
-
-    废弃 DirEntry，统一使用 HTTPEndpoint 存储发现的路径。
-    """
+    output_fields = ('asset_id', 'content_length', 'content_type', 'crawl_status', 'method', 'parent_id', 'roles', 'source', 'status_code', 'type', 'url')
+    """ffuf JSONL 输出适配器 → 带 directory role 的 HTTPEndpoint。"""
 
     tool_name = "ffuf"
 
@@ -118,12 +116,14 @@ class FfufAdapter(BaseAdapter):
 
             findings.append({
                 "type": "http_endpoint",  # 改为 http_endpoint
+                "parent_id": ctx.get("parent_id") or _endpoint_id_from_url(str(ctx.get("target_url") or "")),
                 "url": url,
                 "method": obj.get("method", "GET"),
                 "status_code": self._int_field(obj, "status", "status_code"),
                 "content_type": obj.get("content-type") or obj.get("content_type") or "",
                 "content_length": self._int_field(obj, "length", "content_length", "size"),
                 "crawl_status": "success",
+                "roles": ["directory"],
                 "asset_id": asset_id,
                 "source": "ffuf",
             })

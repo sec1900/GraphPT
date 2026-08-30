@@ -5,6 +5,7 @@ from typing import Any
 
 
 class BrowserLoginAdapter(BaseAdapter):
+    output_fields = ()
     """浏览器登录导出 Cookie — CLI 辅助工具，不产出 finding。"""
 
     tool_name = "browser_login"

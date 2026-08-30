@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -15,7 +16,7 @@ import yaml
 # Celery 已移除——扫描由 ThreadPoolExecutor 直连执行
 from graphpt.collector.neo4j_client import (
     get_graph_writer,
-    list_root_domains,
+    list_asset_roots,
     list_unverified_nodes,
 )
 
@@ -58,6 +59,29 @@ def _find_tool(name: str) -> str | None:
         if script.is_file():
             python = shutil.which("python") or sys.executable
             return f"{python} {script}"
+
+    # 自研工具入口不一定与目录同名（例如 api_prescan/run_api_prescan.py）。
+    # 从 tool.yaml 的 command/use_on.command 解析 {tool_dir}/xxx.py，避免
+    # 工具实际存在却在健康检查和执行前校验阶段被判定为缺失。
+    tool_yaml = _PROJECT_TOOLS_DIR / name / "tool.yaml"
+    if tool_yaml.is_file():
+        try:
+            cfg = yaml.safe_load(tool_yaml.read_text(encoding="utf-8")) or {}
+            commands = [str(cfg.get("command") or "")]
+            for rule in (cfg.get("use_on") or {}).values():
+                if isinstance(rule, dict):
+                    commands.append(str(rule.get("command") or ""))
+            for command in commands:
+                for match in re.finditer(
+                    r"\{tool_dir\}[\\/]+([^\s\"']+\.py)", command,
+                    flags=re.IGNORECASE,
+                ):
+                    script = _PROJECT_TOOLS_DIR / name / match.group(1)
+                    if script.is_file():
+                        python = shutil.which("python") or sys.executable
+                        return f"{python} {script}"
+        except (OSError, yaml.YAMLError):
+            pass
 
     path = shutil.which(name)
     if path:
@@ -338,7 +362,7 @@ def passive_recon(self, asset_id: str | None = None):
     f_enscan, w_enscan = _pipeline_counts(enscan_result["result"])
 
     # 阶段2: crt.sh — 根域名 → 子域名 (证书透明日志, 纯 API)
-    domains = list_root_domains(asset_id)
+    domains = list_asset_roots(asset_id)
     writer = get_graph_writer()
     crt_found = 0
     crt_written = 0

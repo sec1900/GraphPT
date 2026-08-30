@@ -2,7 +2,8 @@ desc: "DNS 解析"
 command: "{bin} -l {targets_file} -a -cname -json -timeout 5 -retry 1 -t 50"
 fallback_command: "{bin} -l {targets_file} -a -cname -json -timeout 5 -retry 1 -t 50 -r 114.114.114.114,8.8.8.8,1.1.1.1"
 use_on:
-  Subdomain:
-    desc: "解析子域名到 IP"
+  Domain:
+    domain_scope: all
+    desc: "解析任意层级 Domain 到 IP"
     params:
       targets_file: "{targets_file}"

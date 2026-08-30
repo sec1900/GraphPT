@@ -7,6 +7,7 @@ from typing import Any
 
 
 class ObserverWardAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'crawl_status', 'favicon_hash', 'fingerprint', 'method', 'parent_id', 'products', 'severity', 'source', 'status_code', 'type', 'url', 'vendors')
     """observer_ward JSON 输出适配器 → http_endpoint Finding（指纹增强）。
 
     observer_ward 对已存在的 HTTPEndpoint 做 Web 指纹识别，结果回填到该端点：
@@ -128,10 +129,10 @@ class ObserverWardAdapter(BaseAdapter):
                     "method": "GET",
                     "parent_id": parent_id,
                     "status_code": int(result.get("status") or 0),
-                    "tech": tech,
+                    "fingerprint": tech,
                     "products": products,
                     "vendors": vendors,
-                    "fingerprint_severity": severity,
+                    "severity": severity,
                     "favicon_hash": self._favicon_hash(result.get("favicon")),
                     "crawl_status": "success",
                     "source": "observer_ward",

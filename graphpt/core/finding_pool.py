@@ -992,24 +992,21 @@ def build_case_signature(
     cat = str(category or "").strip().lower()
     if cat != "vuln":
         return str(fingerprint or "").strip() or _normalize_finding_key(cat, title)
+    # vuln 分支：走 common 共享算法（与 Neo4j 侧 write_vulnerability 同值，
+    # 保证跨库指纹完全一致——禁止在别处复制此拼接逻辑）
+    from graphpt.common.finding_identity import compute_vuln_fingerprint
     resolved_vuln_type = str(vuln_type or "").strip().lower()
     resolved_target = str(canonical_target or "").strip()
     resolved_method = str(http_method or "").strip().lower()
     resolved_entry = str(entry_point or "").strip()
     resolved_param = str(param_name or "").strip().lower()
-    explicit_identity = ""
-    if resolved_target or resolved_param or (resolved_vuln_type and resolved_vuln_type != "unknown"):
-        parts = [
-            "vuln",
-            f"type={resolved_vuln_type or 'unknown'}",
-            f"target={resolved_target or '-'}",
-            f"param={resolved_param or '-'}",
-        ]
-        if resolved_method:
-            parts.append(f"method={resolved_method}")
-        if resolved_entry and resolved_entry != resolved_target:
-            parts.append(f"entry={resolved_entry}")
-        explicit_identity = "|".join(parts)
+    explicit_identity = compute_vuln_fingerprint(
+        vuln_type=resolved_vuln_type,
+        canonical_target=resolved_target,
+        http_method=resolved_method,
+        entry_point=resolved_entry,
+        param_name=resolved_param,
+    )
     if explicit_identity:
         return explicit_identity
     return build_finding_identity(cat, title, detail, fingerprint=str(fingerprint or "").strip())["fingerprint"]
@@ -1334,6 +1331,188 @@ def _insert_finding_attempt(
 
 # ---- save_findings ----
 
+def _project_vuln_to_neo4j(session, item: dict[str, Any]) -> None:
+    """单条 vuln 投影到 Neo4j（桥①内部）。
+
+    资产归属由资产管理视图（Neo4j）按 URL/域名反查决定——SQLite 侧不维护
+    资产字段（单一事实源：资产归属只在 Neo4j 定义）。
+    """
+    from urllib.parse import urlparse as _urlparse
+
+    target = str(item.get("canonical_target") or item.get("entry_point") or "").strip()
+    host = target
+    if "//" in target:
+        try:
+            host = (_urlparse(target).hostname or "").strip().lower()
+        except Exception:
+            host = ""
+    else:
+        host = target.strip().lower().split(":")[0].strip()
+    if not host:
+        host = target.lower()
+
+    asset_id = ""
+    if host:
+        try:
+            row = session.run(
+                "MATCH (a:Asset)-[:HAS_DOMAIN]->(d:Domain) "
+                "WHERE d.value = $h OR d.value ENDS WITH '.' + $h "
+                "RETURN a.id AS aid LIMIT 1",
+                h=host.lower(),
+            ).single()
+            if row:
+                asset_id = str(row["aid"] or "")
+        except Exception:
+            asset_id = ""
+
+    status = str(item.get("status") or "").lower()
+    graph_status = {
+        "confirmed": "confirmed", "verified": "confirmed",
+        "dismissed": "dismissed",
+    }.get(status, "candidate")
+
+    try:
+        from graphpt.collector.neo4j_client import get_graph_writer
+        writer = get_graph_writer()
+        # P0-4：evidence 投影——把 findings 的 evidence_paths 提取成证据文本
+        # 传图（此前完全不传 → v.evidence 恒空 → 报告无证据）
+        evidence = str(item.get("evidence") or "")
+        if not evidence:
+            ep_raw = str(item.get("evidence_paths") or "")
+            try:
+                import json as _json
+                paths = _json.loads(ep_raw) if ep_raw.startswith("[") else []
+            except Exception:
+                paths = []
+            if paths:
+                from pathlib import Path as _Path
+                root = _Path(__file__).resolve().parent.parent.parent
+                for p in paths:
+                    try:
+                        fp = _Path(p) if _Path(p).is_absolute() else root / p
+                        if fp.is_file():
+                            evidence = fp.read_text(encoding="utf-8", errors="replace")[:4000]
+                            break
+                    except OSError:
+                        continue
+        writer.write_vulnerability(
+            endpoint_id="",
+            vuln_type=str(item.get("vuln_type") or "unknown"),
+            title=str(item.get("title") or "未命名漏洞"),
+            severity=str(item.get("severity") or "info"),
+            cvss_score=float(item.get("cvss_score") or 0),
+            cvss_vector=str(item.get("cvss_vector") or ""),
+            detail=str(item.get("detail") or "")[:8000],
+            url=f"http://{host}" if host and "://" not in str(item.get("canonical_target") or "") else str(item.get("canonical_target") or ""),
+            source="agent",
+            status=graph_status,
+            asset_id=asset_id,
+            fingerprint=str(item.get("fingerprint") or ""),
+            evidence=evidence,
+            _session=session,
+        )
+    except Exception:
+        pass
+
+
+def _project_vulns_to_neo4j(items: list[dict[str, Any]]) -> None:
+    """桥①：SQLite findings（vuln 类）→ Neo4j Vulnerability 投影。
+
+    设计（实体级唯一真相源宪章）：
+      - SQLite findings 是漏洞详情的完整记录；图侧只留摘要节点，
+        fingerprint（common/finding_identity 同算法）作为跨库关联键。
+      - 幂等 MERGE；图不可达/单条失败仅跳过——SQLite 主写绝不回滚
+        （一致性由读侧容错闭环：图节点缺失时前端/报告按 SQLite 降级）。
+      - 仅投影 vuln 类（白名单），拓扑节点绝不投影。
+    """
+    if not items:
+        return
+    try:
+        from graphpt.collector.neo4j_client import get_graph_writer
+        writer = get_graph_writer()
+        with writer._driver.session() as s:
+            for item in items:
+                try:
+                    _project_vuln_to_neo4j(s, item)
+                except Exception:  # noqa: BLE001 单条失败跳过
+                    continue
+    except Exception:  # noqa: BLE001 桥不可用 → 主写不受影响
+        _log.warning("vuln_neo4j_projection_failed", exc_info=True)
+
+
+def _ensure_scan_task(db_file: Path, asset_id: str = "") -> int:
+    """确保"扫描引擎聚合 task"存在（findings.task_id NOT NULL 且 FK tasks）。
+
+    扫描不是 agent 会话，没有 task；为让扫描产物能投影进 findings 而引入
+    工厂 task（name=scan:{asset_id}，幂等复用）。verifier 复查按 status
+    全量读取，工厂行自然进入复查链。"""
+    conn = open_db(db_file)
+    try:
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE name = ? LIMIT 1",
+            (f"scan:{asset_id or 'default'}",),
+        ).fetchone()
+        if row:
+            return int(row["id"])
+        cur = conn.execute(
+            "INSERT INTO tasks(project_id, name, status, mode, created_at_utc, updated_at_utc) "
+            "VALUES (0, ?, 'done', 'loop', ?, ?)",
+            (f"scan:{asset_id or 'default'}", _utc_now_iso(), _utc_now_iso()),
+        )
+        conn.commit()
+        return int(cur.lastrowid or 0)
+    finally:
+        conn.close()
+
+
+def upsert_vuln_finding_from_graph(payload: dict[str, Any]) -> None:
+    """桥③ sink：扫描写图后的漏洞 → SQLite findings 审计行（幂等）。
+
+    由装配层（web startup）经 register_vuln_hook 注入 collector 侧 hook 槽。
+    payload 字段（来自 write_vulnerability 广播）：
+      fingerprint（跨库关联键）/title/vuln_type/severity/detail/url/
+      asset_id/status/cvss_score/source。
+
+    复用 save_findings 的全套 dedup/identity/attempt 逻辑；失败仅日志——
+    扫描主链路（图写）绝不回滚。
+    """
+    if not payload:
+        return
+    fp_key = str(payload.get("fingerprint") or "").strip()
+    if not fp_key:
+        return  # 无指纹无法与图侧对齐，跳过（孤儿看门狗会兜底告警）
+    try:
+        from graphpt.common.paths import PROJECT_ROOT, DEFAULT_DB_RELATIVE
+        db_file = Path(PROJECT_ROOT) / DEFAULT_DB_RELATIVE
+        asset_id = str(payload.get("asset_id") or "").strip()
+        task_id = _ensure_scan_task(db_file, asset_id)
+        graph_status = str(payload.get("status") or "").lower()
+        finding_status = {
+            "confirmed": "confirmed",
+            "verified": "confirmed",
+            "dismissed": "dismissed",
+        }.get(graph_status, "candidate")
+        save_findings(
+            db_file,
+            task_id,
+            [{
+                "category": "vuln",
+                "title": str(payload.get("title") or "未命名漏洞")[:300],
+                "detail": str(payload.get("detail") or "")[:2000],
+                "confidence": "high" if graph_status in ("confirmed", "verified") else "medium",
+                "status": finding_status,
+                "severity": str(payload.get("severity") or "info"),
+                "cvss_score": float(payload.get("cvss_score") or 0),
+                "canonical_target": str(payload.get("url") or ""),
+                "vuln_type": str(payload.get("vuln_type") or "unknown"),
+                "fingerprint": fp_key,
+            }],
+            workspace_root=None,
+        )
+    except Exception:  # noqa: BLE001 桥失败 → 主链路不受影响
+        _log.warning("scan_vuln_finding_projection_failed", exc_info=True)
+
+
 def save_findings(
     db_file: Path,
     task_id: int,
@@ -1367,6 +1546,8 @@ def save_findings(
     updated_finding_ids: list[int] = []
     changed_finding_ids: list[int] = []
     change_events_by_id: dict[int, str] = {}
+    # 桥①：vuln 类行收集（UPDATE + INSERT 两路径），循环结束后投影 Neo4j
+    _vuln_projection: list[dict[str, Any]] = []
     try:
         existing_rows = conn.execute(
             """
@@ -1411,11 +1592,25 @@ def save_findings(
             if skip_dedup and cat == "info":
                 continue
 
+            # 显式结构化身份优先：vuln 类且未显式传 fingerprint 时，用
+            # canonical_target/method/param 等显式字段预计算精确指纹
+            # （common 共享算法，与 Neo4j 侧同值）——避免从 title/detail
+            # 猜测提取导致跨库对不上
+            _fp_explicit = str(finding.get("fingerprint", "") or "").strip()
+            if cat == "vuln" and not _fp_explicit:
+                from graphpt.common.finding_identity import compute_vuln_fingerprint
+                _fp_explicit = compute_vuln_fingerprint(
+                    vuln_type=str(finding.get("vuln_type") or ""),
+                    canonical_target=str(finding.get("canonical_target") or ""),
+                    http_method=str(finding.get("http_method") or ""),
+                    entry_point=str(finding.get("entry_point") or ""),
+                    param_name=str(finding.get("param_name") or ""),
+                ) or ""
             incoming_identity = build_finding_identity(
                 cat,
                 title,
                 detail,
-                fingerprint=str(finding.get("fingerprint", "") or ""),
+                fingerprint=_fp_explicit,
             )
             incoming_identity = {
                 "fingerprint": incoming_identity["fingerprint"],
@@ -1576,6 +1771,19 @@ def save_findings(
                     changed_finding_ids.append(finding_id)
                     updated_finding_ids.append(finding_id)
                     change_events_by_id[finding_id] = "save_merge"
+                    # 桥①收集：vuln 类（合并后状态为准，dismissed 不投影）
+                    if cat == "vuln" and dedup_key:
+                        if str(merged_state.get("status") or "").lower() != "dismissed":
+                            _vuln_projection.append({
+                                "fingerprint": dedup_key,
+                                "title": title,
+                                "detail": detail,
+                                "severity": merged_state.get("severity", severity),
+                                "status": merged_state.get("status", initial_status),
+                                "cvss_score": merged_state.get("cvss_score", cvss_score),
+                                "cvss_vector": merged_state.get("cvss_vector", cvss_vector),
+                                **incoming_identity,
+                            })
                 continue
 
             stored_detail = detail
@@ -1656,6 +1864,19 @@ def save_findings(
                 }
             )
             inserted_finding_ids.append(int(finding_id))
+            # 桥①收集：vuln 类（dismissed 不投影）
+            if cat == "vuln" and dedup_key:
+                if str(initial_status or "").lower() != "dismissed":
+                    _vuln_projection.append({
+                        "fingerprint": dedup_key,
+                        "title": title,
+                        "detail": detail,
+                        "severity": severity,
+                        "status": initial_status,
+                        "cvss_score": cvss_score,
+                        "cvss_vector": cvss_vector,
+                        **incoming_identity,
+                    })
             _insert_finding_attempt(
                 conn,
                 finding_id=finding_id,
@@ -1745,6 +1966,13 @@ def save_findings(
                     append_to_asset_file(workspace_root, cat, [value])
         except (FileNotFoundError, OSError, ValueError, TypeError, RuntimeError) as exc:
             _log.warning("finding_asset_file_sync_failed", extra={"error": str(exc), "task_id": task_id})
+
+    # 桥①：vuln 类 findings → Neo4j Vulnerability 投影（幂等，失败不阻断主写）
+    if _vuln_projection:
+        try:
+            _project_vulns_to_neo4j(_vuln_projection)
+        except Exception:  # noqa: BLE001
+            _log.warning("finding_neo4j_projection_failed", exc_info=True)
 
     if count > 0:
         sse_publish(task_id, {"type": "finding_added", "count": count, "round_num": round_num})

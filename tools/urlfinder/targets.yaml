@@ -1,7 +1,8 @@
 selectors:
   urlfinder:
+    consumes: {node_type: Domain, domain_scope: root}
     desc: 被动URL收集(Wayback等) — 取未扫过的根域名
-    query: 'MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
+    query: 'MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(rd:Domain)
 
       WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target =
       rd.value }

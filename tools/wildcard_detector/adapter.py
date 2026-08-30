@@ -12,6 +12,7 @@ from graphpt.collector.adapter import BaseAdapter, register_adapter
 
 
 class WildcardDetectorAdapter(BaseAdapter):
+    output_fields = ('domain', 'has_wildcard', 'test_count', 'type', 'wildcard_ips')
     """泛解析检测适配器"""
 
     tool_name = "wildcard_detector"

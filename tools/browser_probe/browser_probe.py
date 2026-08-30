@@ -5,7 +5,7 @@
 
 输出 JSONL (每行一个发现):
   {"type":"http_endpoint","url":"...","title":"...","method":"GET","source":"browser_probe"}
-  {"type":"api_endpoint","url":"...","method":"POST","params":[...],"source":"browser_probe"}
+  {"type":"http_endpoint","roles":["api"],"url":"...","method":"POST","params":[...],"source":"browser_probe"}
   {"type":"form","url":"...","action":"...","inputs":[...],"auth_required":false}
   {"type":"hidden_endpoint","url":"...","source":"browser_probe:js_extract"}
 """
@@ -198,7 +198,8 @@ def main():
                         continue
                     seen_urls.add(normalized)
                     results.append({
-                        "type": "api_endpoint",
+                        "type": "http_endpoint",
+                        "roles": ["api"],
                         "url": normalized,
                         "method": "GET",
                         "source": "browser_probe:js_extract",

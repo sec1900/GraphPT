@@ -13,6 +13,7 @@ import secrets
 import subprocess
 import sys
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -41,14 +42,25 @@ load_dotenv(_PROJECT_ROOT / ".env")
 # ── 通用搜索路径（路径模式, 搜索属性, 标签）──
 # 新增节点类型只需追加一行，无需改查询逻辑
 _SEARCH_PATHS: list[tuple[str, str, str]] = [
-    ("MATCH (a)-[:HAS_DOMAIN]->(n:Domain)", "n.value", "domain"),
+    ("MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(n:Domain)", "n.value", "domain"),
+    ("MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(n:IP)", "n.value", "ip"),
     ("MATCH (a)-[:HAS_IP]->(n)", "n.value", "ip"),
+    ("MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(n:Port)",
+     "toString(n.number) OR n.service OR n.product", "port"),
     ("MATCH (a)-[:HAS_IP]->()-[:HAS_PORT]->(n)",
      "toString(n.number) OR n.service OR n.product", "port"),
+    ("MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:EXPOSES]->(n:HTTPEndpoint)",
+     "n.url OR n.title OR n.content_type", "endpoint"),
+    ("MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->()-[:EXPOSES]->(n:HTTPEndpoint)",
+     "n.url OR n.title OR n.content_type", "endpoint"),
     ("MATCH (a)-[:HAS_IP]->()-[:HAS_PORT]->()-[:EXPOSES]->(n)",
      "n.url OR n.title OR n.content_type", "endpoint"),
+    ("MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[*1..5]->(n:Vulnerability)",
+     "n.title OR n.vuln_type", "vulnerability"),
     ("MATCH (a)-[:HAS_IP]->()-[:HAS_PORT]->()-[:EXPOSES]->()-[:MAY_BE_VULNERABLE_TO]->(n)",
      "n.title OR n.vuln_type", "vulnerability"),
+    ("MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[*1..5]->(n:Secret)",
+     "n.secret_type OR n.value_preview", "secret"),
     ("MATCH (a)-[:HAS_IP]->()-[:HAS_PORT]->()-[:EXPOSES]->()-[:MAY_CONTAIN]->(n)",
      "n.secret_type OR n.value_preview", "secret"),
 ]
@@ -58,7 +70,13 @@ _web_log = logging.getLogger("graphpt.web")
 # 哨兵：区分"字段未提供"与"显式置空"（PATCH 语义）
 _UNSET = object()
 
-web_app = FastAPI(title="GraphPT Admin", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    await _auto_resume_interrupted_scans()
+    yield
+
+
+web_app = FastAPI(title="GraphPT Admin", version="0.1.0", lifespan=_lifespan)
 
 # fleet 管理路由（分布式舰队面板/事件）
 from graphpt.fleet.routes import fleet_router as _fleet_router
@@ -98,7 +116,6 @@ async def _security_headers(request: Request, call_next):
 # ── 启动时自动恢复中断扫描（同进程线程模型）──
 # 进程重启后从 Redis scan:resume:* 恢复未完成的扫描，
 # ScanRun 去重保证已扫内容不会重复执行。
-@web_app.on_event("startup")
 async def _auto_resume_interrupted_scans():
     import asyncio
     asyncio.create_task(_try_auto_resume())
@@ -115,6 +132,61 @@ async def _auto_resume_interrupted_scans():
         master_init_redis()
     except Exception:
         _web_log.warning("fleet_config_init_failed", exc_info=True)
+    # 计数缓存预热：按资产后台跑一遍 progress()，冷启动全量工具计数（约 20s+）
+    # 在用户打开页面之前完成 → SSE 首帧/进度条秒回
+    import threading as _thr
+    try:
+        from graphpt.common.redis_client import start_redis_probe
+        start_redis_probe()
+    except Exception:
+        pass
+
+    def _warm_count_caches() -> None:
+        try:
+            rows = _neo4j_query("MATCH (a:Asset) RETURN a.id AS id")
+            if not rows:
+                return
+            # 预热必须走 scan_progress（web 层）→ 填充 _COUNT_TARGETS_CACHE(30s)
+            # 与 sp 缓存(5s)，SSE/进度条首帧才秒回；scheduler.progress() 是
+            # 无缓存路径，预热它等于白跑。sync def 直接调用（线程内）。
+            for r in rows:
+                scan_progress(str(r["id"]))
+        except Exception:
+            _web_log.warning("count_cache_warmup_failed", exc_info=True)
+
+    _thr.Thread(target=_warm_count_caches, daemon=True, name="count-cache-warmup").start()
+    # 孤儿节点看门狗：启动时检查无归属节点并警告，防数据垃圾悄悄累积
+    # （历史教训：3344 个 asset_id=null 的 Domain 累积两周未被发现）
+    import threading as _orphan_thr
+
+    def _orphan_watchdog() -> None:
+        try:
+            from graphpt.common.redis_client import redis_available  # noqa: F401
+            rows = _neo4j_query(
+                "MATCH (n) WHERE NOT n:Asset "
+                "AND any(label IN labels(n) WHERE label IN "
+                "['Domain','IP','Port','HTTPEndpoint','File','Vulnerability','Secret']) "
+                "AND NOT EXISTS { MATCH (:Asset)-[*1..8]->(n) } "
+                "RETURN labels(n)[0] AS l, count(n) AS c ORDER BY c DESC")
+            if rows:
+                detail = ", ".join(f"{r['l']}={r['c']}" for r in rows[:6])
+                _web_log.warning("orphan_nodes_detected", extra={"detail": detail})
+            else:
+                _web_log.info("orphan_nodes_clean")
+        except Exception:
+            pass
+
+    _orphan_thr.Thread(target=_orphan_watchdog, daemon=True,
+                       name="orphan-watchdog").start()
+    # 桥③装配：扫描写图（collector）→ SQLite findings 投影（core）——
+    # 装配层是两侧唯一合法的交叉点（collector 不 import core，避免循环）
+    try:
+        from graphpt.collector.neo4j_client import register_vuln_hook
+        from graphpt.core.finding_pool import upsert_vuln_finding_from_graph
+        register_vuln_hook(upsert_vuln_finding_from_graph)
+        _web_log.info("vuln_hook_registered")
+    except Exception:
+        _web_log.warning("vuln_hook_register_failed", exc_info=True)
 
 
 async def _try_auto_resume():
@@ -198,7 +270,7 @@ async def _do_auto_resume():
     if resumed:
         _web_log.info("auto_resume_complete resumed=%d", resumed)
 
-# 采集产物（403 绕过数据包等）静态服务：BypassResult.packet_url 指向 /artifacts/...
+# 采集产物（403 绕过数据包等）静态服务：证据路径指向 /artifacts/...
 # 浏览器直接打开即可查看原始请求/响应数据包。
 _ARTIFACTS_DIR = _PROJECT_ROOT / "data" / "artifacts"
 _ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -350,6 +422,9 @@ async def health():
     cached = _cached(cache_key, ttl=30)
     if cached:
         return cached
+    # M1: 并行执行所有健康检查，单项超时 4s，整体不超 ~16s（30s 缓存兜底）。
+    # 挂起线程不 join（shutdown(wait=False)）——远程 Redis 不可达时线程可能
+    # 永不结束，join 会把健康检查本身拖死（曾导致 /api/health 永久 500）。
     import concurrent.futures as _hf
 
     def _neo4j_check():
@@ -361,8 +436,8 @@ async def health():
     def _tools_check():
         return _tool_config_health()
 
-    # M1: 并行执行所有健康检查，单项超时 3s，总体不超过 5s
-    with _hf.ThreadPoolExecutor(max_workers=4) as pool:
+    pool = _hf.ThreadPoolExecutor(max_workers=4)
+    try:
         futures = {
             pool.submit(_neo4j_check): "neo4j",
             pool.submit(_redis_check): "redis",
@@ -370,15 +445,16 @@ async def health():
             pool.submit(lambda: {"ok": True, "running": sum(1 for s in _list_agent_session_statuses().values() if s == "running")}): "agent",
         }
         results = {}
-        for f in _hf.as_completed(futures, timeout=5):
-            key = futures[f]
+        for f, key in futures.items():
             try:
                 results[key] = f.result(timeout=4)
-            except (_hf.TimeoutError, Exception) as exc:
+            except Exception as exc:
                 results[key] = {"ok": False, "error": str(exc) if str(exc) else "timeout"}
         for key in ("neo4j", "redis", "tools", "agent"):
             if key not in results:
                 results[key] = {"ok": False, "error": "check did not complete"}
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     overall = bool(
         results["neo4j"].get("ok")
@@ -611,6 +687,16 @@ async def system_logs_cleanup(force: bool = False):
     try:
         from graphpt.collector.pipeline import cleanup_old_logs
         result = cleanup_old_logs(force=force)
+        # 运行时数据目录（cache/ctf/cli_sessions）、流量库滚动、陈旧 tmp 兜底
+        try:
+            from graphpt.collector.cleanup import (
+                cleanup_runtime_dirs, cleanup_old_traffic, cleanup_stale_tmp,
+            )
+            result["runtime_dirs"] = cleanup_runtime_dirs(force=force)
+            result["traffic"] = cleanup_old_traffic(force=force)
+            result["stale_tmp"] = cleanup_stale_tmp(force=force)
+        except Exception:
+            pass
         return {"ok": True, "data": result}
     except Exception as exc:
         return _json_error(exc)
@@ -873,14 +959,26 @@ async def dashboard(asset_id: str = "default"):
         rows = _neo4j_query(
             """
             MATCH (a:Asset {id: $aid})
-            CALL (a) {  MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep
-                   UNION MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint) RETURN ep }
+            CALL (a) {
+              MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)
+                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(root:HTTPEndpoint)
+              MATCH (root)-[:DISCOVERED*0..32]->(ep:HTTPEndpoint)
+              RETURN ep
+              UNION
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(root:HTTPEndpoint)
+              MATCH (root)-[:DISCOVERED*0..32]->(ep:HTTPEndpoint)
+              RETURN ep
+              UNION
+              MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:EXPOSES]->(root:HTTPEndpoint)
+              MATCH (root)-[:DISCOVERED*0..32]->(ep:HTTPEndpoint)
+              RETURN ep
+            }
             WITH DISTINCT ep
-            OPTIONAL MATCH (ep)-[:EXPOSES_PATH]->(d:DirEntry)
+            OPTIONAL MATCH (ep)-[:DISCOVERED]->(child:HTTPEndpoint)
             OPTIONAL MATCH (ep)-[:REFERENCES]->(f:File)
-            WITH ep, count(DISTINCT d) AS dir_cnt, count(DISTINCT f) AS file_cnt
+            WITH ep, count(DISTINCT child) AS child_cnt, count(DISTINCT f) AS file_cnt
             RETURN count(ep) AS total_eps,
-                   sum(CASE WHEN dir_cnt = 0 AND file_cnt = 0 THEN 1 ELSE 0 END) AS unscanned_eps
+                   sum(CASE WHEN child_cnt = 0 AND file_cnt = 0 THEN 1 ELSE 0 END) AS unscanned_eps
             """,
             aid=asset_id,
         )
@@ -920,7 +1018,8 @@ async def dashboard(asset_id: str = "default"):
         rows = _neo4j_query(
             """
             MATCH (:Asset {id: $aid})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(d:Domain)
-            RETURN d.value AS value, d.source AS source, d.created_at AS created_at
+            RETURN d.value AS value, head(coalesce(d.sources, [])) AS source,
+                   d.created_at AS created_at
             ORDER BY d.created_at DESC
             LIMIT 10
             """,
@@ -1194,56 +1293,10 @@ def _host_of_url(url: str) -> str:
         return url
 
 
-_TWO_LEVEL_TLDS = {
-    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "co.uk", "org.uk",
-    "com.au", "net.au", "co.jp", "ne.jp", "com.br", "net.br", "co.kr",
-    "com.mx", "com.tw", "com.hk", "com.sg", "com.my", "co.in", "com.tr",
-}
-
-
-def _root_domain_of(host: str) -> str:
-    """mail.example.com → example.com；shop.example.co.uk → example.co.uk。"""
-    h = (host or "").strip().lower().rstrip(".")
-    parts = [p for p in h.split(".") if p]
-    if len(parts) <= 2:
-        return h
-    tail2 = ".".join(parts[-2:])
-    if tail2 in _TWO_LEVEL_TLDS:
-        return ".".join(parts[-3:])
-    return tail2
-
-
-def _attach_to_project(project_id: str, kind: str, value: str) -> bool:
-    """把域名/IP 挂到项目下（无资产对应，悬空数据）。"""
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if kind in ("domain", "subdomain"):
-        _neo4j_query(
-            """
-            MERGE (d:Domain {id: $did})
-              ON CREATE SET d.value = $v, d.created_at = $now,
-                            d.is_root = false, d.project_id = $pid
-              SET d.project_id = $pid
-            """,
-            did=f"domain:{value}", v=value, now=now, pid=str(project_id),
-        )
-        return True
-    if kind == "ip":
-        _neo4j_query(
-            """
-            MERGE (ip:IP {id: $iid})
-              ON CREATE SET ip.value = $v, ip.created_at = $now, ip.project_id = $pid
-              SET ip.project_id = $pid
-            """,
-            iid=f"ip:{value}", v=value, now=now, pid=str(project_id),
-        )
-        return True
-    return False
-
-
 def _add_child_node(parent_id: str, parent_label: str, kind: str, value: str) -> bool:
     """图节点操作：在指定父节点下添加子节点并建立关系（Graph 页点击节点）。
 
-    parent_label: Asset / Domain / Subdomain / IP / Port / HTTPEndpoint
+    parent_label: Asset / Domain / IP / Port / HTTPEndpoint
     kind: domain / subdomain / ip / port / endpoint
     """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1260,20 +1313,11 @@ def _add_child_node(parent_id: str, parent_label: str, kind: str, value: str) ->
             return _attach_endpoint(parent_id, parent_id, value)
         return False
 
-    # 域节点（Domain/Subdomain）：加子域 / 端点 / IP
-    if parent_label in ("Domain", "Subdomain"):
+    # Domain 节点：加子域 / 端点 / IP
+    if parent_label == "Domain":
         if kind == "subdomain":
-            _neo4j_query(
-                """
-                MATCH (p:Domain {id: $pid})
-                MERGE (d:Domain {id: $did})
-                  ON CREATE SET d.value = $v, d.created_at = $now,
-                                d.is_root = false, d.level = 2
-                MERGE (p)-[:PARENT_OF]->(d)
-                """,
-                pid=parent_id, did=f"domain:{value}", v=value, now=now,
-            )
-            return True
+            aid = _asset_id_of_node(parent_id)
+            return _attach_to_asset(aid, "subdomain", value)
         if kind == "ip":
             _neo4j_query(
                 """
@@ -1399,52 +1443,15 @@ async def add_node_child(body: dict):
 
 
 def _attach_to_asset(asset_id: str, kind: str, value: str) -> bool:
-    """把域名/子域名/IP 挂到指定资产（表头驱动的列式导入）。
+    """通过唯一 GraphWriter 把域名/IP 挂到资产。"""
+    from graphpt.collector.neo4j_client import get_graph_writer
 
-    kind: domain（HAS_DOMAIN）/ subdomain（挂根域 PARENT_OF）/ ip（HAS_IP）
-    """
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if kind == "domain":
-        _neo4j_query(
-            """
-            MATCH (a:Asset {id: $aid})
-            MERGE (d:Domain {id: $did})
-              ON CREATE SET d.value = $v, d.created_at = $now,
-                            d.is_root = true, d.level = 1
-            MERGE (a)-[:HAS_DOMAIN]->(d)
-            """,
-            aid=asset_id, did=f"domain:{value}", v=value, now=now,
-        )
-        return True
-    if kind == "subdomain":
-        # 自动推导主域：mail.example.com → 确保 example.com 根域存在并 PARENT_OF 挂上
-        root = _root_domain_of(value)
-        _neo4j_query(
-            """
-            MATCH (a:Asset {id: $aid})
-            MERGE (rd:Domain {id: $rdid})
-              ON CREATE SET rd.value = $root, rd.created_at = $now,
-                            rd.is_root = true, rd.level = 1
-            MERGE (a)-[:HAS_DOMAIN]->(rd)
-            MERGE (d:Domain {id: $did})
-              ON CREATE SET d.value = $v, d.created_at = $now,
-                            d.is_root = false, d.level = 2
-            MERGE (rd)-[:PARENT_OF]->(d)
-            """,
-            aid=asset_id, rdid=f"domain:{root}", root=root,
-            did=f"domain:{value}", v=value, now=now,
-        )
+    writer = get_graph_writer()
+    if kind in ("domain", "subdomain"):
+        writer.write_domain(value=value, asset_id=asset_id, source="manual")
         return True
     if kind == "ip":
-        _neo4j_query(
-            """
-            MATCH (a:Asset {id: $aid})
-            MERGE (ip:IP {id: $iid})
-              ON CREATE SET ip.value = $v, ip.created_at = $now
-            MERGE (a)-[:HAS_IP]->(ip)
-            """,
-            aid=asset_id, iid=f"ip:{value}", v=value, now=now,
-        )
+        writer.write_ip(ip=value, asset_id=asset_id, source="manual")
         return True
     return False
 
@@ -1483,15 +1490,7 @@ def _create_asset_graph(asset_id: str, name: str,
         domain = domain.strip().lower()
         if not domain:
             continue
-        _neo4j_query(
-            """
-            MATCH (a:Asset {id: $aid})
-            MERGE (d:Domain {id: $domain_id})
-              ON CREATE SET d.value = $domain, d.created_at = $now, d.is_root = true, d.level = 1
-            MERGE (a)-[:HAS_DOMAIN]->(d)
-            """,
-            aid=asset_id, domain_id=f"domain:{domain}", domain=domain, now=now,
-        )
+        _attach_to_asset(asset_id, "domain", domain)
         seeded += 1
 
     _invalidate_assets_cache()  # 清除资产列表缓存（含 project_id 键）
@@ -1867,13 +1866,16 @@ def _upsert_project_row(pid: str, name: str, extra: list[str]) -> int:
 
 
 @web_app.get("/api/export")
-async def export_data(template: bool = False, format: str = "xlsx"):
+def export_data(template: bool = False, format: str = "xlsx"):
     """导出数据（图数据库 + SQLite 数据），支持三种格式：
 
     - format=xlsx（默认）: Excel 多 sheet（全中文表头，可回导）
     - format=cypher: Cypher 脚本（节点+关系语句，cypher-shell 直接执行回导）
     - format=md: Markdown 层级文档（缩进=关系层级，人看关系的视图）
     template=True 时返回空模板（仅 xlsx 支持）。
+
+    同步 def（非 async）：全量 Neo4j 查询 + openpyxl 内存构建较重，
+    由 FastAPI 线程池调度，避免卡住其他 API。
     """
     if format == "cypher":
         return _export_cypher()
@@ -1935,7 +1937,7 @@ async def export_data(template: bool = False, format: str = "xlsx"):
                ["aid", "aname", "v", "root", "lv", "ct"],
                {"root": _fmt_bool}))() if not template else None)
 
-    # ── Sheet: 子域名 ──（RootDomain/Subdomain 已统一为 Domain，查 PARENT_OF 非根链）
+    # ── Sheet: 子域名 ──（Domain 的非根层级）
     _sheet("子域名",
            ["资产ID", "公司名", "子域名", "创建时间"],
            sample=[["acme-corp", "Acme Corp", "mail.acme.com", "2026-08-15T10:00:00Z"]],
@@ -2442,6 +2444,14 @@ def _generate_agent_report(asset_id: str, session_id: str,
             body = body + "\n\n---\n" + "\n".join(sections)
 
         md_path = _AGENT_REPORTS_DIR / f"agent_{safe}_{ts}.md"
+        # 证据链段落（事实板 facts+grounding → 报告），修复证据链断裂问题
+        try:
+            from graphpt.search.report_doc import build_evidence_section
+            evidence = build_evidence_section(asset_id)
+            if evidence:
+                body = body + "\n\n---\n" + evidence
+        except Exception:
+            pass
         md_path.write_text("\n".join(head) + body, encoding="utf-8")
 
         html_path = _AGENT_REPORTS_DIR / f"agent_{safe}_{ts}.html"
@@ -2593,16 +2603,9 @@ async def import_assets(request: Request):
                     except Exception as exc:  # noqa: BLE001
                         failed += 1
                         errors.append(f"{kind} '{value}': {exc}")
-                elif i_pid:
-                    try:
-                        if _attach_to_project(str(i_pid), kind, value):
-                            attached += 1
-                    except Exception as exc:  # noqa: BLE001
-                        failed += 1
-                        errors.append(f"{kind} '{value}': {exc}")
                 else:
                     failed += 1
-                    errors.append(f"{kind} '{value}': 未指定资产或项目")
+                    errors.append(f"{kind} '{value}': 必须指定资产；项目不能直接拥有图节点")
             continue
         # Markdown 层级回导（导出 md 编辑后回导）
         if lower_name == "__md__":
@@ -2611,16 +2614,12 @@ async def import_assets(request: Request):
                 md_asset_id = str(item.get("asset_id") or "")
                 md_pid = str(item.get("project_id") or "") or None
                 value = str(item.get("value") or "").strip()
-                # 悬空数据（挂项目，无资产）
+                # 图节点必须归属于 Asset，禁止创建项目级悬空节点。
                 if md_pid and not md_asset_id and kind in ("domain", "subdomain", "ip"):
                     if not value:
                         continue
-                    try:
-                        if _attach_to_project(md_pid, kind, value):
-                            attached += 1
-                    except Exception as exc:  # noqa: BLE001
-                        failed += 1
-                        errors.append(f"{kind} '{value}': {exc}")
+                    failed += 1
+                    errors.append(f"{kind} '{value}': 必须指定资产；禁止项目级悬空节点")
                     continue
                 if kind == "asset":
                     name = str(item.get("name") or "")
@@ -2795,96 +2794,24 @@ async def update_asset(asset_id: str, body: dict):
 
 @web_app.delete("/api/assets/{asset_id}")
 async def delete_asset(asset_id: str):
-    """删除 Asset 及完整子图（沿 HAS_DOMAIN / HAS_IP / HAS_ICP 路径清理所有关联节点）。
-
-    两步执行：
-    1. 清理所有关联的 ScanRun（它们可能有 RAN 指向子树节点，阻止删除）
-    2. 删除完整子树
-    """
+    """删除 Asset 及正式关系可达子图，同时保留其他 Asset 仍引用的节点。"""
     try:
-        # Step 0: 先删除该 asset 的 ScanRun（RAN 关系指向子树节点，必须先清理）
-        _neo4j_query(
-            """
-            MATCH (sr:ScanRun {asset_id: $aid})
-            DETACH DELETE sr
-            """,
-            aid=asset_id,
-        )
-        # Step 1: 收集并删除子树节点
+        relationship_union = "|".join(_GRAPH_RELATIONSHIP_TYPES)
         result = _neo4j_query(
-            """
-            MATCH (a:Asset {id: $aid})
-            CALL (a) {
-              OPTIONAL MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(d:Domain)
-              OPTIONAL MATCH (d)-[:RESOLVES_TO]->(ip:IP)
-              OPTIONAL MATCH (d)-[:EXPOSES]->(ep1:HTTPEndpoint)
-              OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
-              OPTIONAL MATCH (p)-[:EXPOSES]->(ep2:HTTPEndpoint)
-              OPTIONAL MATCH (p)-[:HAS_SERVICE]->(svc:Service)
-              OPTIONAL MATCH (ep1)-[:EXPOSES_PATH]->(dir1:DirEntry)
-              OPTIONAL MATCH (ep2)-[:EXPOSES_PATH]->(dir2:DirEntry)
-              OPTIONAL MATCH (ep1)-[:REFERENCES]->(f:File)
-              OPTIONAL MATCH (ep2)-[:REFERENCES]->(f2:File)
-              OPTIONAL MATCH (ep1)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
-              OPTIONAL MATCH (ep2)-[:MAY_BE_VULNERABLE_TO]->(v2:Vulnerability)
-              OPTIONAL MATCH (ep1)-[:MAY_CONTAIN]->(sec:Secret)
-              OPTIONAL MATCH (ep2)-[:MAY_CONTAIN]->(sec2:Secret)
-              OPTIONAL MATCH (ep1)-[:BYPASS_ATTEMPT]->(byp:BypassResult)
-              OPTIONAL MATCH (ep2)-[:BYPASS_ATTEMPT]->(byp2:BypassResult)
-              OPTIONAL MATCH (ep1)-[:EXPOSES_API]->(api:ApiEndpoint)
-              OPTIONAL MATCH (ep2)-[:EXPOSES_API]->(api2:ApiEndpoint)
-              OPTIONAL MATCH (f)-[:MAY_CONTAIN]->(sec3:Secret)
-              OPTIONAL MATCH (f2)-[:MAY_CONTAIN]->(sec4:Secret)
-              OPTIONAL MATCH (f)-[:DEFINES_API]->(api3:ApiEndpoint)
-              OPTIONAL MATCH (f2)-[:DEFINES_API]->(api4:ApiEndpoint)
-              RETURN collect(DISTINCT d) + collect(DISTINCT ip) +
-                     collect(DISTINCT p) + collect(DISTINCT svc) +
-                     collect(DISTINCT ep1) + collect(DISTINCT ep2) +
-                     collect(DISTINCT dir1) + collect(DISTINCT dir2) +
-                     collect(DISTINCT f) + collect(DISTINCT f2) +
-                     collect(DISTINCT v) + collect(DISTINCT v2) +
-                     collect(DISTINCT sec) + collect(DISTINCT sec2) + collect(DISTINCT sec3) + collect(DISTINCT sec4) +
-                     collect(DISTINCT byp) + collect(DISTINCT byp2) +
-                     collect(DISTINCT api) + collect(DISTINCT api2) + collect(DISTINCT api3) + collect(DISTINCT api4)
-                     AS domain_nodes
-            }
-            CALL (a) {
-              OPTIONAL MATCH (a)-[:HAS_IP]->(ip:IP)
-              OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
-              OPTIONAL MATCH (p)-[:EXPOSES]->(ep:HTTPEndpoint)
-              OPTIONAL MATCH (ep)-[:EXPOSES_PATH]->(d:DirEntry)
-              OPTIONAL MATCH (ep)-[:REFERENCES]->(f:File)
-              OPTIONAL MATCH (ep)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
-              OPTIONAL MATCH (ep)-[:MAY_CONTAIN]->(sec:Secret)
-              OPTIONAL MATCH (ep)-[:BYPASS_ATTEMPT]->(byp:BypassResult)
-              OPTIONAL MATCH (ep)-[:EXPOSES_API]->(api:ApiEndpoint)
-              OPTIONAL MATCH (f)-[:MAY_CONTAIN]->(sec2:Secret)
-              OPTIONAL MATCH (f)-[:DEFINES_API]->(api2:ApiEndpoint)
-              RETURN collect(DISTINCT ip) + collect(DISTINCT p) + collect(DISTINCT ep) +
-                     collect(DISTINCT d) + collect(DISTINCT f) +
-                     collect(DISTINCT v) + collect(DISTINCT sec) + collect(DISTINCT sec2) +
-                     collect(DISTINCT byp) + collect(DISTINCT api) + collect(DISTINCT api2)
-                     AS ip_nodes
-            }
-            CALL (a) {
-              OPTIONAL MATCH (a)-[:HAS_ICP]->(icp:ICPRecord)
-              RETURN collect(DISTINCT icp) AS icp_nodes
-            }
-            WITH domain_nodes + ip_nodes + icp_nodes AS all_nodes, a
-            UNWIND all_nodes AS n
-            WITH DISTINCT n, a
-            WHERE n IS NOT NULL
-            DETACH DELETE n
-            WITH DISTINCT a
+            f"""
+            MATCH (a:Asset {{id: $aid}})
+            OPTIONAL MATCH (a)-[:{relationship_union}*1..32]->(n)
+            WITH a, collect(DISTINCT n) AS all_nodes
             DETACH DELETE a
-            RETURN 1 AS deleted
+            WITH all_nodes
+            UNWIND all_nodes AS n
+            WITH DISTINCT n
+            WHERE n IS NOT NULL AND NOT EXISTS {{
+              MATCH (:Asset)-[:{relationship_union}*1..32]->(n)
+            }}
+            DETACH DELETE n
+            RETURN count(*) AS deleted
             """,
-            aid=asset_id,
-        )
-        # Asset 空壳兜底：子树为空时上面的 WHERE n IS NOT NULL 过滤掉全部行，
-        # DETACH DELETE a 永不执行，残留空 Asset 节点。此处无条件删除 Asset 本体。
-        _neo4j_query(
-            "MATCH (a:Asset {id: $aid}) DETACH DELETE a RETURN count(a)",
             aid=asset_id,
         )
         _invalidate_assets_cache()  # 清除资产列表缓存（含 project_id 键）
@@ -3063,6 +2990,7 @@ async def list_targets(
         if search:
             # ── 通用搜索：遍历预定义路径，每类单独查询，容错合并 ──
             rows: list[dict[str, Any]] = []
+            seen_node_ids: set[str] = set()
             for _path, _props, _label in _SEARCH_PATHS:
                 if len(rows) >= per_page:
                     break
@@ -3081,6 +3009,11 @@ async def list_targets(
                         aid=asset_id, search=search, limit=per_page + 1,
                     )
                     for r in _batch[:per_page - len(rows)]:
+                        node_id = str(r.get("id") or "")
+                        if node_id and node_id in seen_node_ids:
+                            continue
+                        if node_id:
+                            seen_node_ids.add(node_id)
                         rows.append({
                             "value": r["value"],
                             "id": r.get("id", ""),
@@ -3163,169 +3096,62 @@ async def add_target(body: dict, asset_id: str = "default"):
     from ipaddress import ip_address
 
     try:
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         source = "web_admin"
 
-        if ttype == "domain":
-            domain = value.strip(".").lower()
-            domain_id = f"domain:{domain}"
+        if ttype in ("domain", "subdomain"):
+            from graphpt.common.asset_identity import normalize_fqdn
+            from graphpt.collector.neo4j_client import get_graph_writer
 
-            # 自动识别层级
-            parts = domain.split(".")
-            level = len(parts)
-            is_root = (level <= 2)  # example.com 是 root
-
-            # 如果是子域名，需要建立 PARENT_OF 关系
-            parent_domain = ".".join(parts[-2:]) if len(parts) > 2 else None
-
-            if parent_domain:
-                result = _neo4j_query(
-                    """
-                    MERGE (a:Asset {id: $aid}) ON CREATE SET a.created_at = $now
-                    MERGE (d:Domain {id: $domain_id})
-                      ON CREATE SET d.value = $domain, d.level = $level, d.is_root = $is_root, d.created_at = $now
-                    MERGE (parent:Domain {id: $parent_id})
-                      ON CREATE SET parent.value = $parent_domain, parent.level = 2, parent.is_root = true, parent.created_at = $now
-                    MERGE (a)-[:HAS_DOMAIN]->(parent)
-                    MERGE (parent)-[:PARENT_OF]->(d)
-                    RETURN d.id AS id, d.value AS value, d.created_at = $now AS created
-                    """,
-                    aid=asset_id, domain_id=domain_id, domain=domain, level=level, is_root=is_root,
-                    parent_id=f"domain:{parent_domain}", parent_domain=parent_domain, now=now,
-                )
-            else:
-                result = _neo4j_query(
-                    """
-                    MERGE (a:Asset {id: $aid}) ON CREATE SET a.created_at = $now
-                    MERGE (d:Domain {id: $domain_id})
-                      ON CREATE SET d.value = $domain, d.level = $level, d.is_root = $is_root, d.created_at = $now
-                    MERGE (a)-[:HAS_DOMAIN]->(d)
-                    RETURN d.id AS id, d.value AS value, d.created_at = $now AS created
-                    """,
-                    aid=asset_id, domain_id=domain_id, domain=domain, level=level, is_root=is_root, now=now,
-                )
-
-        elif ttype == "subdomain":
-            # subdomain 类型直接当作 domain 处理
-            domain = value.strip(".").lower()
-            domain_id = f"domain:{domain}"
-            parts = domain.split(".")
-            level = len(parts)
-            is_root = False
-            parent_domain = ".".join(parts[1:]) if len(parts) > 1 else None
-
-            if parent_domain:
-                result = _neo4j_query(
-                    """
-                    MERGE (a:Asset {id: $aid}) ON CREATE SET a.created_at = $now
-                    MERGE (d:Domain {id: $domain_id})
-                      ON CREATE SET d.value = $domain, d.level = $level, d.is_root = $is_root, d.sources = [$source], d.created_at = $now
-                      ON MATCH  SET d.last_seen_at = $now
-                    WITH d, coalesce(d.sources, []) AS _cur
-                    SET d.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
-                    WITH d
-                    MERGE (parent:Domain {id: $parent_id})
-                      ON CREATE SET parent.value = $parent_domain, parent.created_at = $now
-                    MERGE (a:Asset {id: $aid})-[:HAS_DOMAIN]->(parent)
-                    MERGE (parent)-[:PARENT_OF]->(d)
-                    RETURN d.id AS id, d.value AS value, d.created_at = $now AS created
-                    """,
-                    aid=asset_id, domain_id=domain_id, domain=domain, level=level, is_root=is_root,
-                    parent_id=f"domain:{parent_domain}", parent_domain=parent_domain, source=source, now=now,
-                )
-            else:
-                result = _neo4j_query(
-                    """
-                    MERGE (a:Asset {id: $aid}) ON CREATE SET a.created_at = $now
-                    MERGE (d:Domain {id: $domain_id})
-                      ON CREATE SET d.value = $domain, d.level = $level, d.is_root = true, d.sources = [$source], d.created_at = $now
-                    MERGE (a)-[:HAS_DOMAIN]->(d)
-                    RETURN d.id AS id, d.value AS value, d.created_at = $now AS created
-                    """,
-                    aid=asset_id, domain_id=domain_id, domain=domain, level=level, source=source, now=now,
-                )
+            domain = normalize_fqdn(value)
+            if not domain:
+                raise HTTPException(400, "invalid domain")
+            written = get_graph_writer().write_domain(
+                domain, asset_id, source=source,
+            )
+            result = [written]
 
         elif ttype == "ip":
             ip_val = value.strip().strip("[]")
-            ip_id = f"ip:{ip_val}"
-            result = _neo4j_query(
-                """
-                MERGE (a:Asset {id: $aid}) ON CREATE SET a.created_at = $now
-                MERGE (ip:IP {id: $ip_id})
-                  ON CREATE SET ip.value = $ip_val, ip.sources = [$source], ip.created_at = $now
-                  ON MATCH  SET ip.last_seen_at = $now
-                WITH ip, coalesce(ip.sources, []) AS _cur
-                SET ip.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
-                WITH ip
-                MATCH (a:Asset {id: $aid})
-                MERGE (a)-[:HAS_IP]->(ip)
-                RETURN ip.id AS id, ip.value AS value, ip.created_at = $now AS created
-                """,
-                aid=asset_id, ip_id=ip_id, ip_val=ip_val, source=source, now=now,
-            )
+            ip_address(ip_val)
+            from graphpt.collector.neo4j_client import get_graph_writer
+            result = [get_graph_writer().write_ip(
+                ip_val, asset_id=asset_id, source=source,
+            )]
 
         elif ttype == "url":
-            u = value.strip()
-            parsed = urlparse(u if "://" in u else f"https://{u}")
+            from graphpt.common.asset_identity import normalize_url
+            from graphpt.collector.neo4j_client import get_graph_writer
+
+            u = value.strip() if "://" in value else f"https://{value.strip()}"
+            normalized_url = normalize_url(u)
+            if not normalized_url:
+                raise HTTPException(400, "invalid URL")
+            parsed = urlparse(normalized_url)
             host = (parsed.hostname or "").strip(".").lower()
             if not host:
                 raise HTTPException(400, "could not extract host from URL")
+            writer = get_graph_writer()
             try:
                 ip_address(host)
-                # host is an IP
-                ip_id = f"ip:{host}"
-                result = _neo4j_query(
-                    """
-                    MERGE (a:Asset {id: $aid}) ON CREATE SET a.created_at = $now
-                    MERGE (ip:IP {id: $ip_id})
-                      ON CREATE SET ip.value = $host, ip.sources = [$source], ip.created_at = $now
-                      ON MATCH  SET ip.last_seen_at = $now
-                    WITH ip, coalesce(ip.sources, []) AS _cur
-                    SET ip.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
-                    WITH ip
-                    MATCH (a:Asset {id: $aid})
-                    MERGE (a)-[:HAS_IP]->(ip)
-                    RETURN ip.id AS id, ip.value AS value, ip.created_at = $now AS created
-                    """,
-                    aid=asset_id, ip_id=ip_id, host=host, source=source, now=now,
+                parent = writer.write_ip(
+                    host, asset_id=asset_id, source=source,
                 )
             except ValueError:
-                # host is a domain
-                parts = host.split(".")
-                level = len(parts)
-                parent_domain = ".".join(parts[1:]) if len(parts) > 1 else None
-                domain_id = f"domain:{host}"
-
-                if parent_domain:
-                    result = _neo4j_query(
-                        """
-                        MERGE (a:Asset {id: $aid}) ON CREATE SET a.created_at = $now
-                        MERGE (d:Domain {id: $domain_id})
-                          ON CREATE SET d.value = $host, d.level = $level, d.is_root = false, d.sources = [$source], d.created_at = $now
-                          ON MATCH  SET d.last_seen_at = $now
-                        WITH d, coalesce(d.sources, []) AS _cur
-                        SET d.sources = CASE WHEN $source IN _cur THEN _cur ELSE _cur + [$source] END
-                        WITH d
-                        MERGE (parent:Domain {id: $parent_id})
-                          ON CREATE SET parent.value = $parent_domain, parent.created_at = $now
-                        MERGE (a:Asset {id: $aid})-[:HAS_DOMAIN]->(parent)
-                        MERGE (parent)-[:PARENT_OF]->(d)
-                        RETURN d.id AS id, d.value AS value, d.created_at = $now AS created
-                        """,
-                        aid=asset_id, domain_id=domain_id, host=host, level=level,
-                        parent_id=f"domain:{parent_domain}", parent_domain=parent_domain, source=source, now=now,
-                    )
-                else:
-                    result = _neo4j_query(
-                        """
-                        MERGE (a:Asset {id: $aid}) ON CREATE SET a.created_at = $now
-                        MERGE (d:Domain {id: $domain_id})
-                          ON CREATE SET d.value = $host, d.level = $level, d.is_root = true, d.sources = [$source], d.created_at = $now
-                        MERGE (a)-[:HAS_DOMAIN]->(d)
-                        RETURN d.id AS id, d.value AS value, d.created_at = $now AS created
-                        """,
-                        aid=asset_id, domain_id=domain_id, host=host, level=level, source=source, now=now,
-                    )
+                parent = writer.write_domain(
+                    host, asset_id, source=source,
+                )
+            endpoint = writer.write_http_endpoint(
+                normalized_url,
+                parent_id=str(parent.get("id") or ""),
+                crawl_status="not_fetched",
+                asset_id=asset_id,
+                source=source,
+            )
+            result = [{
+                "id": endpoint.get("id"),
+                "value": normalized_url,
+                "created": endpoint.get("created", True),
+            }]
         else:
             raise HTTPException(400, f"unknown target type: {ttype}")
 
@@ -3354,28 +3180,42 @@ async def add_target(body: dict, asset_id: str = "default"):
 async def delete_target(target_id: str, asset_id: str = "default"):
     """删除目标（域名或独立 IP）及其所有子节点。"""
     try:
-        # 尝试作为 Domain 删除（包括所有子域名）
+        # Domain：解除根归属或父子边，再只清理任何 Asset 都不可达的子图。
         _neo4j_query(
             """
-            MATCH (:Asset {id: $aid})-[:HAS_DOMAIN*1..]->(d:Domain {id: $tid})
-            OPTIONAL MATCH (d)-[:PARENT_OF*0..]->(child:Domain)
-            OPTIONAL MATCH (child)-[:RESOLVES_TO]->(ip:IP)
-            OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
-            OPTIONAL MATCH (p)-[:EXPOSES]->(ep:HTTPEndpoint)
-            OPTIONAL MATCH (p)-[:HAS_SERVICE]->(svc:Service)
-            DETACH DELETE ep, svc, p, ip, child, d
+            MATCH (a:Asset {id: $aid})-[:HAS_DOMAIN]->(root:Domain)
+                  -[:PARENT_OF*0..]->(d:Domain {id: $tid})
+            OPTIONAL MATCH (a)-[asset_rel:HAS_DOMAIN]->(d)
+            OPTIONAL MATCH (:Domain)-[parent_rel:PARENT_OF]->(d)
+            FOREACH (_ IN CASE WHEN asset_rel IS NULL THEN [] ELSE [1] END | DELETE asset_rel)
+            FOREACH (_ IN CASE WHEN parent_rel IS NULL THEN [] ELSE [1] END | DELETE parent_rel)
+            WITH d
+            OPTIONAL MATCH (d)-[*0..7]->(n)
+            WHERE any(label IN labels(n) WHERE label IN
+              ['Domain','IP','Port','Service','HTTPEndpoint','File','Vulnerability','Secret'])
+            WITH collect(DISTINCT n) AS candidates
+            UNWIND candidates AS n
+            WITH DISTINCT n
+            WHERE NOT EXISTS { MATCH (:Asset)-[*1..8]->(n) }
+            DETACH DELETE n
             """,
             aid=asset_id,
             tid=target_id,
         )
-        # 尝试作为独立 IP 删除
+        # 独立 IP：解除当前资产关系，共享或域名仍可达时保留。
         _neo4j_query(
             """
             MATCH (:Asset {id: $aid})-[r_hi:HAS_IP]->(ip:IP {id: $tid})
-            OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
-            OPTIONAL MATCH (p)-[:EXPOSES]->(ep:HTTPEndpoint)
-            OPTIONAL MATCH (p)-[:HAS_SERVICE]->(svc:Service)
-            DELETE r_hi, ep, svc, p, ip
+            DELETE r_hi
+            WITH ip
+            OPTIONAL MATCH (ip)-[*0..5]->(n)
+            WHERE any(label IN labels(n) WHERE label IN
+              ['IP','Port','Service','HTTPEndpoint','File','Vulnerability','Secret'])
+            WITH collect(DISTINCT n) AS candidates
+            UNWIND candidates AS n
+            WITH DISTINCT n
+            WHERE NOT EXISTS { MATCH (:Asset)-[*1..8]->(n) }
+            DETACH DELETE n
             """,
             aid=asset_id,
             tid=target_id,
@@ -3459,12 +3299,12 @@ async def explorer_subtree(node_id: str, asset_id: str = "default",
     """展开节点子树。limit=50 默认分页，offset 翻页。
 
     node_id 前缀决定展开逻辑：
-      root:* → 列出子域名，每个子域名含已解析 IP
+      domain:* → 列出直接子域，每个域含已解析 IP
       ip:*   → 列出 Port，每个 Port 含 HTTPEndpoint
     """
     try:
-        if node_id.startswith("root:"):
-            return await _expand_root(node_id, asset_id, limit=limit, offset=offset)
+        if node_id.startswith("domain:"):
+            return await _expand_domain(node_id, asset_id, limit=limit, offset=offset)
         elif node_id.startswith("ip:"):
             return await _expand_ip(node_id, asset_id)
         elif node_id.startswith("ep:"):
@@ -3475,7 +3315,7 @@ async def explorer_subtree(node_id: str, asset_id: str = "default",
         return _json_error(exc)
 
 
-async def _expand_root(root_id: str, asset_id: str, limit: int = 50, offset: int = 0):
+async def _expand_domain(root_id: str, asset_id: str, limit: int = 50, offset: int = 0):
     """展开 Domain → 子 Domains → IPs（一层），分页返回子域名。"""
     # 先取域名节点信息
     node_rows = _neo4j_query(
@@ -3515,7 +3355,7 @@ async def _expand_root(root_id: str, asset_id: str, limit: int = 50, offset: int
                                  id: p.id, sources: p.sources}) AS ports,
                collect(DISTINCT {type: 'Endpoint', id: ep.id, url: ep.url,
                                  status_code: ep.status_code, title: ep.title,
-                                 tech: ep.tech, crawl_status: ep.crawl_status,
+                                 tech: ep.fingerprint, crawl_status: ep.crawl_status,
                                  content_length: ep.content_length,
                                  sources: ep.sources, created_at: ep.created_at}) AS endpoints
         ORDER BY d.value
@@ -3564,6 +3404,20 @@ async def _expand_root(root_id: str, asset_id: str, limit: int = 50, offset: int
     }
 
 
+def _endpoint_display_type(roles: list[str] | None) -> str:
+    """把物理 HTTPEndpoint 的 roles 映射为唯一展示类型，不复制图节点。"""
+    normalized = {str(role).strip().lower() for role in (roles or [])}
+    for role, display_type in (
+        ("api", "APIEndpoint"),
+        ("directory", "DirectoryPath"),
+        ("login", "LoginEndpoint"),
+        ("protected", "ProtectedPath"),
+    ):
+        if role in normalized:
+            return display_type
+    return "HTTPEndpoint"
+
+
 async def _expand_ip(ip_id: str, asset_id: str):
     """展开 IP → Ports → HTTPEndpoints。"""
     node_rows = _neo4j_query(
@@ -3589,7 +3443,9 @@ async def _expand_ip(ip_id: str, asset_id: str):
                svc.name AS service_name,
                collect(DISTINCT {
                  type: 'Endpoint', id: ep.id, url: ep.url, status_code: ep.status_code,
-                 title: ep.title, tech: ep.tech, sources: ep.sources,
+                 title: ep.title, method: ep.method, roles: ep.roles,
+                 params: ep.params, api_signals: ep.api_signals,
+                 tech: ep.fingerprint, sources: ep.sources,
                  crawl_status: ep.crawl_status, content_length: ep.content_length,
                  created_at: ep.created_at
                }) AS endpoints
@@ -3605,27 +3461,45 @@ async def _expand_ip(ip_id: str, asset_id: str):
             if e.get("id"):
                 ep_ids.append(e["id"])
 
-    # Batch query: dir + file counts per endpoint
+    # 端点覆盖与行为计数（统一 HTTPEndpoint 子树）
     ep_counts: dict[str, dict] = {}
     if ep_ids:
         count_rows = _neo4j_query(
             """
             MATCH (ep:HTTPEndpoint)
             WHERE ep.id IN $ids
-            OPTIONAL MATCH (ep)-[:EXPOSES_PATH]->(d:DirEntry)
+            OPTIONAL MATCH (ep)-[:DISCOVERED]->(child:HTTPEndpoint)
             OPTIONAL MATCH (ep)-[:REFERENCES]->(f:File)
-            RETURN ep.id AS id, count(DISTINCT d) AS dir_count, count(DISTINCT f) AS file_count
+            OPTIONAL MATCH (ep)-[:HAS_ATTEMPT]->(attempt:TestAttempt)
+            OPTIONAL MATCH (ep)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+            RETURN ep.id AS id,
+                   count(DISTINCT child) AS child_count,
+                   count(DISTINCT CASE WHEN 'directory' IN coalesce(child.roles, []) THEN child END) AS dir_count,
+                   count(DISTINCT CASE WHEN 'api' IN coalesce(child.roles, []) THEN child END) AS api_count,
+                   count(DISTINCT f) AS file_count,
+                   count(DISTINCT attempt) AS attempt_count,
+                   count(DISTINCT v) AS vulnerability_count
             """,
             ids=ep_ids,
         )
         for cr in count_rows:
-            ep_counts[cr["id"]] = {"dir_count": cr["dir_count"], "file_count": cr["file_count"]}
+            ep_counts[cr["id"]] = {
+                "child_count": cr["child_count"], "dir_count": cr["dir_count"],
+                "api_count": cr["api_count"], "file_count": cr["file_count"],
+                "attempt_count": cr["attempt_count"],
+                "vulnerability_count": cr["vulnerability_count"],
+            }
 
     children = []
     for row in ports:
         endpoints = [{**e, "type": "Endpoint",
+                      "display_type": _endpoint_display_type(e.get("roles")),
+                      "child_count": ep_counts.get(e["id"], {}).get("child_count", 0),
                       "dir_count": ep_counts.get(e["id"], {}).get("dir_count", 0),
-                      "file_count": ep_counts.get(e["id"], {}).get("file_count", 0)}
+                      "api_count": ep_counts.get(e["id"], {}).get("api_count", 0),
+                      "file_count": ep_counts.get(e["id"], {}).get("file_count", 0),
+                      "attempt_count": ep_counts.get(e["id"], {}).get("attempt_count", 0),
+                      "vulnerability_count": ep_counts.get(e["id"], {}).get("vulnerability_count", 0)}
                      for e in row["endpoints"] if e.get("id")]
         children.append({
             "id": row["id"], "type": "Port", "number": row["number"],
@@ -3651,12 +3525,17 @@ async def _expand_ip(ip_id: str, asset_id: str):
 
 
 async def _expand_endpoint(ep_id: str, asset_id: str, limit: int = 100, offset: int = 0):
-    """展开 HTTPEndpoint → DirEntry + File。"""
+    """展开统一端点：子端点、文件、测试尝试、漏洞和扫描记录。"""
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, min(int(offset), 100_000))
+    window = offset + limit
     node_rows = _neo4j_query(
         """
         MATCH (ep:HTTPEndpoint {id: $eid})
         RETURN ep.id AS id, ep.url AS url, ep.status_code AS status_code,
-               ep.title AS title, ep.sources AS sources, ep.created_at AS created_at
+               ep.method AS method, ep.title AS title, ep.roles AS roles,
+               ep.params AS params, ep.api_signals AS api_signals,
+               ep.sources AS sources, ep.created_at AS created_at
         """,
         eid=ep_id,
     )
@@ -3675,19 +3554,34 @@ async def _expand_endpoint(ep_id: str, asset_id: str, limit: int = 100, offset: 
         ORDER BY sr.tool
         """,
         eid=ep_id,
-    )
-    # 目录爆破结果
-    dirs = _neo4j_query(
+    ) if offset == 0 else []
+
+    endpoints = _neo4j_query(
         """
-        MATCH (:HTTPEndpoint {id: $eid})-[:EXPOSES_PATH]->(d:DirEntry)
-        RETURN d.id AS id, d.path AS path, d.method AS method,
-               d.status_code AS status_code, d.content_type AS content_type,
-               d.size AS size, d.sources AS sources, d.created_at AS created_at
-        ORDER BY d.status_code, d.path
+        MATCH (:HTTPEndpoint {id: $eid})-[:DISCOVERED]->(child:HTTPEndpoint)
+        OPTIONAL MATCH (child)-[:DISCOVERED]->(nested:HTTPEndpoint)
+        OPTIONAL MATCH (child)-[:REFERENCES]->(file:File)
+        OPTIONAL MATCH (child)-[:HAS_ATTEMPT]->(attempt:TestAttempt)
+        OPTIONAL MATCH (child)-[:MAY_BE_VULNERABLE_TO]->(vuln:Vulnerability)
+        RETURN child.id AS id, child.url AS url, child.method AS method,
+               child.status_code AS status_code, child.title AS title,
+               child.content_type AS content_type, child.content_length AS content_length,
+               child.roles AS roles, child.params AS params,
+               child.param_source AS param_source, child.api_signals AS api_signals,
+               child.from_js AS from_js, child.crawl_status AS crawl_status,
+               child.sources AS sources, child.created_at AS created_at,
+               count(DISTINCT nested) AS child_count,
+               count(DISTINCT CASE WHEN 'directory' IN coalesce(nested.roles, []) THEN nested END) AS dir_count,
+               count(DISTINCT CASE WHEN 'api' IN coalesce(nested.roles, []) THEN nested END) AS api_count,
+               count(DISTINCT file) AS file_count,
+               count(DISTINCT attempt) AS attempt_count,
+               count(DISTINCT vuln) AS vulnerability_count
+        ORDER BY child.url, child.method
+        LIMIT $window
         """,
-        eid=ep_id,
+        eid=ep_id, window=window,
     )
-    # 下载的文件
+
     files = _neo4j_query(
         """
         MATCH (:HTTPEndpoint {id: $eid})-[:REFERENCES]->(f:File)
@@ -3698,25 +3592,106 @@ async def _expand_endpoint(ep_id: str, asset_id: str, limit: int = 100, offset: 
                f.sources AS sources, f.created_at AS created_at,
                collect(DISTINCT {type: s.type, preview: s.value_preview, line: s.line}) AS secrets
         ORDER BY f.content_type, f.url
+        LIMIT $window
         """,
-        eid=ep_id,
+        eid=ep_id, window=window,
     )
-    # 发现的接口（katana 爬取）
-    apis = _neo4j_query(
+
+    attempts = _neo4j_query(
         """
-        MATCH (:HTTPEndpoint {id: $eid})-[:EXPOSES_API]->(a:ApiEndpoint)
-        RETURN a.id AS id, a.url AS url, a.path AS path, a.method AS method,
-               a.status_code AS status_code, a.content_type AS content_type,
-               a.params AS params, a.param_source AS param_source,
-               a.api_signals AS api_signals, a.from_js AS from_js,
-               a.sources AS sources, a.created_at AS created_at
-        ORDER BY a.method, a.path
+        MATCH (:HTTPEndpoint {id: $eid})-[:HAS_ATTEMPT]->(a:TestAttempt)
+        OPTIONAL MATCH (a)-[:CONFIRMS]->(v:Vulnerability)
+        RETURN a.id AS id, a.kind AS kind, a.tool AS tool,
+               a.technique AS technique, a.success AS success,
+               a.original_status AS original_status, a.final_status AS final_status,
+               a.evidence AS evidence, a.source AS source,
+               a.created_at AS created_at, a.last_seen_at AS last_seen_at,
+               collect(DISTINCT {id: v.id, title: v.title, severity: v.severity}) AS confirms
+        ORDER BY a.success DESC, a.technique
+        LIMIT $window
+        """,
+        eid=ep_id, window=window,
+    )
+
+    vulnerabilities = _neo4j_query(
+        """
+        MATCH (:HTTPEndpoint {id: $eid})-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+        RETURN v.id AS id, v.title AS title, v.vuln_type AS vuln_type,
+               v.severity AS severity, v.status AS status, v.detail AS detail,
+               v.evidence AS evidence, v.sources AS sources, v.created_at AS created_at
+        ORDER BY CASE toLower(coalesce(v.severity, 'info'))
+                   WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2
+                   WHEN 'low' THEN 3 ELSE 4 END,
+                 v.title
+        LIMIT $window
+        """,
+        eid=ep_id, window=window,
+    )
+
+    total_rows = _neo4j_query(
+        """
+        MATCH (ep:HTTPEndpoint {id: $eid})
+        CALL (ep) {
+          MATCH (ep)-[:DISCOVERED]->(n:HTTPEndpoint) RETURN count(n) AS c
+          UNION ALL MATCH (ep)-[:REFERENCES]->(n:File) RETURN count(n) AS c
+          UNION ALL MATCH (ep)-[:HAS_ATTEMPT]->(n:TestAttempt) RETURN count(n) AS c
+          UNION ALL MATCH (ep)-[:MAY_BE_VULNERABLE_TO]->(n:Vulnerability) RETURN count(n) AS c
+        }
+        RETURN sum(c) AS total
         """,
         eid=ep_id,
     )
 
     children = []
-    # File rows first (more important)
+    for endpoint in endpoints:
+        roles = endpoint["roles"] or []
+        children.append({
+            "id": endpoint["id"], "type": "Endpoint",
+            "display_type": _endpoint_display_type(roles),
+            "url": endpoint["url"], "method": endpoint["method"] or "GET",
+            "status_code": endpoint["status_code"], "title": endpoint["title"] or "",
+            "content_type": endpoint["content_type"] or "",
+            "content_length": endpoint["content_length"] or 0,
+            "roles": roles, "params": endpoint["params"] or [],
+            "param_source": endpoint["param_source"] or "",
+            "api_signals": endpoint["api_signals"] or [],
+            "from_js": endpoint["from_js"] or "",
+            "crawl_status": endpoint["crawl_status"] or "",
+            "sources": endpoint["sources"] or [], "created_at": endpoint["created_at"],
+            "child_count": endpoint["child_count"] or 0,
+            "dir_count": endpoint["dir_count"] or 0,
+            "api_count": endpoint["api_count"] or 0,
+            "file_count": endpoint["file_count"] or 0,
+            "attempt_count": endpoint["attempt_count"] or 0,
+            "vulnerability_count": endpoint["vulnerability_count"] or 0,
+        })
+
+    for vulnerability in vulnerabilities:
+        children.append({
+            "id": vulnerability["id"], "type": "Vulnerability",
+            "value": vulnerability["title"] or vulnerability["vuln_type"] or vulnerability["id"],
+            "title": vulnerability["title"] or "", "vuln_type": vulnerability["vuln_type"] or "",
+            "severity": vulnerability["severity"] or "info", "status": vulnerability["status"] or "",
+            "detail": vulnerability["detail"] or "", "evidence": vulnerability["evidence"] or "",
+            "sources": vulnerability["sources"] or [], "created_at": vulnerability["created_at"],
+        })
+
+    for attempt in attempts:
+        success = bool(attempt["success"])
+        children.append({
+            "id": attempt["id"], "type": "TestAttempt",
+            "display_type": "BypassSuccess" if success else "BypassFailed",
+            "value": attempt["technique"] or attempt["kind"] or attempt["id"],
+            "kind": attempt["kind"] or "", "tool": attempt["tool"] or "",
+            "technique": attempt["technique"] or "", "success": success,
+            "original_status": attempt["original_status"] or 0,
+            "final_status": attempt["final_status"] or 0,
+            "evidence": attempt["evidence"] or "",
+            "sources": [attempt["source"]] if attempt["source"] else [],
+            "created_at": attempt["created_at"] or attempt["last_seen_at"],
+            "confirms": [v for v in (attempt["confirms"] or []) if v.get("id")],
+        })
+
     for f in files:
         secrets = [s for s in (f["secrets"] or []) if s.get("type")]
         children.append({
@@ -3727,24 +3702,17 @@ async def _expand_endpoint(ep_id: str, asset_id: str, limit: int = 100, offset: 
             "sources": f["sources"] or [], "created_at": f["created_at"],
             "secrets": secrets,
         })
-    # ApiEndpoint rows (接口，比目录更重要)
-    for a in apis:
-        children.append({
-            "id": a["id"], "type": "ApiEndpoint", "url": a["url"],
-            "path": a["path"], "method": a["method"],
-            "status_code": a["status_code"], "content_type": a["content_type"] or "",
-            "params": a["params"] or [], "param_source": a["param_source"] or "",
-            "api_signals": a["api_signals"] or [], "from_js": a["from_js"] or "",
-            "sources": a["sources"] or [], "created_at": a["created_at"],
-        })
-    # DirEntry rows
-    for d in dirs:
-        children.append({
-            "id": d["id"], "type": "DirEntry", "path": d["path"],
-            "method": d["method"], "status_code": d["status_code"],
-            "content_type": d["content_type"] or "", "size": d["size"] or 0,
-            "sources": d["sources"] or [], "created_at": d["created_at"],
-        })
+
+    display_order = {
+        "APIEndpoint": 0, "DirectoryPath": 1, "LoginEndpoint": 2,
+        "ProtectedPath": 3, "HTTPEndpoint": 4, "Vulnerability": 5,
+        "BypassSuccess": 6, "BypassFailed": 7, "File": 8,
+    }
+    children.sort(key=lambda item: (
+        display_order.get(item.get("display_type") or item.get("type"), 99),
+        str(item.get("url") or item.get("value") or item.get("id") or ""),
+    ))
+    children = children[offset:window]
 
     scan_runs = [
         {
@@ -3761,17 +3729,23 @@ async def _expand_endpoint(ep_id: str, asset_id: str, limit: int = 100, offset: 
         "data": {
             "node": {
                 "id": nr["id"], "type": "Endpoint", "url": nr["url"],
+                "display_type": _endpoint_display_type(nr["roles"] or []),
+                "method": nr["method"] or "GET", "roles": nr["roles"] or [],
+                "params": nr["params"] or [], "api_signals": nr["api_signals"] or [],
                 "status_code": nr["status_code"], "title": nr["title"],
                 "sources": nr["sources"] or [], "created_at": nr["created_at"],
             },
             "children": children,
             "scan_runs": scan_runs,
+            "total": (total_rows[0]["total"] or 0) if total_rows else 0,
+            "limit": limit,
+            "offset": offset,
         },
     }
 
 
 # ============================================================
-# Attack Surface API (legacy — kept for backward compat)
+# Attack Surface API — lightweight paginated projections of the canonical graph
 # ============================================================
 
 @web_app.get("/api/surfaces/subdomains")
@@ -3955,16 +3929,23 @@ async def list_surfaces_endpoints(
             CALL (a) {{
               WITH a
               MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)
-                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(root:HTTPEndpoint)
+              MATCH (root)-[:DISCOVERED*0..32]->(ep:HTTPEndpoint)
               RETURN ep
               UNION
-              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(root:HTTPEndpoint)
+              MATCH (root)-[:DISCOVERED*0..32]->(ep:HTTPEndpoint)
+              RETURN ep
+              UNION
+              MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:EXPOSES]->(root:HTTPEndpoint)
+              MATCH (root)-[:DISCOVERED*0..32]->(ep:HTTPEndpoint)
               RETURN ep
             }}
             WITH DISTINCT ep
             {where}
             RETURN ep.id AS id, ep.url AS url, ep.status_code AS status_code,
                    ep.title AS title, ep.crawl_status AS crawl_status,
+                   ep.method AS method, ep.roles AS roles, ep.params AS params,
                    ep.content_length AS content_length, ep.created_at AS created_at
             ORDER BY ep.url
             SKIP $offset LIMIT $limit
@@ -3982,10 +3963,16 @@ async def list_surfaces_endpoints(
             CALL (a) {{
               WITH a
               MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)
-                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(root:HTTPEndpoint)
+              MATCH (root)-[:DISCOVERED*0..32]->(ep:HTTPEndpoint)
               RETURN ep
               UNION
-              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+              MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(root:HTTPEndpoint)
+              MATCH (root)-[:DISCOVERED*0..32]->(ep:HTTPEndpoint)
+              RETURN ep
+              UNION
+              MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:EXPOSES]->(root:HTTPEndpoint)
+              MATCH (root)-[:DISCOVERED*0..32]->(ep:HTTPEndpoint)
               RETURN ep
             }}
             WITH DISTINCT ep
@@ -4005,6 +3992,9 @@ async def list_surfaces_endpoints(
                     "url": r["url"],
                     "status_code": r["status_code"],
                     "title": r["title"],
+                    "method": r["method"] or "GET",
+                    "roles": r["roles"] or [],
+                    "params": r["params"] or [],
                     "crawl_status": r["crawl_status"],
                     "content_length": r["content_length"],
                     "created_at": r["created_at"],
@@ -4612,12 +4602,25 @@ async def scheduler_advance(body: dict | None = None):
 
 
 @web_app.get("/api/scheduler/progress")
-async def scheduler_progress(asset_id: str = "default"):
-    """节点驱动调度进度:所有工具每层的剩余/已完成/总计/百分比。"""
+def scheduler_progress(asset_id: str = "default"):
+    """节点驱动调度进度:所有工具每层的剩余/已完成/总计/百分比。
+
+    该端点原无缓存，冷启动时 24 个工具的 _count_targets 全量查询
+    实测 20s+（前端 2s 轮询时代放大更严重）。加 5s 缓存：
+    计数由 30s TTL 的 _count_targets_cached 支撑（见 scan_progress）。
+    sync def：体内 scheduler.progress() 为同步 Neo4j 重查询，走线程池，
+    避免 async def 冷启动时阻塞整个事件循环（所有 API 排队）。
+    """
+    cache_key = f"schp:{asset_id}"
+    cached = _cached(cache_key, ttl=5)
+    if cached:
+        return cached
     try:
         from graphpt.collector.scheduler import progress as scheduler_progress_fn
         data = scheduler_progress_fn(asset_id)
-        return {"ok": True, "data": data}
+        result = {"ok": True, "data": data}
+        _cache_set(cache_key, result)
+        return result
     except Exception as exc:
         return _json_error(exc)
 
@@ -4893,11 +4896,12 @@ async def scan_running():
         # 查活跃工具（Redis，按 asset 隔离）
         _active_by_asset: dict[str, list[str]] = {}
         try:
-            _rr = _get_redis_run(decode_responses=True, socket_connect_timeout=1)
+            from graphpt.common.redis_client import get_redis, keys_scan
+            _rr = get_redis(decode_responses=True, socket_connect_timeout=1)
             _rr.ping()
             for _aid, _ in _scanning:
                 _tools = []
-                for _k in _rr.keys(f"tool:active:{_aid}:*"):
+                for _k in keys_scan(_rr, f"tool:active:{_aid}:*"):
                     _tools.append(_k.replace(f"tool:active:{_aid}:", ""))
                 _active_by_asset[_aid] = _tools
         except Exception:
@@ -4945,9 +4949,18 @@ async def scan_running():
     return {"ok": True, "data": {"tasks": tasks, "total": len(tasks)}}
 
 
+_scan_completed_cache: dict[str, tuple[float, dict]] = {}  # asset_id → (ts, payload)
+
+
 @web_app.get("/api/scan/completed")
 async def scan_completed(asset_id: str = "default"):
-    """查询最近一次扫描的完成通知（Redis, TTL 1h）。完成后前端轮询此端点。"""
+    """查询最近一次扫描的完成通知（Redis, TTL 1h）。完成后前端轮询此端点。
+
+    C9：Redis 不可达（fleet 远程 master 场景）时回退本进程内存缓存
+    （web 进程内 run_full_scan 的完成通知直写该缓存，10min 有效），
+    不再 500/超时拖垮前端轮询。
+    """
+    import time as _time_mod
     try:
         import redis as _rds
         _r = _rds.Redis(host="localhost", port=6379, socket_connect_timeout=1,
@@ -4958,8 +4971,12 @@ async def scan_completed(asset_id: str = "default"):
             import json
             return {"ok": True, "data": json.loads(payload)}
         return {"ok": True, "data": None}
-    except Exception as exc:
-        return _json_error(exc)
+    except Exception:
+        # 回退：进程内缓存（_notify_completion 的 web 进程直写）
+        _cached = _scan_completed_cache.get(asset_id)
+        if _cached and (_time_mod.time() - _cached[0]) < 600:
+            return {"ok": True, "data": _cached[1]}
+        return {"ok": True, "data": None, "source": "local-cache"}
 
 
 # ============================================================
@@ -5266,10 +5283,12 @@ async def api_catalog():
 
 
 @web_app.get("/api/report")
-async def generate_report(asset_id: str = "default", format: str = "markdown"):
+def api_report(asset_id: str = "default", format: str = "markdown"):
     """生成渗透测试报告 — 从 Neo4j 拉取漏洞数据，渲染 Markdown/JSON。
 
-    format: markdown (默认) / json
+    format: markdown (默认) / json。
+    同步 def（非 async）：Neo4j 聚合查询 + 渲染由 FastAPI 线程池调度，
+    不阻塞事件循环。/api/report/generate 代理到此实现（原同名遮蔽已消除）。
     """
     try:
         from graphpt.core.report_generator import (
@@ -5308,12 +5327,11 @@ async def generate_report(asset_id: str = "default", format: str = "markdown"):
             END, affected_count DESC
         """, aid=asset_id)
 
-        # 查资产名用作报告标题（兼容 HAS_DOMAIN 旧 schema + HAS_ROOT 新 schema）
+        # 查资产根域用作报告标题
         asset_rows = _neo4j_query(
             "MATCH (a:Asset {id: $aid}) "
-            "OPTIONAL MATCH (a)-[:HAS_DOMAIN]->(d:Domain) "
-            "OPTIONAL MATCH (a)-[:HAS_ROOT]->(rd:RootDomain) "
-            "RETURN coalesce(d.value, rd.value) AS domain ORDER BY domain LIMIT 1",
+            "OPTIONAL MATCH (a)-[:HAS_DOMAIN]->(d:Domain {is_root: true}) "
+            "RETURN d.value AS domain ORDER BY domain LIMIT 1",
             aid=asset_id,
         )
         target_name = asset_rows[0]["domain"] if asset_rows else asset_id
@@ -5386,7 +5404,7 @@ async def scheduler_unlock(body: dict | None = None):
     asset_id = body.get("asset_id", os.getenv("GRAPHPT_ASSET_ID", "default"))
     tool = (body.get("tool") or "").strip()
     try:
-        from graphpt.common.redis_client import get_redis
+        from graphpt.common.redis_client import get_redis, keys_scan
         r = get_redis(decode_responses=True, socket_connect_timeout=1)
         r.ping()
         if tool:
@@ -5395,10 +5413,10 @@ async def scheduler_unlock(body: dict | None = None):
             unlocked = [tool]
         else:
             unlocked = []
-            for k in r.keys(f"scheduler:lock:{asset_id}:*"):
+            for k in keys_scan(r, f"scheduler:lock:{asset_id}:*"):
                 unlocked.append(k.rsplit(":", 1)[-1])
                 r.delete(k)
-            for k in r.keys(f"scheduler:heartbeat:{asset_id}:*"):
+            for k in keys_scan(r, f"scheduler:heartbeat:{asset_id}:*"):
                 r.delete(k)
         # F3: 清除内存 _SCAN_STATE + Redis abort 信号，让前端立即看到 idle
         try:
@@ -5426,9 +5444,10 @@ async def scan_abort(body: dict | None = None):
         r.ping()
         r.setex(f"scan:abort:{asset_id}", 60, "1")
         # 同时释放所有锁，让后续 advance 不会被挡
-        for k in r.keys(f"scheduler:lock:{asset_id}:*"):
+        from graphpt.common.redis_client import keys_scan
+        for k in keys_scan(r, f"scheduler:lock:{asset_id}:*"):
             r.delete(k)
-        for k in r.keys(f"scheduler:heartbeat:{asset_id}:*"):
+        for k in keys_scan(r, f"scheduler:heartbeat:{asset_id}:*"):
             r.delete(k)
         # F3: 清除内存 _SCAN_STATE，让前端立即看到 idle
         try:
@@ -5499,15 +5518,17 @@ def _cache_flush() -> None:
 _COUNT_TARGETS_CACHE: dict[str, tuple[float, int]] = {}
 
 
-def _count_targets_cached(asset_id: str, tool: str) -> int:
+def _count_targets_cached(asset_id: str, tool: str, _session=None) -> int:
     key = f"{asset_id}:{tool}"
     now = time.time()
     hit = _COUNT_TARGETS_CACHE.get(key)
-    if hit and now - hit[0] < 15:
+    if hit and now - hit[0] < 30:  # 30s 缓存：计数是近似值，过长 TTL 不伤正确性
         return hit[1]
     try:
         from graphpt.collector.scheduler import _count_targets
-        n = _count_targets(tool, asset_id)
+        # _session 复用：批量计数循环共享连接，避免每工具新建 Neo4j session
+        # （Windows 服务上握手 ~0.7s/次，43 工具 ≈ 20s+）
+        n = _count_targets(tool, asset_id, _session=_session)
     except Exception:
         n = 0
     _COUNT_TARGETS_CACHE[key] = (now, n)
@@ -5515,32 +5536,42 @@ def _count_targets_cached(asset_id: str, tool: str) -> int:
 
 
 @web_app.get("/api/scan/progress")
-async def scan_progress(asset_id: str = "default"):
+def scan_progress(asset_id: str = "default"):
     """全量扫描进度：本轮 ScanRun 计数（分子）+ 未扫目标（分母）→ 层/总百分比。
 
     - runs: 本轮（按 _SCAN_STATE.started_at 过滤）各工具已扫目标数
     - remaining: _count_targets 未扫目标数（缓存 15s）
     - 层汇总 + 总体 → 前端并行层进度条 + 总进度条
+    ★ sync def：体内全是同步 Neo4j/Redis 调用。若保持 async def，冷启动时
+      20s+ 的 count 查询会阻塞整个事件循环（实测所有 API 排队、SSE 首帧
+      永远不到）。sync def 由 FastAPI 自动调度进线程池。
     """
     cache_key = f"sp:{asset_id}"
-    cached = _cached(cache_key, ttl=5)  # 扫描中只缓存 5s，让进度更新更及时
-    if cached and not _scan_pool:  # 扫描未运行时用缓存，运行中实时刷新
+    cached = _cached(cache_key, ttl=5)
+    # 原条件 `cached and not _scan_pool` 有 bug：_scan_pool 是常驻线程池
+    # 永远非空 → 缓存从不生效，每次请求全量计算（24 工具 × count 查询 ≈ 20s）。
+    # 5s 缓存对进度实时性足够（SSE 2s 采样 + diff 推送，变化的最新值 5s 内可见）。
+    if cached:
         return cached
 
     import redis as _rds
     try:
         # 活跃标记（Redis）— 按 asset 隔离: tool:active:{asset_id}:{tool}
+        # ★ 用探活缓存短路：Redis 不可用时立即跳过，绝不发起连接
+        #   （Windows 上不可达 Redis 的 connect 会挂 8-20s，拖死全部 API）
         active_tools: list[str] = []
         try:
-            from graphpt.common.redis_client import get_redis
+            from graphpt.common.redis_client import get_redis, keys_scan as _keys_scan, redis_available
+            if not redis_available():
+                raise ConnectionError("redis unavailable (probe)")
             _r = get_redis(decode_responses=True, socket_connect_timeout=1)
             _r.ping()
             # 新格式（asset-scoped）
             _prefix = f"tool:active:{asset_id}:"
-            for k in _r.keys(f"{_prefix}*"):
+            for k in _keys_scan(_r, f"{_prefix}*"):
                 active_tools.append(k.replace(_prefix, ""))
             # 兼容旧格式（无 asset 前缀，300s TTL 自动淘汰）
-            for k in _r.keys("tool:active:*"):
+            for k in _keys_scan(_r, "tool:active:*"):
                 _tool = k.replace("tool:active:", "")
                 if ":" not in _tool and _tool not in active_tools:
                     active_tools.append(_tool)
@@ -5574,8 +5605,37 @@ async def scan_progress(asset_id: str = "default"):
                         "MATCH (sr:ScanRun {asset_id: $aid}) RETURN sr.tool AS t, count(sr) AS c",
                         aid=asset_id,
                     )}
+                # 层聚合在同一 session 内完成（共享连接，规避每工具新建 session
+                # 的握手开销 —— 实测 43 工具 20s+ → 3s）
+                layers = []
+                overall_scans = overall_remaining = 0
+                for spec in _DEPENDENCY_LAYERS:
+                    tools = []
+                    l_scans = l_remaining = 0
+                    for t in spec["tools"]:
+                        scans = runs.get(t, 0)
+                        remaining = _count_targets_cached(asset_id, t, _session=s)
+                        l_scans += scans
+                        l_remaining += remaining
+                        tools.append({
+                            "tool": t,
+                            "scans": scans,
+                            "remaining": remaining,
+                            "total": scans + remaining,
+                            "active": t in active_tools or _base_tool_str(t) in active_tools,
+                        })
+                    overall_scans += l_scans
+                    overall_remaining += l_remaining
+                    l_total = l_scans + l_remaining
+                    layers.append({
+                        "layer": spec["layer"], "node": spec["node"], "tools": tools,
+                        "scans": l_scans, "remaining": l_remaining, "total": l_total,
+                        "pct": round(l_scans / l_total * 100, 1) if l_total > 0 else 0,
+                    })
         except Exception:
-            pass
+            # Neo4j 不可达：空 runs + 空层（保留其余字段），不阻断响应
+            runs, layers = {}, []
+            overall_scans = overall_remaining = 0
 
         # 同进程 _SCAN_STATE 补充实时进度（层完成数 + 当前工具）
         scan_progress: dict[str, Any] = {}
@@ -5598,31 +5658,6 @@ async def scan_progress(asset_id: str = "default"):
         # 按 dependency layer 组织
         # 分母：未扫目标（缓存）+ 层/总进度汇总
         layers = []
-        overall_scans = overall_remaining = 0
-        for spec in _DEPENDENCY_LAYERS:
-            tools = []
-            l_scans = l_remaining = 0
-            for t in spec["tools"]:
-                scans = runs.get(t, 0)
-                remaining = _count_targets_cached(asset_id, t)
-                l_scans += scans
-                l_remaining += remaining
-                tools.append({
-                    "tool": t,
-                    "scans": scans,
-                    "remaining": remaining,
-                    "total": scans + remaining,
-                    "active": t in active_tools or _base_tool_str(t) in active_tools,
-                })
-            overall_scans += l_scans
-            overall_remaining += l_remaining
-            l_total = l_scans + l_remaining
-            layers.append({
-                "layer": spec["layer"], "node": spec["node"], "tools": tools,
-                "scans": l_scans, "remaining": l_remaining, "total": l_total,
-                "pct": round(l_scans / l_total * 100, 1) if l_total > 0 else 0,
-            })
-
         overall_total = overall_scans + overall_remaining
         # 总进度用层加权（按每层工具数），避免单层大目标数（如 gobuster 字典条目）
         # 扭曲整体百分比；scanned/total_estimate 保留原始目标数供展示
@@ -5654,15 +5689,20 @@ def _base_tool_str(name: str) -> str:
 
 
 @web_app.get("/api/scheduler/logs")
-async def scheduler_logs(asset_id: str = "default"):
-    """返回当前运行中工具的实时日志（最近50行）。"""
+def scheduler_logs(asset_id: str = "default"):
+    """返回当前运行中工具的实时日志（最近50行）。
+
+    sync def：Redis 探测/文件读取为同步 IO，走 FastAPI 线程池（不阻塞事件循环）。
+    """
     try:
         from pathlib import Path as _Path
-        from graphpt.common.redis_client import get_redis
+        from graphpt.common.redis_client import get_redis, keys_scan, redis_available
+        if not redis_available():
+            return {"ok": True, "data": {}}  # 探活短路：Redis 不可用直接返回空
         _r = get_redis(decode_responses=True, socket_connect_timeout=2)
         _r.ping()
         logs: dict[str, list[str]] = {}
-        for key in _r.keys(f"scheduler:lock:{asset_id}:*"):
+        for key in keys_scan(_r, f"scheduler:lock:{asset_id}:*"):
             tool = key.rsplit(":", 1)[-1]
             log_dir = _Path("data") / "logs" / tool
             files = sorted(log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True) \
@@ -5762,34 +5802,14 @@ async def save_config(body: dict):
 
 
 @web_app.get("/api/report/generate")
-async def generate_report(asset_id: str = "default", format: str = "markdown"):
-    """生成渗透测试报告（Markdown/JSON）"""
-    try:
-        from graphpt.reporter.markdown_report import generate_markdown_report
+def api_report_generate(asset_id: str = "default", format: str = "markdown"):
+    """生成渗透测试报告（Markdown/JSON）。
 
-        # 收集报告数据（简化查询）
-        report_data = {
-            'asset_name': asset_id,
-            'scan_date': datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-            'root_domains': [],
-            'subdomains': [],
-            'ips': [],
-            'ports': [],
-            'endpoints': [],
-            'vulnerabilities': [],
-        }
-
-        if format == "markdown":
-            content = generate_markdown_report(asset_id, report_data)
-            return Response(
-                content=content,
-                media_type="text/markdown",
-                headers={"Content-Disposition": f'attachment; filename="report-{asset_id}.md"'}
-            )
-        else:
-            return {"ok": True, "data": report_data}
-    except Exception as exc:
-        return _json_error(exc)
+    历史遗留的空壳端点曾返回全空 report_data（0 漏洞假报告）。
+    现直接代理到 /api/report 的真实实现（Neo4j 漏洞聚合 → ReportGenerator），
+    前端唯一报告按钮与旧书签无需改动。同步 def 进线程池调度。
+    """
+    return api_report(asset_id, format)
 
 
 @web_app.get("/api/config/check")
@@ -5800,6 +5820,15 @@ async def check_tools():
         import sys as _sys
 
         def _resolve_tool(name: str) -> str | None:
+            # 与真实流水线共用解析器；它能识别 tool.yaml 中通过
+            # ``python {tool_dir}/entry.py`` 启动、文件名不同于工具名的自研工具。
+            try:
+                from graphpt.collector.pipeline import _find_tool
+                resolved = _find_tool(name)
+                if resolved:
+                    return str(resolved)
+            except Exception:
+                pass
             exe = f"{name}.exe" if os.name == "nt" else name
             for loc in (_TOOLS_DIR / exe, _TOOLS_DIR / name / exe):
                 if loc.is_file():
@@ -5889,49 +5918,126 @@ async def api_scan_all_stop(body: dict | None = None):
 # Graph Visualization + Change Detection API
 # ============================================================
 
+_GRAPH_RELATIONSHIP_TYPES = (
+    "HAS_DOMAIN", "PARENT_OF", "HAS_IP", "RESOLVES_TO", "HAS_PORT",
+    "HAS_SERVICE", "EXPOSES", "MAY_BE_VULNERABLE_TO", "MAY_CONTAIN",
+    "REFERENCES", "DISCOVERED", "HAS_ATTEMPT", "CONFIRMS", "HAS_NSE_RESULT",
+    "HAS_ICP", "COVERS", "TRIGGERED_OOB",
+    "GRANTS", "EXPLOITS", "PIVOTS_TO", "REQUIRES", "ENABLES",
+    "USES_CREDENTIAL", "HAS_SCAN_RUN", "RAN",
+)
+
+
+def _graph_data_cypher(max_depth: int) -> str:
+    relationship_union = "|".join(_GRAPH_RELATIONSHIP_TYPES)
+    return f"""
+        MATCH (asset:Asset {{id: $aid}})
+        MATCH path = (asset)-[:{relationship_union}*0..{max_depth}]->(node)
+        WITH node, min(length(path)) AS depth
+        ORDER BY depth, coalesce(node.id, elementId(node))
+        WITH collect({{node: node, depth: depth}}) AS all_entries
+        CALL (all_entries) {{
+          UNWIND all_entries AS entry
+          WITH collect(entry.node) AS all_nodes
+          UNWIND all_nodes AS source
+          MATCH (source)-[rel]->(target)
+          WHERE type(rel) IN $relationship_types AND target IN all_nodes
+          RETURN count(DISTINCT rel) AS total_edges
+        }}
+        WITH all_entries, total_edges, all_entries[..$mn] AS selected_entries
+        CALL (selected_entries) {{
+          UNWIND selected_entries AS entry
+          WITH collect(entry.node) AS selected_nodes
+          UNWIND selected_nodes AS source
+          MATCH (source)-[rel]->(target)
+          WHERE type(rel) IN $relationship_types AND target IN selected_nodes
+          WITH DISTINCT source, rel, target
+          ORDER BY type(rel), coalesce(source.id, elementId(source)),
+                   coalesce(target.id, elementId(target))
+          RETURN collect({{
+            from_id: coalesce(source.id, elementId(source)),
+            to_id: coalesce(target.id, elementId(target)),
+            type: type(rel), properties: properties(rel)
+          }})[..$me] AS edges
+        }}
+        RETURN [entry IN selected_entries | {{
+          id: coalesce(entry.node.id, elementId(entry.node)),
+          labels: labels(entry.node),
+          display_type: CASE
+            WHEN 'HTTPEndpoint' IN labels(entry.node) AND 'api' IN coalesce(entry.node.roles, []) THEN 'APIEndpoint'
+            WHEN 'HTTPEndpoint' IN labels(entry.node) AND 'directory' IN coalesce(entry.node.roles, []) THEN 'DirectoryPath'
+            WHEN 'HTTPEndpoint' IN labels(entry.node) AND 'login' IN coalesce(entry.node.roles, []) THEN 'LoginEndpoint'
+            WHEN 'HTTPEndpoint' IN labels(entry.node) AND 'protected' IN coalesce(entry.node.roles, []) THEN 'ProtectedPath'
+            WHEN 'TestAttempt' IN labels(entry.node)
+                 AND entry.node.kind = 'access_control_bypass' AND coalesce(entry.node.success, false) THEN 'BypassSuccess'
+            WHEN 'TestAttempt' IN labels(entry.node)
+                 AND entry.node.kind = 'access_control_bypass' THEN 'BypassFailed'
+            ELSE head(labels(entry.node))
+          END,
+          value: coalesce(entry.node.value, entry.node.url, entry.node.name,
+                          toString(entry.node.number), entry.node.title,
+                          entry.node.technique, entry.node.id),
+          created_at: entry.node.created_at,
+          depth: entry.depth,
+          properties: {{
+            name: entry.node.name, value: entry.node.value, url: entry.node.url,
+            number: entry.node.number, protocol: entry.node.protocol,
+            service: entry.node.service, product: entry.node.product,
+            title: entry.node.title, severity: entry.node.severity,
+            status: entry.node.status, status_code: entry.node.status_code,
+            category: entry.node.category, content_type: entry.node.content_type,
+            tool: entry.node.tool, target: entry.node.target,
+            method: entry.node.method, base_path: entry.node.base_path,
+            roles: entry.node.roles, params: entry.node.params,
+            api_signals: entry.node.api_signals, from_js: entry.node.from_js,
+            requires_auth: entry.node.requires_auth,
+            kind: entry.node.kind, technique: entry.node.technique,
+            success: entry.node.success,
+            original_status: entry.node.original_status,
+            final_status: entry.node.final_status,
+            evidence: entry.node.evidence,
+            findings_count: entry.node.findings_count,
+            is_root: entry.node.is_root, level: entry.node.level,
+            registrable_domain: entry.node.registrable_domain,
+            sources: entry.node.sources, last_seen_at: entry.node.last_seen_at
+          }}
+        }}] AS nodes,
+        edges, size(all_entries) AS total_nodes, total_edges
+    """
+
+
 @web_app.get("/api/graph/data")
-async def graph_data(asset_id: str = "default"):
-    """返回 Asset 下所有节点和关系，供 vis.js 渲染。"""
+async def graph_data(
+    asset_id: str = "default",
+    max_nodes: int = 1500,
+    max_edges: int = 3000,
+    max_depth: int = 16,
+):
+    """返回从 Asset 出发、在正式关系集合内可达的完整子图。"""
     try:
+        _mn = max(50, min(int(max_nodes), 10000))
+        _me = max(100, min(int(max_edges), 20000))
+        _md = max(4, min(int(max_depth), 32))
         rows = _neo4j_query(
-            """
-            MATCH (a:Asset {id: $aid})
-            CALL (a) {
-              MATCH (a)-[r]->(n)
-              RETURN a AS src, r, n AS tgt
-              UNION
-              MATCH (a)-[:HAS_DOMAIN]->(d)-[r]->(n)
-              RETURN d AS src, r, n AS tgt
-              UNION
-              MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF]->(child)-[r]->(n)
-              RETURN child AS src, r, n AS tgt
-              UNION
-              MATCH (a)-[:HAS_IP]->(ip)-[r]->(n)
-              RETURN ip AS src, r, n AS tgt
-              UNION
-              MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)
-                    -[:RESOLVES_TO]->(ip)-[r]->(n)
-              RETURN ip AS src, r, n AS tgt
-              UNION
-              MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)
-                    -[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p)-[r]->(n)
-              RETURN p AS src, r, n AS tgt
-            }
-            WITH COLLECT(DISTINCT {id: src.id, labels: labels(src), value: coalesce(src.value, src.url, src.name, src.id), created_at: src.created_at}) +
-                 COLLECT(DISTINCT {id: tgt.id, labels: labels(tgt), value: coalesce(tgt.value, tgt.url, tgt.name, tgt.id), created_at: tgt.created_at}) AS all_nodes,
-                 COLLECT(DISTINCT {from_id: src.id, to_id: tgt.id, type: type(r)}) AS edges
-            UNWIND all_nodes AS n
-            WITH COLLECT(DISTINCT n) AS nodes, edges
-            RETURN nodes[..1000] AS nodes, edges[..2000] AS edges
-            """,
-            aid=asset_id,
+            _graph_data_cypher(_md),
+            aid=asset_id, mn=_mn, me=_me,
+            relationship_types=list(_GRAPH_RELATIONSHIP_TYPES),
         )
         if not rows:
-            return {"ok": True, "data": {"nodes": [], "edges": []}}
+            return {"ok": True, "data": {"nodes": [], "edges": [], "truncated": False,
+                                         "total_nodes": 0, "total_edges": 0,
+                                         "max_depth": _md}}
         row = rows[0]
-        nodes = [{"id": asset_id, "labels": ["Asset"], "value": asset_id, "created_at": None}]
-        nodes.extend(row["nodes"] or [])
-        return {"ok": True, "data": {"nodes": nodes, "edges": row["edges"] or []}}
+        nodes = row["nodes"] or []
+        total_nodes = row.get("total_nodes") or 0
+        total_edges = row.get("total_edges") or 0
+        fetched_edges = len(row["edges"] or [])
+        return {"ok": True, "data": {
+            "nodes": nodes, "edges": row["edges"] or [],
+            "truncated": total_nodes > len(nodes) or total_edges > fetched_edges,
+            "total_nodes": total_nodes, "total_edges": total_edges,
+            "max_depth": _md,
+        }}
     except Exception as exc:
         return _json_error(exc)
 
@@ -6255,11 +6361,34 @@ async def api_agent_run(req: _AgentRequest):
     _session_workspace.mkdir(parents=True, exist_ok=True)
 
     def _run():
+        token_chunks: list[str] = []
+        token_chars = 0
+        last_token_flush = time.monotonic()
+
+        def _flush_tokens(*, force: bool = False) -> None:
+            nonlocal token_chars, last_token_flush
+            if not token_chunks:
+                return
+            now = time.monotonic()
+            if not force and token_chars < 2048 and now - last_token_flush < 0.25:
+                return
+            chunk = "".join(token_chunks)
+            token_chunks.clear()
+            token_chars = 0
+            last_token_flush = now
+            _append_agent_output(session_id, chunk)
+
         def _on_status(msg):
             _append_agent_log(session_id, msg)
 
         def _on_token(t):
-            _append_agent_output(session_id, t)
+            nonlocal token_chars
+            text = str(t or "")
+            if not text:
+                return
+            token_chunks.append(text)
+            token_chars += len(text)
+            _flush_tokens()
 
         def _steering():
             return _drain_agent_steering(session_id)
@@ -6327,6 +6456,7 @@ async def api_agent_run(req: _AgentRequest):
                 steering_provider=_steering,
                 stop_event=stop_evt,
             )
+            _flush_tokens(force=True)
             # 程序化证据复查：confirmed 漏洞逐个重放验证，未通过降级 likely
             verify_summary = None
             try:
@@ -6343,6 +6473,17 @@ async def api_agent_run(req: _AgentRequest):
                         "unknown": vreport.get("unknown", 0),
                         "downgraded": downgraded,
                     }
+                    # 证据账本闭环：复查结果映射进事实板（asset_id 分键）
+                    try:
+                        from graphpt.search.board import Board
+                        from graphpt.search.src_domain import record_verify_results
+                        _vboard = Board()
+                        try:
+                            record_verify_results(_vboard, req.asset_id, vreport)
+                        finally:
+                            _vboard.close()
+                    except Exception as _ve:  # noqa: BLE001
+                        _web_log.warning("verify facts 落板失败: %s", _ve)
                     _append_agent_log(
                         session_id,
                         f"[复查] confirmed {vreport.get('total', 0)} 条：通过 "
@@ -6394,12 +6535,14 @@ async def api_agent_run(req: _AgentRequest):
             }, event={"type": "done", "tool_calls": result.tool_calls_count,
                      "verify": verify_summary, "report_paths": report_paths})
         except Exception as e:
+            _flush_tokens(force=True)
             _update_agent_session(session_id, {
                 "status": "error",
                 "error": str(e),
                 "finished_at": _agent_now(),
             }, event={"type": "error", "error": str(e)})
         finally:
+            _flush_tokens(force=True)
             with _agent_lock:
                 _agent_stops.pop(session_id, None)
 
@@ -6547,6 +6690,162 @@ async def api_agent_prompt_put(request: Request):
 
 
 # ============================================================
+# Agent 池管理 — 系统级 agent 生命周期（start/suspend/resume/destroy/status）
+# 后端：graphpt.search.pool（槽位/队列/daemon 补位）
+# ============================================================
+
+@web_app.get("/api/agent/pool/status")
+def api_agent_pool_status():
+    """Agent 池全貌：槽位状态 + 队列 + 配置。"""
+    from graphpt.search.pool import pool_status
+    return pool_status()
+
+
+@web_app.post("/api/agent/pool/start")
+def api_agent_pool_start(body: dict):
+    """拉起一个 agent 任务（空槽直接跑，无空槽入队）。"""
+    code = (body.get("challenge") or body.get("code") or "").strip()
+    if not code:
+        raise HTTPException(400, "challenge/code required")
+    from graphpt.search.pool import pool_start
+    return pool_start(code, objective=str(body.get("objective") or ""))
+
+
+@web_app.post("/api/agent/pool/suspend")
+def api_agent_pool_suspend(body: dict):
+    """挂起指定槽位（杀进程+释放坑位，工作区保留，可 resume）。"""
+    slot = body.get("slot")
+    if slot is None:
+        raise HTTPException(400, "slot required")
+    from graphpt.search.pool import pool_suspend
+    return pool_suspend(int(slot))
+
+
+@web_app.post("/api/agent/pool/resume")
+def api_agent_pool_resume(body: dict):
+    """继续挂起的槽位（同题续力重拉）。"""
+    slot = body.get("slot")
+    if slot is None:
+        raise HTTPException(400, "slot required")
+    from graphpt.search.pool import pool_resume
+    return pool_resume(int(slot))
+
+
+@web_app.post("/api/agent/pool/destroy")
+def api_agent_pool_destroy(body: dict):
+    """销毁槽位（杀进程+释放坑位+移出队列）。"""
+    slot = body.get("slot")
+    if slot is None:
+        raise HTTPException(400, "slot required")
+    from graphpt.search.pool import pool_destroy
+    return pool_destroy(int(slot))
+
+
+@web_app.post("/api/agent/pool/queue")
+def api_agent_pool_queue(body: dict):
+    """设置/查看待办队列（逗号分隔题码或资产目标）。"""
+    from graphpt.search.pool import _load_state, _save_state
+    st = _load_state()
+    q = body.get("queue")
+    if isinstance(q, list):
+        st["queue"] = [str(x).strip() for x in q if str(x).strip()]
+        _save_state(st)
+    return {"queue": st["queue"]}
+
+
+# ============================================================
+# 观测：board 事实板 + token 账单
+# ============================================================
+
+@web_app.get("/api/agent/board")
+def api_agent_board(project: str = ""):
+    """事实板观测：facts（带 verified/grounding/source）+ open intents + handoff。"""
+    from graphpt.search.board import Board
+    if not project:
+        raise HTTPException(400, "project required")
+    b = Board()
+    try:
+        return {
+            "project": project,
+            "facts": b.recent_facts(project, limit=200),
+            "open_intents": b.open_intents(project),
+            "conclusions": b.intent_conclusions(project),
+            "handoff": b.latest_handoff(project)[:4000],
+        }
+    finally:
+        b.close()
+
+
+@web_app.get("/api/agent/board-ui")
+def api_agent_board_ui(project: str = ""):
+    """轻量 HTML 观察面板（无需前端改造）。"""
+    from graphpt.search.board import Board
+    if not project:
+        return HTMLResponse("<h2>board-ui 需要 ?project=xxx</h2>", status_code=400)
+    b = Board()
+    try:
+        facts = b.recent_facts(project, limit=200)
+        intents = b.open_intents(project)
+        cons = b.intent_conclusions(project)
+        hf = b.latest_handoff(project)
+    finally:
+        b.close()
+    rows_f = "".join(
+        f"<tr><td>f{f['id']:03d}</td><td>{'✅' if f['verified'] else '·'}</td>"
+        f"<td>{f['source']}</td><td>{f['description']}</td>"
+        f"<td><code>{f['grounding']}</code></td></tr>"
+        for f in facts)
+    rows_i = "".join(
+        f"<tr><td>it{i['id']}</td><td>{i['status']}</td><td>{i['claimed_by'] or '-'}</td>"
+        f"<td>{i['description']}</td></tr>" for i in intents)
+    rows_c = "".join(
+        f"<tr><td>it{c['id']}</td><td>{c['fact'] or ''}</td></tr>" for c in cons)
+    return HTMLResponse(f"""<html><head><meta charset="utf-8"><title>board:{project}</title>
+<style>body{{font:14px/1.6 monospace;margin:24px}}table{{border-collapse:collapse;width:100%}}
+td,th{{border:1px solid #ccc;padding:4px 8px;text-align:left;vertical-align:top}}
+th{{background:#eee}}code{{font-size:12px;color:#555}}</style></head><body>
+<h2>事实板 {project}</h2>
+<h3>Facts ({len(facts)})</h3><table><tr><th>id</th><th>✅</th><th>源</th><th>描述</th><th>grounding</th></tr>{rows_f}</table>
+<h3>Open Intents ({len(intents)})</h3><table><tr><th>id</th><th>状态</th><th>认领者</th><th>描述</th></tr>{rows_i}</table>
+<h3>结论意图 ({len(cons)})</h3><table><tr><th>id</th><th>产出事实</th></tr>{rows_c}</table>
+<h3>接力块</h3><pre>{hf[:2000]}</pre>
+</body></html>""")
+
+
+@web_app.get("/api/agent/billing")
+def api_agent_billing():
+    """token 账单：按项目统计（state.json：tokens/时间/提交/止损）。"""
+    import json as _json
+    try:
+        p = Path(__file__).resolve().parents[2] / "data" / "state.json"
+        if not p.exists():
+            return {"ok": False, "note": "state.json 不存在（尚无账单）"}
+        st = _json.loads(p.read_text(encoding="utf-8"))
+        chs = st.get("challenges") or {}
+        rows = [
+            {
+                "code": code, "solved": v.get("solved"),
+                "correct_flags": v.get("correct_flags"),
+                "sessions": v.get("sessions"),
+                "total_seconds": round(float(v.get("total_seconds") or 0), 1),
+                "tokens_spent": v.get("tokens_spent"),
+                "submitted": len(v.get("submitted") or []),
+                "dry_sessions": v.get("dry_sessions"),
+                "error": v.get("error"),
+            }
+            for code, v in sorted(chs.items())
+        ]
+        total_tokens = sum(r["tokens_spent"] or 0 for r in rows)
+        total_seconds = sum(r["total_seconds"] for r in rows)
+        return {"ok": True, "updated_at": st.get("updated_at"),
+                "projects": rows, "total_tokens": total_tokens,
+                "total_seconds": round(total_seconds, 1),
+                "solved": sum(1 for r in rows if r["solved"])}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "note": str(e)}
+
+
+# ============================================================
 # 工具日志 — 实时查看工具 stdout 输出
 # ============================================================
 
@@ -6559,10 +6858,10 @@ def active_tool_logs(asset_id: str = ""):
     _PROJECT_ROOT = _Path(__file__).resolve().parent.parent.parent
 
     try:
-        from graphpt.common.redis_client import get_redis
+        from graphpt.common.redis_client import get_redis, keys_scan
         _r = get_redis(decode_responses=True, socket_connect_timeout=1)
         _r.ping()
-        keys = _r.keys("tool:active:*")
+        keys = keys_scan(_r, "tool:active:*")
     except Exception:
         keys = []
 
@@ -6715,6 +7014,139 @@ def scan_alerts(asset_id: str = "default", severity: str = "high"):
         return {"ok": True, "data": alerts}
     except Exception as exc:
         return _json_error(exc)
+
+
+# ============================================================
+# SSE 统一事件流 — 前端全页面轮询迁移的目标通道
+#
+# 原理：服务端按 topic 各自节奏采集快照 → JSON 序列化 diff →
+#       长连接推送（前端 N 个 setInterval 收敛为 1 个 EventSource）。
+# topics: scan(2s 进度+活跃工具+实时日志) / agent(2s 会话状态) /
+#         scanall(2s 批量任务) / logs(10s 工具日志列表) / dashboard(30s 聚合)
+# 心跳注释行保活；客户端断开时生成器被 Cancel，订阅自动清理。
+# ============================================================
+
+@web_app.get("/api/events")
+async def api_sse_events(asset_id: str = "default",
+                         topics: str = "scan,logs,agent,dashboard,scanall",
+                         session_id: str = ""):
+    """统一事件流：扫描进度/Agent 会话/批量任务/日志/仪表盘 快照推送。"""
+    import asyncio
+    import json as _json
+    from fastapi.responses import StreamingResponse
+    from graphpt.core.sse import sse_format
+
+    wanted = {t.strip() for t in topics.split(",") if t.strip()}
+
+    async def _snapshot() -> dict[str, object]:
+        out: dict[str, object] = {}
+        if "scan" in wanted:
+            try:
+                # scan_progress/scheduler_logs 是 sync def：在 SSE 生成器内
+                # 直接调用会同步阻塞事件循环（冷启动 20s）→ 必须 to_thread
+                pr, lg = await asyncio.gather(
+                    asyncio.to_thread(scan_progress, asset_id),
+                    asyncio.to_thread(scheduler_logs, asset_id),
+                )
+                out["scan"] = {
+                    "progress": pr.get("data") if pr.get("ok") else None,
+                    "logs": lg.get("data") if lg.get("ok") else None,
+                }
+            except Exception:  # noqa: BLE001
+                pass
+        if "agent" in wanted:
+            try:
+                st = await api_agent_status(session_id)
+                if session_id:
+                    out["agent"] = {"session_id": session_id, "status": st.get("status"),
+                                    "logs": st.get("logs"), "output_buf": st.get("output_buf"),
+                                    "result": st.get("result"), "tool_calls": st.get("tool_calls"),
+                                    "verify": st.get("verify"), "error": st.get("error")}
+                else:
+                    out["agent"] = {"sessions": st.get("sessions", []) if st.get("ok") else []}
+            except Exception:  # noqa: BLE001
+                pass
+        if "scanall" in wanted:
+            try:
+                from graphpt.collector.scan_all import get_job_status
+                out["scanall"] = get_job_status(None)
+            except Exception:  # noqa: BLE001
+                pass
+        if "logs" in wanted:
+            try:
+                # 文件目录扫描为同步 IO，丢线程池避免每逢节拍阻塞事件循环
+                def _scan_log_entries() -> tuple[list[str], list[dict[str, object]]]:
+                    from graphpt.common.redis_client import get_redis, keys_scan, redis_available
+                    from pathlib import Path as _Path
+                    active = []
+                    if redis_available():
+                        try:
+                            _r = get_redis(decode_responses=True, socket_connect_timeout=1)
+                            _r.ping()
+                            active = [k.split(":", 2)[-1] if ":" in k.split(":", 2)[-1] else k.replace("tool:active:", "")
+                                      for k in keys_scan(_r, "tool:active:*")]
+                        except Exception:  # noqa: BLE001
+                            pass
+                    entries = []
+                    log_root = _Path("data") / "logs"
+                    if log_root.is_dir():
+                        try:
+                            for d in sorted(log_root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)[:12]:
+                                if not d.is_dir():
+                                    continue
+                                files = sorted(d.glob("*.log"),
+                                               key=lambda p: p.stat().st_mtime, reverse=True)[:1]
+                                if files:
+                                    f = files[0]
+                                    entries.append({"tool": d.name, "file": f.name,
+                                                    "size": f.stat().st_size,
+                                                    "mtime": f.stat().st_mtime})
+                        except OSError:
+                            pass
+                    return active, entries
+
+                active, entries = await asyncio.to_thread(_scan_log_entries)
+                out["logs"] = {"active": active, "entries": entries}
+            except Exception:  # noqa: BLE001
+                pass
+        if "dashboard" in wanted:
+            try:
+                # 只推送缓存值：dashboard 聚合 5s+ 冷查询走线程池压力大，
+                # 30s 节奏的推送用缓存规避阻塞（miss 时跳过本轮，页面手动刷新仍全量）
+                cached = _cached(f"dash:{asset_id}", ttl=30)
+                if cached is not None:
+                    out["dashboard"] = cached
+            except Exception:  # noqa: BLE001
+                pass
+        return out
+
+    async def gen():
+        last: dict[str, str] = {}
+        tick = 0
+        try:
+            while True:
+                snap = await _snapshot()
+                payloads: list[str] = []
+                for name, data in snap.items():
+                    key = _json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+                    if last.get(name) != key:
+                        last[name] = key
+                        payloads.append(sse_format(name, data))
+                if payloads:
+                    yield "".join(payloads)
+                else:
+                    yield ": keepalive\n\n"
+                await asyncio.sleep(1)
+                tick += 1
+        except asyncio.CancelledError:
+            pass  # 客户端断开：生成器随连接取消，无泄漏（快照均为新创建对象）
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive",
+                 "X-Accel-Buffering": "no"},
+    )
 
 
 # ============================================================

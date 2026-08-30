@@ -14,6 +14,7 @@ from typing import Any
 
 
 class VerifyReplayAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'detail', 'endpoint_id', 'evidence', 'severity', 'source', 'status', 'title', 'type', 'url', 'vuln_type')
     """验证结果输出适配器 → Vulnerability 状态更新。"""
 
     tool_name = "verify_replay"

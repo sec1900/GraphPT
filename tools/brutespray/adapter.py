@@ -4,6 +4,7 @@ from typing import Any
 
 
 class BrutesprayAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'cred_type', 'evidence', 'host', 'parent_id', 'password', 'port', 'service', 'severity', 'source', 'type', 'username')
     """brutespray JSON 输出适配器 → weak_credential Finding。
 
     JSONL 格式:

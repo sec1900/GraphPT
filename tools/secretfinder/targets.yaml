@@ -1,10 +1,11 @@
 selectors:
   secretfinder:
+    consumes: {node_type: Endpoint}
     desc: 全量敏感信息检测 — 取未扫的HTTPEndpoint(活) + File URL
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         WHERE ep.status_code > 0 AND ep.content_type IS NOT NULL AND ep.content_type <> ''
         RETURN ep
         UNION
@@ -12,7 +13,7 @@ selectors:
         WHERE ep.status_code > 0 AND ep.content_type IS NOT NULL AND ep.content_type <> ''
         RETURN ep
         UNION
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:EXPOSES]->(ep:HTTPEndpoint)
         WHERE ep.status_code > 0 AND ep.content_type IS NOT NULL AND ep.content_type <> ''
         RETURN ep
       }

@@ -5,6 +5,7 @@ import json
 
 
 class JwtAttackAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'detail', 'endpoint_id', 'evidence', 'severity', 'source', 'title', 'type', 'vuln_type')
     tool_name = "jwt_attack"
 
     def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:

@@ -1,4 +1,41 @@
-"""数据库 Schema 定义。"""
+"""数据库 Schema 定义。
+
+# ── 数据边界宪章（双存储唯一事实源声明）──────────────────────────────
+#
+# 本系统是双存储架构，任何写数据前先问一句"哪个库是这件事的事实源"：
+#
+# ★ Neo4j（collector/neo4j_client.py）＝ 资产图与攻击面唯一事实源
+#   资产拓扑（Asset/Domain/IP/Port/HTTPEndpoint）与漏洞【状态机】
+#   （candidate→verified→dismissed）、ScanRun 幂等、路径/攻击面查询。
+#   所有资产管理前端（Assets/Surfaces/Graph/Explorer）直接消费 Neo4j。
+#
+# ★ SQLite（本库 graphpt.db）＝ 任务/证据/审计事实库
+#   tasks/findings/attempts/audit/tool_executions/credentials(密文)/
+#   http_traffic。findings 是漏洞的【任务侧完整记录】（40+ 列：
+#   params/evidence/尝试历史/指纹——Neo4j 存不下的都在这）。
+#
+# ★ 跨库关联键 = fingerprint（common/finding_identity.compute_vuln_fingerprint，
+#   全仓唯一实现，两侧同值）。禁止用任意一方的自增/自定义 ID 做关联，
+#   禁止在别处复制指纹拼接逻辑。
+#
+# ★ 投影桥（写侧联动，读侧按阶段——均为有意识设计，已实施）：
+#   ① finding_pool.save_findings（SQLite 主写）→ Neo4j Vulnerability
+#      （vuln 类白名单，dismissed 不投影；资产归属由 Neo4j 按 URL 反查）
+#   ② finding_pool.upsert_vuln_finding_from_graph（扫描写图 hook）→
+#      SQLite findings 审计行（工厂 task scan:{asset}，fingerprint 幂等
+#      upsert，状态升级同行合并）——verifier 复查链由此覆盖扫描漏洞
+#   ③（规划）credential：SQLite 密文为完整记录，图侧只存引用；cred_reuse
+#      派发前回 SQLite 取密文
+#   状态写统一入口 set_vuln_status（规划）：主写 Neo4j + 镜像 SQLite；
+#   verifier/confirm/dismiss 全部改走它——状态机不允许第二个写入口。
+#   一致性语义：投影为幂等 MERGE + 尽力而为，主写绝不回滚；读侧容错
+#   （图节点缺失时按 SQLite 降级展示）。孤儿由启动看门狗探测告警。
+#
+# 已废弃/预留：asset_relations 零写入者（预留表，禁止开始写它而不先
+# 明确唯一事实源）。Redis = 瞬态信号/锁，永不进真相源。
+# 迁移/重构提示：Neo4j 不可用时本系统会降级（dashboard 等聚合失败兜底），
+# 但 SQLite 是任务持久化的根基——任何 migrations 必须向后兼容（迁移前 .bak）。
+"""
 
 from __future__ import annotations
 

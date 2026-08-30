@@ -1,39 +1,27 @@
 selectors:
   nuclei:
-    desc: 漏洞扫描 — 分类闸门（page/api/cms/login/upload + 未分类兼容）+ DirEntry 定向 + 指纹 tags 分流
+    consumes: {node_type: Endpoint}
+    desc: 漏洞扫描 — 覆盖统一端点树（目录/API/页面）+ 分类闸门 + 指纹 tags 分流
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(root:HTTPEndpoint)
+        MATCH (root)-[:DISCOVERED*0..32]->(ep:HTTPEndpoint)
         WHERE ep.status_code > 0
-          AND (ep.category IS NULL OR ep.category IN ['page', 'api', 'cms', 'login', 'upload'])
+          AND (ep.category IS NULL OR ep.category = '' OR ep.category IN ['page', 'api', 'cms', 'login', 'upload'])
         RETURN ep.url AS url, coalesce(ep.tech, []) AS tech, coalesce(ep.product, '') AS product
         UNION
-        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(root:HTTPEndpoint)
+        MATCH (root)-[:DISCOVERED*0..32]->(ep:HTTPEndpoint)
         WHERE ep.status_code > 0
-          AND (ep.category IS NULL OR ep.category IN ['page', 'api', 'cms', 'login', 'upload'])
+          AND (ep.category IS NULL OR ep.category = '' OR ep.category IN ['page', 'api', 'cms', 'login', 'upload'])
         RETURN ep.url AS url, coalesce(ep.tech, []) AS tech, coalesce(ep.product, '') AS product
         UNION
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:EXPOSES]->(root:HTTPEndpoint)
+        MATCH (root)-[:DISCOVERED*0..32]->(ep:HTTPEndpoint)
         WHERE ep.status_code > 0
-          AND (ep.category IS NULL OR ep.category IN ['page', 'api', 'cms', 'login', 'upload'])
+          AND (ep.category IS NULL OR ep.category = '' OR ep.category IN ['page', 'api', 'cms', 'login', 'upload'])
         RETURN ep.url AS url, coalesce(ep.tech, []) AS tech, coalesce(ep.product, '') AS product
-        UNION
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:EXPOSES_PATH]->(d:DirEntry)
-        WHERE NOT (d.status_code IN [404, 301, 302]) AND d.path IS NOT NULL
-        RETURN CASE WHEN ep.url ENDS WITH '/'
-                    THEN substring(ep.url, 0, size(ep.url) - 1) + d.path
-                    ELSE ep.url + d.path END AS url,
-               [] AS tech,
-               coalesce(ep.product, '') AS product
-        UNION
-        MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:EXPOSES_PATH]->(d:DirEntry)
-        WHERE NOT (d.status_code IN [404, 301, 302]) AND d.path IS NOT NULL
-        RETURN CASE WHEN ep.url ENDS WITH '/'
-                    THEN substring(ep.url, 0, size(ep.url) - 1) + d.path
-                    ELSE ep.url + d.path END AS url,
-               [] AS tech,
-               coalesce(ep.product, '') AS product
       }
       WITH DISTINCT url, tech, product
       WHERE url IS NOT NULL AND url <> ''
@@ -47,14 +35,17 @@ selectors:
       tech: nuclei_tags
       poc: poc_tags
   nuclei:takeover:
+    consumes:
+      node_type: Domain
+      domain_scope: all
     desc: "子域名接管检测 — 对所有子域名扫描 takeover 模板"
     query: |
-      MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(sub:Subdomain)
+      MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(sub:Domain)
       WITH 'http://' + sub.value AS target
       WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
       RETURN target
       UNION
-      MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(sub:Subdomain)
+      MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(sub:Domain)
       WITH 'https://' + sub.value AS target
       WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = target }
       RETURN target

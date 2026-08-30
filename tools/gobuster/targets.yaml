@@ -1,16 +1,17 @@
 selectors:
   gobuster:
+    consumes: {node_type: Endpoint}
     desc: "目录爆破(dir) — 仅扫 httpx 确认过的 HTTP 端点（有真实响应头+内容类型），排除内网"
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         RETURN ep
         UNION
         MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         RETURN ep
         UNION
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:EXPOSES]->(ep:HTTPEndpoint)
         RETURN ep
       }
       WITH DISTINCT ep
@@ -22,19 +23,24 @@ selectors:
       url: "{url}"
       parent_id: "{parent_id}"
   gobuster:dns:
-    desc: "DNS子域名爆破 — 取未扫的RootDomain"
+    consumes:
+      node_type: Domain
+      domain_scope: root
+    desc: "DNS子域名爆破 — 取未扫的根 Domain"
     query: |
-      MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
+      MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(rd:Domain)
       WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = rd.value }
       RETURN rd.value AS domain
     mapping:
       domain: "{domain}"
   gobuster:vhost:
+    consumes:
+      node_type: IP
     desc: "虚拟主机发现 — 取非内网IP"
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(ip:IP)
         RETURN ip
         UNION
         MATCH (a)-[:HAS_IP]->(ip:IP)

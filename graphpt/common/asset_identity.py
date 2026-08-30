@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import urllib.parse
+from functools import lru_cache
 
 _HOST_PORT_CANDIDATE_RE = re.compile(r"(?<![\w/])(?:\[[0-9a-f:]+\]|[a-z0-9._-]+):\d+\b", re.IGNORECASE)
 _URL_TRAILING_NOISE = ").,;]}'\"`"
@@ -60,7 +61,78 @@ def normalize_host_label(raw: str, *, strip_www: bool = False) -> str:
 
 
 def normalize_domain_name(raw: str) -> str:
-    return normalize_host_label(raw, strip_www=True)
+    """规范化域名实体；``www`` 是真实层级，绝不能折叠到根域。"""
+    return normalize_fqdn(raw)
+
+
+def normalize_fqdn(raw: str) -> str:
+    """规范化完整域名，保留 ``www`` 等真实主机层级并转为 IDNA。"""
+    host = normalize_host_label(raw, strip_www=False)
+    if host.startswith("*."):
+        host = host[2:]
+    if not host:
+        return ""
+    try:
+        ipaddress.ip_address(host)
+        return ""
+    except ValueError:
+        pass
+    try:
+        return ".".join(
+            label.encode("idna").decode("ascii")
+            for label in host.split(".")
+            if label
+        ).lower()
+    except UnicodeError:
+        return ""
+
+
+@lru_cache(maxsize=8192)
+def registrable_domain(raw: str) -> str:
+    """返回 PSL 意义上的可注册根域；离线使用依赖包内置快照。"""
+    host = normalize_fqdn(raw)
+    if not host:
+        return ""
+    try:
+        import tldextract
+
+        extractor = getattr(registrable_domain, "_extractor", None)
+        if extractor is None:
+            extractor = tldextract.TLDExtract(
+                suffix_list_urls=(),
+                cache_dir=None,
+                include_psl_private_domains=True,
+            )
+            registrable_domain._extractor = extractor
+        result = extractor(host)
+        if result.domain and result.suffix:
+            return f"{result.domain}.{result.suffix}".lower()
+    except Exception:
+        pass
+
+    # 内网域名或 tldextract 不可用时的稳定回退；生产依赖中固定安装
+    # tldextract，因此公网域名不会依赖这份简化规则。
+    labels = host.split(".")
+    return ".".join(labels[-2:]) if len(labels) > 1 else host
+
+
+def domain_hierarchy(raw: str) -> list[str]:
+    """返回从可注册根域到完整 FQDN 的逐级链。"""
+    host = normalize_fqdn(raw)
+    if not host:
+        return []
+    root = registrable_domain(host) or host
+    host_labels = host.split(".")
+    root_labels = root.split(".")
+    if host == root:
+        return [root]
+    if len(host_labels) <= len(root_labels) or host_labels[-len(root_labels):] != root_labels:
+        return [host]
+    prefix = host_labels[:-len(root_labels)]
+    hierarchy = [root]
+    for index in range(len(prefix) - 1, -1, -1):
+        hierarchy.append(".".join(prefix[index:] + root_labels))
+    return hierarchy
 
 
 def normalize_url(raw: str) -> str:

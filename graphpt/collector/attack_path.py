@@ -6,7 +6,7 @@
     - Vulnerability → EXPLOITS → Credential（漏洞利用产出凭据）
     - Vulnerability → GRANTS → IP/HTTPEndpoint（漏洞获得权限）
     - Credential → USES_CREDENTIAL → IP/Port（凭据复用到其他服务）
-    - Vulnerability → PIVOTS_TO → IP/Subdomain（横向移动）
+    - Vulnerability → PIVOTS_TO → IP/Domain（横向移动）
 
   推导结果：完整攻击路径 + 每步的置信度 + 下一步建议
 """

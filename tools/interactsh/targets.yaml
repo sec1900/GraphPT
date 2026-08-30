@@ -1,5 +1,6 @@
 selectors:
   interactsh:
+    consumes: {node_type: Vulnerability}
     desc: "需要 OOB 验证的漏洞实例"
     query: |
       MATCH (a:Asset {id: $asset_id})

@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from graphpt.common.asset_identity import normalize_host_port, normalize_url
-from graphpt.collector.adapter import ADAPTER_MAP
+from graphpt.collector.adapter import ADAPTER_MAP, validate_finding
 from graphpt.collector.neo4j_client import get_graph_writer
 
 # 导入 cleanup 模块（模块化重构）
@@ -134,7 +134,7 @@ def _target_labels_from_findings(findings: list[dict[str, Any]]) -> set[str]:
         if not isinstance(finding, dict):
             continue
         ftype = str(finding.get("type") or "")
-        if ftype in ("domain", "subdomain", "ip"):
+        if ftype in ("domain", "ip"):
             value = str(finding.get("value") or "").strip()
             if value:
                 labels.add(value)
@@ -143,8 +143,8 @@ def _target_labels_from_findings(findings: list[dict[str, Any]]) -> set[str]:
             if value:
                 labels.add(value)
         parent_id = str(finding.get("parent_id") or "").strip()
-        if parent_id.startswith("sub:"):
-            labels.add(parent_id[4:])
+        if parent_id.startswith("domain:"):
+            labels.add(parent_id[7:])
         elif parent_id.startswith("ip:"):
             labels.add(parent_id[3:])
         elif parent_id.startswith("port:ip:"):
@@ -176,7 +176,7 @@ def _scan_target_node_ids(asset_id: str, tool: str, target_label: str) -> list[s
     if not label:
         return node_ids
 
-    known_prefixes = ("ep:", "sub:", "ip:", "root:", "port:", "vuln:", "file:", "dir:")
+    known_prefixes = ("ep:", "domain:", "ip:", "port:", "vuln:", "file:")
     if label.startswith(known_prefixes):
         add(label)
         return node_ids
@@ -209,14 +209,13 @@ def _scan_target_node_ids(asset_id: str, tool: str, target_label: str) -> list[s
                 add(f"port:ip:{host}:{port}/tcp")
                 add(f"ip:{host}")
             else:
-                add(f"sub:{host}")
+                add(f"domain:{host}")
         return node_ids
 
     if _looks_like_ip(label):
         add(f"ip:{label}")
     elif "." in label:
-        add(f"root:{label}")
-        add(f"sub:{label}")
+        add(f"domain:{label}")
     return node_ids
 
 
@@ -225,7 +224,7 @@ def _unresolved_placeholders(command: str) -> list[str]:
 
 
 def _base_tool(name: str) -> str:
-    """'httpx:subdomain' → 'httpx'。无别名原样返回。"""
+    """'httpx:domain' → 'httpx'。无别名原样返回。"""
     return name.split(":", 1)[0]
 
 
@@ -310,21 +309,91 @@ def _tool_config(tool: str) -> dict[str, Any]:
     return cfg if isinstance(cfg, dict) else {}
 
 
+def _tail_of_log(log_file) -> str:
+    """读日志尾部（错误分类用，最长 800 字符）。"""
+    try:
+        from pathlib import Path as _Path
+        _p = _Path(log_file)
+        if _p.is_file():
+            data = _p.read_text(encoding="utf-8", errors="replace")
+            return data[-800:]
+    except Exception:
+        pass
+    return ""
+
+
+def _classify_tool_error(return_code: int, log_tail: str, command: str = "") -> str:
+    """D11：工具失败分类——env_error（环境性：证书/TLS/挂起）vs tool_error（工具自身）。
+
+    前端 Recent Errors 面板据此分组，环境性错误不再与真实工具错误混排。
+    """
+    _lt = (log_tail or "").lower()
+    _cmd = (command or "").lower()
+    if any(k in _lt for k in ("certificate", "tls", "x509", "ssl", "handshake")):
+        return "env_tls"
+    if any(k in _lt for k in ("no output for", "silent at startup", "max time")):
+        return "env_hang"
+    if any(k in _lt for k in ("timed out", "timeout", "could not resolve",
+                              "connection refused", "no route", "000")):
+        return "env_network"
+    if any(k in _cmd for k in ("dnsx", "dns_zonetransfer", "enscan")) and return_code != 0:
+        return "env_external"  # 外部网络查询类工具失败多为环境
+    return "tool_error"
+
+
+def _scanrun_id(
+    tool: str,
+    target: str,
+    *,
+    asset_id: str = "",
+    config_hash: str = "",
+) -> str:
+    """返回资产隔离的 ScanRun 身份。
+
+    ``asset_id`` 必须进入身份键；否则两个资产扫描相同目标时会 MERGE 到
+    同一个 ScanRun，并互相覆盖 ``sr.asset_id``，造成重复扫描或错误跳过。
+    ``config_hash`` 仍是可选的参数敏感维度。
+    """
+    import hashlib as _h
+
+    raw = f"{asset_id or 'default'}:{tool}:{target}"
+    if config_hash:
+        raw += f":{config_hash}"
+    return f"scan:target:{_h.md5(raw.encode()).hexdigest()[:16]}"
+
+
+def _scope_scanrun_dedup_query(query: str, *, config_sensitive: bool = False) -> str:
+    """为 targets.yaml 中所有 ScanRun 去重子句注入资产条件。
+
+    旧实现只匹配以 ``WHERE NOT EXISTS`` 开头的写法，遗漏了大量
+    ``AND NOT EXISTS`` 选择器。这里直接匹配子查询内部的 MATCH/WHERE，
+    与外层使用 WHERE 还是 AND 无关。
+    """
+    condition = "sr.asset_id = $asset_id AND "
+    if config_sensitive:
+        condition += "coalesce(sr.config_hash, '') = $config_hash AND "
+    return re.sub(
+        r"MATCH\s+\(sr:ScanRun\)\s+WHERE\s+(?!sr\.asset_id\s*=)",
+        f"MATCH (sr:ScanRun) WHERE {condition}",
+        query,
+        flags=re.IGNORECASE,
+    )
+
+
 # 别名后缀 → tool.yaml 的 use_on 节点类型
-# "gobuster:dns" → 后缀 "dns" → node_type "RootDomain" → 取 use_on.RootDomain.command
+# 冒号别名 → 统一物理节点类型
 _ALIAS_NODE_TYPE: dict[str, str] = {
-    "dns": "RootDomain",
+    "dns": "Domain",
     "vhost": "IP",
-    "subdomain": "Subdomain",
     "port": "Port",
-    "takeover": "Subdomain",
+    "takeover": "Domain",
 }
 
 
 def _tool_command(tool: str, node_type: str = "") -> str:
     base = _base_tool(tool)
     cfg = _tool_config(base)
-    # 别名自动推导 node_type: "gobuster:dns" → "RootDomain"
+    # 别名自动推导 node_type: "gobuster:dns" → "Domain"
     if not node_type and ":" in tool:
         suffix = tool.split(":", 1)[1]
         node_type = _ALIAS_NODE_TYPE.get(suffix, "")
@@ -537,7 +606,7 @@ def _load_target_selectors() -> dict[str, dict[str, Any]]:
             if isinstance(selectors, dict):
                 for name, spec in selectors.items():
                     if isinstance(spec, dict) and spec.get("query"):
-                        result[name] = spec
+                        result[name] = dict(spec)
         except Exception:
             pass  # 单个文件解析失败不影响其他
     _TARGET_SELECTORS = result
@@ -673,9 +742,23 @@ class PipelineExecutor:
             if result.get("status") == "partial":
                 final_status = "partial"
 
-        # 扫描完成后自动清理旧日志（每小时最多一次）
+        # 扫描完成后统一数据巡检（每小时去重限流）：
+        # 日志 7 天 / 运行时目录保留 / 流量库 30 天 / 陈旧 tmp 兜底 / 僵尸任务
         try:
             cleanup_old_logs(force=False)
+            from graphpt.collector.cleanup import (
+                cleanup_runtime_dirs, cleanup_old_traffic, cleanup_stale_tmp,
+            )
+            cleanup_runtime_dirs(force=False)
+            cleanup_old_traffic(force=False)
+            cleanup_stale_tmp(force=False)
+            # 僵尸任务（running → failed）——曾被定义但从未接线，现每轮扫描后触发
+            try:
+                from graphpt.workspace.task_helpers import cleanup_stale_tasks
+                from graphpt.common.paths import PROJECT_ROOT
+                cleanup_stale_tasks(PROJECT_ROOT / "data" / "db" / "graphpt.db")
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -820,6 +903,8 @@ class PipelineExecutor:
 
         # 强制重扫模式：移除 ScanRun 检查，忽略已扫描记录
         force_rescan = self.ctx.get("force_rescan", False)
+        config_sensitive = False
+        config_hash = ""
         if force_rescan:
             # 兼容两种 NOT EXISTS 写法：AND 前缀（nuclei 等）与 WHERE 前缀
             # （httpx/sqlmap/crt/traffic_analyzer/verify_replay 等）
@@ -836,11 +921,12 @@ class PipelineExecutor:
                 flags=re.IGNORECASE
             )
         else:
-            # 自动注入 asset_id 到 WHERE NOT EXISTS，防止跨资产 ScanRun 误过滤
-            query = re.sub(
-                r"WHERE NOT EXISTS \{\s*MATCH \(sr:ScanRun\) WHERE ",
-                "WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.asset_id = $asset_id AND ",
+            # 所有 ScanRun 去重都按资产隔离（同时覆盖 WHERE/AND NOT EXISTS）。
+            config_sensitive = "config_hash" in self._tool_identity(tool)
+            config_hash = self._tool_config_hash(tool) if config_sensitive else ""
+            query = _scope_scanrun_dedup_query(
                 query,
+                config_sensitive=config_sensitive,
             )
 
         try:
@@ -848,6 +934,8 @@ class PipelineExecutor:
             w = get_graph_writer()
             with w._driver.session() as s:
                 qparams = {"asset_id": self.asset_id, "tool": tool}
+                if config_sensitive:
+                    qparams["config_hash"] = config_hash
                 for k, v in self.ctx.items():
                     if isinstance(v, (str, int, float, bool, type(None))):
                         if v is not None and v != "" and v != [] and v != {}:
@@ -891,20 +979,36 @@ class PipelineExecutor:
         self._mark_scanned_batch(tool, [target_label or "default"], findings_count)
 
     def _mark_scanned_batch(self, tool: str, labels: list[str], findings_count: int = 0) -> None:
-        """批量标记扫描目标，一次 Neo4j 事务写完。"""
+        """批量标记扫描目标，一次 Neo4j 事务写完。
+
+        ScanRun 身份键（去重维度）可用 tool.yaml 可选段 `identity` 覆盖：
+          identity: ["tool", "target"]                     # 默认：工具+目标
+          identity: ["tool", "target", "config_hash"]      # 参数敏感：命令模板变化 → 新 ScanRun
+        身份计算统一走 _scanrun_id()；去重查询（targets.yaml 的 NOT EXISTS 匹配
+        sr.target）仍按 target 语义——含 config_hash 的工具目标恒定但每次参数
+        变化生成新记录，历史行保留，语义上等价"触发器"。
+        """
         if not labels:
             return
         try:
-            import hashlib
             w = get_graph_writer()
             now = _now_iso()
+            identity = self._tool_identity(tool)
+            cfg_hash = ""
+            if "config_hash" in identity:
+                cfg_hash = self._tool_config_hash(tool)
             # 每组最多 500 条，避免单事务过大
             for batch_start in range(0, len(labels), 500):
                 batch = labels[batch_start:batch_start + 500]
                 rows = []
                 for label in batch:
                     label = label or "default"
-                    rid = f"scan:target:{hashlib.md5(f'{tool}:{label}'.encode()).hexdigest()[:16]}"
+                    rid = _scanrun_id(
+                        tool,
+                        label,
+                        asset_id=self.asset_id,
+                        config_hash=cfg_hash,
+                    )
                     # target_key = 路径级去重键（消除 url 翻转重扫抖动；
                     # 选择器按 sr.target_key = ep.base_path 去重）
                     try:
@@ -912,7 +1016,13 @@ class PipelineExecutor:
                         target_key = normalize_path(label) or label
                     except Exception:
                         target_key = label
-                    rows.append({"rid": rid, "label": label, "target_key": target_key})
+                    rows.append({
+                        "rid": rid,
+                        "label": label,
+                        "target_key": target_key,
+                        "config_hash": cfg_hash,
+                        "node_ids": _scan_target_node_ids(self.asset_id, tool, label),
+                    })
                 with w._driver.session() as s:
                     s.run(
                         """
@@ -921,10 +1031,20 @@ class PipelineExecutor:
                         SET sr.tool = $tool, sr.target = row.label,
                             sr.target_key = row.target_key,
                             sr.asset_id = $asset_id,
+                            sr.config_hash = row.config_hash,
                             sr.findings_count = $fc, sr.last_run_at = $now,
                             sr.finished_at = $now,
                             sr.started_at = coalesce(sr.started_at, $now),
                             sr.created_at = coalesce(sr.created_at, $now)
+                        WITH sr, row
+                        MATCH (asset:Asset {id: $asset_id})
+                        MERGE (asset)-[:HAS_SCAN_RUN]->(sr)
+                        CALL (sr, row) {
+                          UNWIND row.node_ids AS node_id
+                          MATCH (target {id: node_id})
+                          MERGE (sr)-[:RAN]->(target)
+                          RETURN count(*) AS linked
+                        }
                         """,
                         rows=rows, tool=tool, asset_id=self.asset_id,
                         fc=findings_count, now=now,
@@ -935,6 +1055,34 @@ class PipelineExecutor:
             _log.warning("_mark_scanned_batch failed for tool=%s labels=%d: %s",
                          tool, len(labels), exc)
             raise
+
+    @staticmethod
+    def _tool_identity(tool: str) -> tuple[str, ...]:
+        """读取工具去重身份维度（tool.yaml 可选 `identity:` 段）。
+
+        默认 ("tool", "target")；支持维度: tool / target / config_hash。
+        """
+        cfg = _tool_config(tool)
+        ident = cfg.get("identity") if isinstance(cfg, dict) else None
+        if not isinstance(ident, (list, tuple)) or not ident:
+            return ("tool", "target")
+        allowed = {"tool", "target", "config_hash"}
+        return tuple(x for x in ident if x in allowed) or ("tool", "target")
+
+    @staticmethod
+    def _tool_config_hash(tool: str) -> str:
+        """命令模板的稳定哈希——identity 含 config_hash 时作为身份维度。"""
+        import hashlib as _h
+        cfg = _tool_config(tool)
+        if not isinstance(cfg, dict):
+            return ""
+        cmd = str(cfg.get("command") or "")
+        use_on = cfg.get("use_on")
+        if isinstance(use_on, dict):
+            for uo in use_on.values():
+                if isinstance(uo, dict):
+                    cmd += "|" + str(uo.get("command") or "")
+        return _h.md5(cmd.encode()).hexdigest()[:12] if cmd else ""
 
     def _preview_tool(self, tool: str, cmd_template: str, index: int, *, stage_name: str = "") -> dict[str, Any]:
         """Resolve one stage command without touching Neo4j or running subprocess."""
@@ -1018,11 +1166,11 @@ class PipelineExecutor:
           3. 解析模板 → subprocess 运行
           4. adapter 解析输出 → write_batch → _mark_scanned
 
-        tool 支持别名（如 "httpx:subdomain"）：冒号前是真实工具名，用于查找
+        tool 支持别名（如 "httpx:domain"）：冒号前是真实工具名，用于查找
         二进制/适配器/配置；完整别名用于目标查询和 ScanRun 去重。
         """
 
-        base = _base_tool(tool)  # "httpx:subdomain" → "httpx"
+        base = _base_tool(tool)  # "httpx:domain" → "httpx"
 
         import time as _time  # 监控循环依赖（_tool_log_path 提取后局部 import 不再覆盖此处）
         import hashlib as _hashlib
@@ -1182,6 +1330,10 @@ class PipelineExecutor:
             _STALE_TIMEOUT = int(os.getenv("GRAPHPT_STALE_TIMEOUT", "300"))
             _MAX_TOOL_TIME = int(os.getenv("GRAPHPT_MAX_TOOL_TIME", "1800") or "0")  # 绝对上限，默认30min，0=不限
             _MAX_TOOL_MEM_MB = int(os.getenv("GRAPHPT_MAX_TOOL_MEM_MB", "4096"))  # 内存上限（MB），0=不限
+            # 启动早挂检测（A1）：30s 无新输出且 CPU<5% → 启动即挂，快速杀
+            # 修 dnsx 类二进制对该网络环境挂死（banner 输出骗过 idle 判定 → 拖满 600s/层）。
+            # nuclei 冷启动加载模板 CPU 高 → 不误杀。
+            _EARLY_HANG = int(os.getenv("GRAPHPT_EARLY_HANG", "30"))
             _POLL_INTERVAL = int(os.getenv("GRAPHPT_POLL_INTERVAL", "2"))
             # 人工验证检测 — 爬虫工具（enscan 等）触发反爬后需用户打开浏览器验证
             _VERIFICATION_GRACE = int(os.getenv("GRAPHPT_VERIFICATION_GRACE", "600"))
@@ -1324,6 +1476,27 @@ class PipelineExecutor:
                                 f"tool max time: {_elapsed:.0f}s > {_MAX_TOOL_TIME}s "
                                 f"(log={_log_file})"
                             )
+
+                        # 启动早挂检测：启动 30s 内无新输出 + CPU<5% → 判启动即挂
+                        # （dnsx 等二进制对该网络挂死，实测拖满 600s 才被 max time 收掉）
+                        if (_EARLY_HANG > 0 and _elapsed > _EARLY_HANG
+                                and (_now - _last_output) > _EARLY_HANG):
+                            _cpu_silent = True
+                            try:
+                                import psutil as _psutil_mod2
+                                _pp2 = _psutil_mod2.Process(proc.pid)
+                                if _pp2.is_running():
+                                    _cpu2 = _pp2.cpu_percent(interval=0.4)
+                                    if _cpu2 > 5.0:
+                                        _cpu_silent = False  # 加载/计算中，不杀
+                            except Exception:
+                                pass
+                            if _cpu_silent:
+                                _kill_proc_safely(proc)
+                                raise RuntimeError(
+                                    f"tool silent at startup: no output for {(_now - _last_output):.0f}s "
+                                    f"in first {_elapsed:.0f}s, CPU idle (log={_log_file})"
+                                )
 
                         # 内存上限（nuclei 15K 模板能吃 1GB+，超过阈值杀掉）
                         if _MAX_TOOL_MEM_MB > 0:
@@ -1499,6 +1672,14 @@ class PipelineExecutor:
                             parse_ctx.update(asset_id=self.asset_id,
                                            parent_id=self.ctx.get("parent_id", ""))
                             findings = adapter.parse(_partial_stdout, **parse_ctx)
+                            # 字段契约关卡（0.3）：非法键/非法 type 的 finding 不落库
+                            before = len(findings)
+                            findings = [f for f in findings if validate_finding(f)]
+                            if before and len(findings) != before:
+                                _log.warning(
+                                    "findings_dropped_by_contract",
+                                    extra={"tool": tool, "dropped": before - len(findings), "total": before},
+                                )
                             if findings:
                                 try:
                                     writer = get_graph_writer()
@@ -1545,7 +1726,7 @@ class PipelineExecutor:
                 errors.append({
                     "tool": tool,
                     "target": _target_label(tgt),
-                    "kind": "nonzero_exit",
+                    "kind": _classify_tool_error(proc.returncode, "", cmd),
                     "message": f"tool exited with code {proc.returncode}",
                     "return_code": proc.returncode,
                     "log_file": str(_log_file),
@@ -1557,7 +1738,7 @@ class PipelineExecutor:
                 errors.append({
                     "tool": tool,
                     "target": _target_label(tgt),
-                    "kind": "nonzero_exit",
+                    "kind": _classify_tool_error(proc.returncode, _tail_of_log(_log_file), cmd),
                     "message": f"tool exited with code {proc.returncode}",
                     "return_code": proc.returncode,
                     "log_file": str(_log_file),
@@ -1592,6 +1773,14 @@ class PipelineExecutor:
                         target_url=self.ctx.get("url", ""),
                     )
                     findings = adapter.parse(raw_input, **parse_ctx)
+                    # 字段契约关卡（0.3）：非法键/非法 type 的 finding 不落库
+                    before = len(findings)
+                    findings = [f for f in findings if validate_finding(f)]
+                    if before and len(findings) != before:
+                        _log.warning(
+                            "findings_dropped_by_contract",
+                            extra={"tool": tool, "dropped": before - len(findings), "total": before},
+                        )
                 except Exception as exc:
                     errors.append({
                         "tool": tool,
@@ -1841,7 +2030,7 @@ class PipelineExecutor:
           port         → ports
           http_endpoint → urls
           url          → urls
-          dir_entry    → (不产生 ctx，由 write_batch 入图)
+          test_attempt → (不产生 ctx，由 write_batch 入图)
           file         → (不产生 ctx，由 write_batch 入图)
         """
         for f in findings:

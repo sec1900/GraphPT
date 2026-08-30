@@ -68,6 +68,7 @@ def normalize_tech_stack(raw_items: list[str]) -> list[str]:
 
 
 class VibeFingerprintAdapter(BaseAdapter):
+    output_fields = ('fingerprint', 'title', 'type', 'url', 'waf', 'webserver')
     tool_name = "fingerprint_rules"
 
     def parse(self, raw_output: str, **ctx) -> list[dict]:
@@ -81,14 +82,14 @@ class VibeFingerprintAdapter(BaseAdapter):
             if not isinstance(info, dict):
                 continue
             tech_stack = normalize_tech_stack(
-                [info.get("web_server", "")] + list(info.get("tech_stack") or []))
+                [info.get("webserver", "")] + list(info.get("tech_stack") or []))
             findings.append({
                 "type": "fingerprint",
                 "url": url,
-                "web_title": info.get("web_title", ""),
-                "web_server": info.get("web_server", ""),
+                "title": info.get("title", ""),
+                "webserver": info.get("webserver", ""),
                 "waf": info.get("waf", []),
-                "tech_stack": tech_stack,
+                "fingerprint": tech_stack,
             })
         return findings
 

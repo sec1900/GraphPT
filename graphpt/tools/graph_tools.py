@@ -77,11 +77,11 @@ def _exec_graph_query(arguments: dict[str, Any], **kwargs: Any) -> dict[str, Any
 
 _SUMMARY_CYPHER = """
 MATCH (a:Asset {id: $asset_id})
-OPTIONAL MATCH (a)-[:HAS_ROOT]->(rd:RootDomain)
-OPTIONAL MATCH (rd)-[:HAS_SUB]->(sub:Subdomain)
+OPTIONAL MATCH (a)-[:HAS_DOMAIN]->(root:Domain)
+OPTIONAL MATCH (root)-[:PARENT_OF*0..]->(domain:Domain)
 CALL (a) {
   WITH a
-  OPTIONAL MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(domain_ip:IP)
+  OPTIONAL MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(domain_ip:IP)
   RETURN collect(DISTINCT domain_ip) AS domain_ips
 }
 CALL (a) {
@@ -89,14 +89,14 @@ CALL (a) {
   OPTIONAL MATCH (a)-[:HAS_IP]->(direct_ip:IP)
   RETURN collect(DISTINCT direct_ip) AS direct_ips
 }
-WITH a, rd, sub, domain_ips + direct_ips AS all_ips
+WITH a, root, domain, domain_ips + direct_ips AS all_ips
 UNWIND CASE WHEN all_ips = [] THEN [null] ELSE all_ips END AS ip
 OPTIONAL MATCH (ip)-[:HAS_PORT]->(p:Port)
 OPTIONAL MATCH (p)-[:EXPOSES]->(ep:HTTPEndpoint)
 OPTIONAL MATCH (ep)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
 RETURN
-  count(DISTINCT rd) AS root_domains,
-  count(DISTINCT sub) AS subdomains,
+  count(DISTINCT root) AS root_domains,
+  count(DISTINCT CASE WHEN domain.is_root = false THEN domain END) AS subdomains,
   count(DISTINCT ip) AS ips,
   count(DISTINCT p) AS ports,
   count(DISTINCT ep) AS endpoints,
@@ -104,14 +104,14 @@ RETURN
 """
 
 _UNSCANNED_CYPHER = """
-MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(sub:Subdomain)
-WHERE NOT (sub)-[:RESOLVES_TO]->()
-RETURN 'unresolved_subdomains' AS gap, count(sub) AS count
+MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(domain:Domain)
+WHERE NOT (domain)-[:RESOLVES_TO]->()
+RETURN 'unresolved_domains' AS gap, count(DISTINCT domain) AS count
 UNION ALL
 MATCH (a:Asset {id: $asset_id})
 CALL (a) {
   WITH a
-  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP)
+  MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(ip:IP)
   RETURN ip
   UNION
   WITH a
@@ -125,7 +125,7 @@ UNION ALL
 MATCH (a:Asset {id: $asset_id})
 CALL (a) {
   WITH a
-  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p:Port)
+  MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(p:Port)
   RETURN p
   UNION
   WITH a
@@ -141,7 +141,7 @@ _TOP_VULNS_CYPHER = """
 MATCH (a:Asset {id: $asset_id})
 CALL (a) {
   WITH a
-  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+  MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
   RETURN ep
   UNION
   WITH a
@@ -199,7 +199,7 @@ def _exec_graph_attack_paths(arguments: dict[str, Any], **kwargs: Any) -> dict[s
     MATCH (a:Asset {{id: $asset_id}})
     CALL (a) {{
       WITH a
-      MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+      MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
       RETURN ep
       UNION
       WITH a
@@ -311,7 +311,7 @@ def _graph_ports_for_ip(asset_id: str, ip: str) -> list[int]:
                   MATCH (a)-[:HAS_IP]->(ip:IP {value: $ip})
                   RETURN ip
                   UNION
-                  MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(ip:IP {value: $ip})
+                  MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(ip:IP {value: $ip})
                   RETURN ip
                 }
                 MATCH (ip)-[:HAS_PORT]->(p:Port)
@@ -332,9 +332,9 @@ def _infer_node_type(tool: str, target: str) -> str:
     if tool in {"naabu", "nmap"}:
         return "IP"
     if tool in {"subfinder", "crt"}:
-        return "RootDomain"
+        return "Domain"
     if tool == "dnsx":
-        return "Subdomain"
+        return "Domain"
     if tool == "enscan":
         return "Asset"
     if tool == "httpx" and "://" in target:
@@ -711,4 +711,26 @@ def init_graph_tools() -> None:
             approval_policy="manual_only",
         ),
         _exec_trigger_scan,
+    )
+
+    register_tool(
+        ToolDef(
+            name="run_tool_on_node",
+            description="单点定向执行：对指定节点精确运行一个外部工具（等价前端右键 Run tool on node）。与 trigger_scan 的区别：这里明确指定 target=那个节点，工具不做目标发现。用法：graph_query 查到节点后，run_tool_on_node(tool='httpx', target='api.acme.com', node_type='Domain', asset_id='acme-corp')。执行异步排队，用 graph_query 回查结果。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string", "description": "外部工具名（tools/<name>/tool.yaml 存在）"},
+                    "target": {"type": "string", "description": "节点值（域名/IP/URL/端口）"},
+                    "node_type": {"type": "string", "description": "节点类型（Domain/IP/Port/HTTPEndpoint 等，落 tool.yaml use_on 查找命令模板）"},
+                    "asset_id": {"type": "string", "description": "资产 ID"},
+                    "node": {"type": "object", "description": "节点属性（可选，value/url/ip 等供命令模板渲染）"},
+                },
+                "required": ["tool", "target", "node_type", "asset_id"],
+            },
+            risk_level="medium",
+            needs_scope_check=False,
+            approval_policy="manual_only",
+        ),
+        _exec_run_tool_on_node,
     )

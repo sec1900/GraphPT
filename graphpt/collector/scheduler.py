@@ -3,12 +3,12 @@
 核心思想（与流水线模式的区别）:
   流水线模式 —— 顺序写死在 pipelines.yaml，按 stage 串行跑。
   节点驱动模式 —— 顺序从数据流自然涌现:每个工具的"就绪条件 + 去重"
-    已编码在 pipeline._BATCH_TARGETS 的 Cypher 里（如 dnsx 选"有 Subdomain
+    已编码在 targets.yaml 的 Cypher 里（如 dnsx 选择尚未解析的 Domain，
     但还没 RESOLVES_TO IP 的"）。调度器只需轮询每个工具"有没有待处理目标"，
-    有就派发。subfinder 没产出 Subdomain 时 dnsx 自然查不到目标。
+    有就派发。subfinder 没产出 Domain 时 dnsx 自然查不到目标。
 
 调度节奏（用户确认）: 同层并行、跨层串行。
-  - 同层 = 消费同类节点的工具（crt/subfinder/urlfinder 都吃 RootDomain）→ 一起派发。
+  - 同层 = 消费相同 Domain scope 的工具（crt/subfinder/urlfinder 都吃 root）→ 一起派发。
   - 跨层 = observer_ward(Endpoint) 必须等上游产出 Endpoint → 靠 _query_targets
     空/非空自然门控,本轮只推进"最低的有目标层"，下一层留到下一轮。
 
@@ -269,22 +269,31 @@ def _slot_release(r: Any, asset_id: str) -> None:
 # 加新节点类型时只需在此映射加一行
 _NODE_LAYER_ORDER: dict[str, int] = {
     "Asset": 0,
-    "RootDomain": 1,
-    "Subdomain": 2,
+    "Domain": 2,
     "IP": 3, "standalone_ip": 3,
     "Port": 4,
-    "HTTPEndpoint": 5, "Endpoint": 5, "File": 5, "DirEntry": 5, "ApiEndpoint": 5,
+    "HTTPEndpoint": 5, "Endpoint": 5, "File": 5,
     "Vulnerability": 6, "Secret": 6,
-    "Credential": 7, "BypassResult": 7,
+    "Credential": 7, "TestAttempt": 7,
 }
+
+
+def _consumer_layer(node_type: str, metadata: dict[str, Any]) -> tuple[int | None, str]:
+    """把物理节点类型 + 消费范围映射为调度层。"""
+    if node_type == "Domain":
+        domain_scope = str(metadata.get("domain_scope") or "").lower()
+        if domain_scope not in {"root", "all"}:
+            return None, f"Domain[{domain_scope or '?'}]"
+        return (1 if domain_scope == "root" else 2), f"Domain[{domain_scope}]"
+    return _NODE_LAYER_ORDER.get(node_type), node_type
 
 
 def _build_dependency_layers() -> list[dict[str, Any]]:
     """从 tools/*/tool.yaml 的 use_on 自动推导攻击层。
 
     不再手写 _DEPENDENCY_LAYERS。加新工具只需在 tools/ 目录放
-    tool.yaml + targets.yaml + adapter.py + 二进制。use_on 声明
-    它消费哪种节点 → 自动归入正确的攻击层。
+    tool.yaml + targets.yaml + adapter.py + 二进制。每个 selector 的
+    consumes 声明它消费哪种节点 → 自动归入正确的攻击层。
     """
     from pathlib import Path as _Path
     import yaml as _yaml
@@ -296,42 +305,43 @@ def _build_dependency_layers() -> list[dict[str, Any]]:
 
     for yaml_file in sorted(_tools_dir.glob("*/tool.yaml")):
         tool_name = yaml_file.parent.name
+        targets_file = yaml_file.parent / "targets.yaml"
+        if not targets_file.is_file():
+            continue
         try:
-            cfg = _yaml.safe_load(yaml_file.read_text(encoding="utf-8")) or {}
+            tdata = _yaml.safe_load(targets_file.read_text(encoding="utf-8")) or {}
         except Exception:
             continue
-        use_on = cfg.get("use_on", {})
-        if not isinstance(use_on, dict):
+        selectors = tdata.get("selectors", {}) if isinstance(tdata, dict) else {}
+        if not isinstance(selectors, dict):
             continue
-        for node_type, rule in use_on.items():
-            if not isinstance(rule, dict):
+        for selector_name, selector in selectors.items():
+            if not isinstance(selector, dict) or selector.get("scheduled", True) is False:
                 continue
-            layer = _NODE_LAYER_ORDER.get(node_type)
+            base_name = selector_name.split(":", 1)[0]
+            if base_name != tool_name:
+                _log.warning(
+                    "selector_base_mismatch",
+                    extra={"selector": selector_name, "tool": tool_name},
+                )
+                continue
+            consumes = selector.get("consumes")
+            if not isinstance(consumes, dict):
+                _log.warning(
+                    "selector_missing_consumes",
+                    extra={"selector": selector_name, "file": str(targets_file)},
+                )
+                continue
+            node_type = str(consumes.get("node_type") or "")
+            layer, node_label = _consumer_layer(node_type, consumes)
             if layer is None:
-                continue  # 未知节点类型跳过
-            layer_tools.setdefault(layer, set()).add(tool_name)
-            layer_nodes.setdefault(layer, node_type)
-
-        # 冒号别名选择器（tool:alias，如 sqlmap:post）注册到 base tool 所在层 —
-        # 否则别名工具只存在于 targets.yaml，调度器层永远派发不到
-        targets_file = yaml_file.parent / "targets.yaml"
-        if targets_file.is_file():
-            try:
-                tdata = _yaml.safe_load(targets_file.read_text(encoding="utf-8")) or {}
-            except Exception:
-                tdata = {}
-            selectors = tdata.get("selectors", {}) if isinstance(tdata, dict) else {}
-            if isinstance(selectors, dict):
-                for sel_name in selectors:
-                    if ":" not in sel_name:
-                        continue
-                    base_name, suffix = sel_name.split(":", 1)
-                    if base_name != tool_name or not suffix:
-                        continue
-                    for ln, tools in layer_tools.items():
-                        if tool_name in tools:
-                            layer_tools[ln].add(sel_name)
-                            break
+                _log.warning(
+                    "selector_invalid_consumes",
+                    extra={"selector": selector_name, "consumes": consumes},
+                )
+                continue
+            layer_tools.setdefault(layer, set()).add(selector_name)
+            layer_nodes.setdefault(layer, node_label)
 
     # 按层号排序，构建 layers 列表
     layers = []
@@ -368,7 +378,43 @@ def _tool_result_findings(r: dict[str, Any]) -> int:
     )
 
 
-def _count_targets(tool: str, asset_id: str, force_rescan: bool = False) -> int:
+def _strip_scanrun_blocks(query: str) -> str:
+    """移除 'NOT EXISTS { MATCH (sr:ScanRun) ... }' 块（Force Rescan 模式）。
+
+    不用正则 [^}]* 切块：Cypher 块内可能嵌套花括号（如 verify_replay 的
+    duration({days: 7})、CALL (a) { } 子查询），[^}]* 会在内层 } 提前截断
+    产生残缺语句 → CypherSyntaxError。改平衡括号扫描，精确到块尾。
+    """
+    import re as _re
+    block_re = _re.compile(r"(?is)(?P<kw>AND|WHERE)\s+NOT\s+EXISTS\s*\{")
+    out: list[str] = []
+    pos = 0
+    for m in block_re.finditer(query):
+        # 连 AND/WHERE 前缀（含其前空白）一起丢弃
+        line_start = query.rfind("\n", 0, m.start()) + 1
+        out.append(query[pos:line_start])
+        # 三种残留结构：
+        #   enscan:        'WHERE cond \n AND NOT EXISTS {...}' → 删块，cond 行独立，合法
+        #   crt/subfinder: 'WHERE NOT EXISTS {...} AND (cond)'  → WHERE 换锚点，
+        #                   否则 MATCH 行粘上孤儿 AND → 语法坏
+        #   verify_replay: 'WITH x WHERE NOT EXISTS {...}'      → WHERE 换锚点，
+        #                   否则块后 RETURN 无挂载点
+        if m.group("kw").upper() == "WHERE":
+            out.append("WHERE 1=1 ")  # 等价锚点，保语义且 语法合法
+        depth, i = 1, m.end()
+        while i < len(query) and depth:
+            if query[i] == "{":
+                depth += 1
+            elif query[i] == "}":
+                depth -= 1
+            i += 1
+        pos = i
+    out.append(query[pos:])
+    return "".join(out)
+
+
+def _count_targets(tool: str, asset_id: str, force_rescan: bool = False,
+                   _session=None) -> int:
     """探测某工具当前有多少待处理目标（直接查 Neo4j）。
 
     注意: 此计数为近似值（直接从 targets.yaml 的 Cypher 算），
@@ -376,6 +422,7 @@ def _count_targets(tool: str, asset_id: str, force_rescan: bool = False) -> int:
     轻微误差不影响调度正确性（ScanRun 去重拦住重复派发）。
 
     force_rescan: True 时移除 ScanRun 检查，与 _query_targets 逻辑保持一致。
+    _session: 复用 session（跳过连接握手）——progress() 批量调用时传入。
     """
     try:
         from graphpt.collector.pipeline import _load_target_selectors
@@ -389,31 +436,44 @@ def _count_targets(tool: str, asset_id: str, force_rescan: bool = False) -> int:
         # Force Rescan 模式：移除 ScanRun 检查（与 pipeline._query_targets 逻辑一致）
         if force_rescan:
             # 兼容 AND / WHERE 两种 NOT EXISTS 写法（否则半数工具强制重扫静默失效）
-            query = re.sub(
-                r"\s*AND\s+NOT EXISTS \{\s*MATCH \(sr:ScanRun\)[^}]*\}",
-                "",
-                query,
-                flags=re.IGNORECASE
-            )
-            query = re.sub(
-                r"\s*WHERE\s+NOT EXISTS \{\s*MATCH \(sr:ScanRun\)[^}]*\}",
-                "",
-                query,
-                flags=re.IGNORECASE
-            )
+            query = _strip_scanrun_blocks(query)
 
+        # 计数上限优化：_count_targets 只需"有没有/约多少"，无需全量行。
+        #   fetch(501) 一次性拉取即消费：相比惰性 islice 迭代，不会在
+        #   并发共享 session 场景留下"已消费 Result 再迭代"的
+        #   ResultConsumedError（扫描运行期间曾多次出现，根因未完全定位，
+        #   防御性消除产生条件）。
+        #   ★ 不改写查询 SQL（CALL/UNION 分支内插 WITH 会破坏 Cypher 语法）。
+        #   数量语义退化为 500 封顶近似值（进度显示足够，派发准确性由
+        #   advance_once → _query_targets 的真实查询保证）。
+        qparams = {"asset_id": asset_id, "tool": tool}
+        qparams = {k: v for k, v in qparams.items() if v is not None and v != ""}
+        if _session is not None:
+            # 共享 session（progress() 批量调用）：调用方 with 保证存活期内完成
+            result = _session.run(query, **qparams)
+            try:
+                rows = result.fetch(501)
+            except Exception:
+                # 偶发双重消费：重取一次
+                result = _session.run(query, **qparams)
+                rows = result.fetch(501)
+            return len(rows)
         from graphpt.collector.neo4j_client import get_graph_writer
         w = get_graph_writer()
         with w._driver.session() as s:
-            qparams = {"asset_id": asset_id, "tool": tool}
-            qparams = {k: v for k, v in qparams.items() if v is not None and v != ""}
+            # ★ fetch 必须在 session 存活期内完成——此前 run 在 with 内、
+            #   fetch 在 with 外，session 已关闭导致 ResultConsumedError
+            #   被吞成 0 → 调度器永远看不到目标 → 全链空转
             result = s.run(query, **qparams)
-            count = 0
-            for _ in result:
-                count += 1
-            return count
+            try:
+                rows = result.fetch(501)
+            except Exception:
+                result = s.run(query, **qparams)
+                rows = result.fetch(501)
+            return len(rows)
     except Exception:
-        _log.warning("_count_targets_failed", exc_info=True, extra={"tool": tool, "asset_id": asset_id})
+        _log.warning("_count_targets_failed", exc_info=True,
+                     extra={"tool": tool, "asset_id": asset_id})
         return 0
 
 
@@ -434,7 +494,7 @@ def progress(asset_id: str = "default") -> list[dict[str, Any]]:
         for spec in _DEPENDENCY_LAYERS:
             items: list[dict[str, Any]] = []
             for tool in spec["tools"]:
-                remaining = _count_targets(tool, asset_id)
+                remaining = _count_targets(tool, asset_id, _session=s)
                 done = s.run(
                     "MATCH (sr:ScanRun {tool: $tool, asset_id: $asset_id}) RETURN count(sr) AS c",
                     tool=tool, asset_id=asset_id,
@@ -456,17 +516,6 @@ def progress(asset_id: str = "default") -> list[dict[str, Any]]:
     return out
 
 
-def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[str, Any]:
-    """推进所有有目标的依赖层，派发所有待处理工具。
-
-    跨层不串行——ScanRun 去重自然门控：上游没产出时下游查询为空，不会派发。
-    同层工具并行派发。
-
-    防重复:派发后设 Redis 锁(按 tool+asset_id),锁有效期内重复点击不会重复派发
-    同一工具。锁带 TTL 自动过期,防止任务崩溃后永久死锁。
-    """
-    import redis as _redis
-    _LOCK_TTL = int(os.getenv("GRAPHPT_SCHEDULER_LOCK_TTL", "86400"))
 _HEARTBEAT_TTL = int(os.getenv("GRAPHPT_SCHEDULER_HEARTBEAT_TTL", "3600"))
 _HEARTBEAT_STALE = int(os.getenv("GRAPHPT_SCHEDULER_HEARTBEAT_STALE", "300"))
 
@@ -734,9 +783,10 @@ def clear_scan_state(asset_id: str) -> None:
         _r = _redis_client()
         _r.ping()
         # ★ 不删 abort key —— 留给 _is_aborted() 和 pipeline 内循环
+        from graphpt.common.redis_client import keys_scan
         for pat in (f"scheduler:lock:{asset_id}:*", f"scheduler:heartbeat:{asset_id}:*",
                      f"tool:active:{asset_id}:*", f"scan:resume:{asset_id}"):
-            _keys = _r.keys(pat)
+            _keys = keys_scan(_r, pat)
             if _keys:
                 _r.delete(*_keys)
     except Exception:
@@ -1021,6 +1071,10 @@ def run_full_scan(asset_id: str, *,
     # 全局空闲检测：所有层连续 DRY_ROUNDS 次无目标则退出
     _DRY_EXIT = int(os.getenv("GRAPHPT_DRY_ROUNDS_EXIT", "3"))
     dry_counter = 0
+    # D10：force_rescan 收敛上限——force 忽略 ScanRun（永不"无目标"），
+    # 干枯检测对它无效（R3 实证：无限轮转只能 kill）。重扫语义=全目标扫一遍，
+    # 每层 3 轮足够，超限即收敛。
+    _FORCE_MAX_ROUNDS = int(os.getenv("GRAPHPT_FORCE_MAX_ROUNDS", "3"))
     dry_lock = _threading.Lock()
 
     # 层状态追踪（供前端展示）
@@ -1218,6 +1272,15 @@ def run_full_scan(asset_id: str, *,
                         r = f.result()
                         _log.info("layer_%d_complete asset=%s findings=%d",
                                   layer_num, asset_id, r.get("findings", 0))
+                        # 测绘途中增量信号 → agent（不等全链路完成；异步聚合，零阻塞）
+                        try:
+                            from graphpt.search.signal_stream import emit_scan_signal
+                            emit_scan_signal(
+                                asset_id,
+                                {"vuln_candidates": int(r.get("findings", 0)),
+                                 "new_assets": [asset_id]})
+                        except Exception as _sig_e:  # noqa: BLE001
+                            _log.warning("signal emit 失败（不影响扫描）: %s", _sig_e)
                     except Exception as exc:
                         _log.error("layer_%d_future_failed asset=%s error=%s",
                                   layer_num, asset_id, exc)
@@ -1247,6 +1310,16 @@ def run_full_scan(asset_id: str, *,
                         break
                 else:
                     dry_counter = 0
+
+                # force 收敛：全局轮次超限即结束（force 下 dry 检测永假）
+                if force_rescan:
+                    _cur_round = _SCAN_STATE.get(asset_id, {}).get("round", 0)
+                    if _cur_round >= _FORCE_MAX_ROUNDS:
+                        _log.info("full_scan_force_converged asset=%s rounds=%d (cap=%d)",
+                                  asset_id, _cur_round, _FORCE_MAX_ROUNDS)
+                        _scan_log(f"force converged at round {_cur_round}")
+                        _stop.set()
+                        break
 
                 time.sleep(_MONITOR_INTERVAL)
 
@@ -1281,6 +1354,19 @@ def run_full_scan(asset_id: str, *,
         st.update({"status": "done", "layer": None, "tool": None,
                    "finished_at": time.time()})
 
+    # 扫描收尾：存量端点批量分类（零请求，属性启发式）——
+    # nuclei/sqlmap 的 category 闸门依赖它，不接线则大量端点永久进不了漏洞扫描
+    if not aborted and final_status == "ok":
+        try:
+            from graphpt.collector.offline_classify import offline_classify
+            _cls = offline_classify(asset_id)
+            _log.info("offline_classify_done asset=%s updated=%s",
+                      asset_id, _cls.get("updated", 0))
+            _scan_log(f"offline_classify updated={_cls.get('updated', 0)}")
+        except Exception:
+            _log.warning("offline_classify_failed", exc_info=True,
+                         extra={"asset_id": asset_id})
+
     _log.info("full_scan_done asset=%s findings=%d errors=%d",
               asset_id, total_findings, total_errors)
     _scan_log(f"done findings={total_findings} errors={total_errors}")
@@ -1298,6 +1384,24 @@ def _notify_completion(asset_id: str, status: str, round_num: int,
     try:
         from graphpt.collector.oob_session import stop as _oob_stop
         _oob_stop(asset_id)
+    except Exception:
+        pass
+    # 扫描信号 → agent intent 桥（stats=done 时把发现映射为探索意图，
+    # 供 dispatcher/pool 派 explore 深挖；失败静默，env 可关 GRAPHPT_SCAN_BRIDGE=0）
+    try:
+        if status in ("done", "aborted") and os.environ.get("GRAPHPT_SCAN_BRIDGE", "1") != "0" \
+                and total_findings > 0:
+            from graphpt.search.board import Board
+            from graphpt.search.bridge import scan_result_to_intents, count_candidate_vulns
+            _bb = Board()
+            try:
+                _vuln_cands = count_candidate_vulns(asset_id)
+                scan_result_to_intents(
+                    _bb, f"scan:{asset_id}",
+                    {"vuln_candidates": _vuln_cands or total_findings,
+                     "new_assets": [asset_id]})
+            finally:
+                _bb.close()
     except Exception:
         pass
     # 自动报告（扫描完成生成 markdown 落盘，失败不阻塞）
@@ -1321,6 +1425,18 @@ def _notify_completion(asset_id: str, status: str, round_num: int,
         _r.setex(f"scan:completed:{asset_id}", 3600, payload)
         _r.delete(f"scan:resume:{asset_id}")  # 扫描完成，清除恢复点
         _log.info("scan_notification_sent asset=%s status=%s", asset_id, status)
+    except Exception:
+        pass
+    # C9：Redis 不可达时直写 web 进程内缓存（scan/completed 回退源）
+    try:
+        from graphpt.web.app import _scan_completed_cache
+        import json as _json2
+        _scan_completed_cache[asset_id] = (
+            time.time(),
+            {"asset_id": asset_id, "status": status, "rounds": round_num,
+             "findings": total_findings, "errors": total_errors,
+             "finished_at": time.time()},
+        )
     except Exception:
         pass
 

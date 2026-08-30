@@ -1,7 +1,8 @@
 selectors:
   crt:
+    consumes: {node_type: Domain, domain_scope: root}
     desc: 证书透明日志子域名发现 — 取未扫过的根域名（跳过泛解析）
-    query: 'MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
+    query: 'MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(rd:Domain)
 
       WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target =
       rd.value }

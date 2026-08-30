@@ -65,6 +65,52 @@ def _exec_db_write_adapter(
     return exec_db_write(arguments, db_file=db_file, task_id=task_id)
 
 
+def _exec_run_script(code: str, *, language: str = "python", timeout_s: int = 120, **_) -> dict[str, Any]:
+    """run_script 执行器：写文件 → 子进程 → 完整输出。
+
+    独立脚本引擎：绕开 Bash 的 shlex/Windows 引号地狱与编码问题，
+    exploit 开发/解析脚本的正式载体（P1-⑥）。
+    """
+    import subprocess as _sp
+    import sys as _sys
+    import uuid as _uuid
+    from pathlib import Path as _Path
+
+    ext = {"python": ".py", "bash": ".sh", "node": ".js"}.get(language, ".py")
+    if language == "bash" and os.name == "nt":
+        return {"error": "bash 脚本请在 python 中调用 subprocess 执行（Windows 无原生 bash）",
+                "success": False}
+    scripts_dir = _Path(__file__).resolve().parent.parent.parent / "workspace" / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    path = scripts_dir / f"run_{_uuid.uuid4().hex[:8]}{ext}"
+    try:
+        path.write_text(str(code or ""), encoding="utf-8")
+    except OSError as exc:
+        return {"error": f"write script failed: {exc}", "success": False}
+    interp = {"python": [_sys.executable], "node": ["node"]}.get(language, [_sys.executable])
+    try:
+        proc = _sp.run(
+            [*interp, str(path)],
+            capture_output=True,
+            timeout=float(timeout_s or 120),
+            encoding="utf-8",
+            errors="replace",
+        )
+    except _sp.TimeoutExpired:
+        return {"error": f"timeout after {timeout_s}s", "success": False, "timed_out": True}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc), "success": False}
+    out = (proc.stdout or "") + (("\n[stderr] " + proc.stderr) if proc.stderr.strip() else "")
+    if len(out) > 20000:
+        out = out[:20000] + f"\n...[输出截断 {len(out)} 字符]"
+    return {
+        "stdout": out,
+        "return_code": proc.returncode,
+        "script_path": str(path),
+        "success": proc.returncode == 0,
+    }
+
+
 def _exec_http_test(
     arguments: dict[str, Any],
     *,
@@ -76,6 +122,11 @@ def _exec_http_test(
     响应瘦身/编码守护/时序聚合由 http_test.py 内置；这里把参数映射为
     CLI 参数并截断超长输出（防止灌爆 agent 上下文）。
     """
+    # 硬约束层：同 URL+参数重复请求拦截
+    from graphpt.tools import guard as _guard
+    _block = _guard.check_http(arguments, task_id=int(kwargs.get("task_id", 0) or 0))
+    if _block:
+        return {"error": "guard_blocked", "message": _block, "success": False}
     import json as _json
     import subprocess as _sp
     import sys as _sys
@@ -210,7 +261,7 @@ _BUILTIN_TOOLS: list[tuple[ToolDef, ToolExecutor]] = [
                 "required": ["url"],
             },
             risk_level="medium",
-            needs_scope_check=False,
+            needs_scope_check=True,  # SRC 域：http_test 请求目标必须落在项目授权范围（scope）
         ),
         _exec_http_test,
     ),
@@ -267,6 +318,30 @@ _BUILTIN_TOOLS: list[tuple[ToolDef, ToolExecutor]] = [
         risk_level="low",
         needs_scope_check=False,
     ), _exec_db_write_adapter),
+    # 独立脚本引擎：绕开 Bash 的 shlex/Windows 引号地狱与编码问题，
+    # exploit 开发/解析脚本的正式载体（P1-⑥）
+    (ToolDef(
+        name="run_script",
+        description=(
+            "在隔离工作区执行一段脚本（python 默认）。脚本写入 workspace/scripts/ 后"
+            "以 UTF-8 子进程运行，完整 stdout/stderr 返回（不再受 Bash 命令长度/"
+            "引号转义限制）。language 支持 python / bash / node。"
+            "适合：编写 exploit/PoC、解析数据、批量请求、验证脚本。"
+            "返回值可含 script_path 供后续 Read。"
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "language": {"type": "string", "enum": ["python", "bash", "node"], "default": "python"},
+                "code": {"type": "string", "description": "脚本源码（完整程序，非单行）"},
+                "timeout_s": {"type": "number", "default": 120},
+            },
+            "required": ["code"],
+        },
+        risk_level="high",
+        needs_scope_check=False,
+        approval_policy="manual_only",
+    ), _exec_run_script),
 ]
 
 

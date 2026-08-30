@@ -353,6 +353,7 @@ def save_agent_session(
     now = _utc_now_iso()
     conn = open_db(db_file)
     try:
+        ensure_task_row(conn, int(task_id))
         row = conn.execute(
             "SELECT id FROM agent_sessions WHERE task_id = ? AND step_id = ?",
             (int(task_id), int(step_id)),

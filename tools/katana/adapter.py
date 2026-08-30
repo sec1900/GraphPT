@@ -7,14 +7,14 @@ from typing import Any
 
 
 class KatanaAdapter(BaseAdapter):
-    """katana JSON 输出适配器 → File / HTTPEndpoint / ApiEndpoint Finding。
+    output_fields = ('api_signals', 'content_hash', 'content_length', 'content_type', 'from_js', 'method', 'param_source', 'params', 'parent_id', 'roles', 'source', 'status_code', 'type', 'url')
+    """katana JSON 输出适配器 → File / HTTPEndpoint Finding。
 
     兼容两种 katana 输出格式：
       - 精简格式（仅 -jsonl）：每行顶层有 URL / method / status_code 等
       - 明细格式（-or -om）：每行有嵌套 request / response 对象，可提取参数
 
-    对每个非静态资源 URL，除产出原有 file / http_endpoint 外，额外产出
-    api_endpoint finding（全量记录，命中信号存 api_signals 交后续 LLM 判断）。
+    API 语义通过 HTTPEndpoint.roles/api_signals 表达。
     """
 
     tool_name = "katana"
@@ -180,7 +180,7 @@ class KatanaAdapter(BaseAdapter):
                     "parent_id": current_endpoint_id,
                     "url": file_url,
                     "content_type": ct or "application/octet-stream",
-                    "size": content_length,
+                    "content_length": content_length,
                     "content_hash": hashlib.md5(file_url.encode()).hexdigest()[:16],
                     "source": "katana",
                 })
@@ -193,7 +193,7 @@ class KatanaAdapter(BaseAdapter):
             # SPA 壳过滤：同 host HTML 与基准响应长度相似（<10% 差）
             # → 壳路径（前端路由服务器端返回同一 index.html），不写
             # HTTPEndpoint（避免 SPA 路由虚端点膨胀 — mlws 4625 路径
-            # 的主要来源）；api_endpoint 仍全量记录（带 from_js/params 语义）。
+            # 的主要来源）；API 角色端点仍全量记录（带 from_js/params 语义）。
             # 404 路径服务器端不存在，同样不写端点。
             is_shell = status_code == 404
             if not is_shell and ct and "html" in ct.lower() and content_length > 0:
@@ -211,55 +211,30 @@ class KatanaAdapter(BaseAdapter):
                         if _diff < 0.1:
                             is_shell = True
 
-            # 其余 URL → http_endpoint（非壳/非 404）+ api_endpoint（全量记录）
-            if not is_shell:
-                findings.append({
-                    "type": "http_endpoint",
-                    "parent_id": current_endpoint_id,
-                    "url": url,
-                    "method": method,
-                    "status_code": status_code,
-                    "content_length": content_length,
-                    "source": "katana",
-                })
-            else:
-                # 壳/404 路径降级为 DirEntry — 路径情报不丢（可能是已下线接口、
-                # 方法不符的真实路径、前端路由的客户端逻辑入口），只不冒充端点。
-                # 原则：能与其他漏洞结合的信息一律不过滤，只降级存储。
-                try:
-                    from urllib.parse import urlsplit as _us
-                    _path = _us(url).path or "/"
-                except ValueError:
-                    _path = url
-                findings.append({
-                    "type": "dir_entry",
-                    "url": url,
-                    "path": _path,
-                    "parent_id": current_endpoint_id,
-                    "status_code": status_code,
-                    "method": method,
-                    "source": "katana",
-                })
-
             params, param_source = self._extract_param_names(url, req.get("raw", "") or "")
             signals = self._classify_signals(url, method, ct, params, from_js)
-            api_finding: dict[str, Any] = {
-                "type": "api_endpoint",
+            endpoint_finding: dict[str, Any] = {
+                "type": "http_endpoint",
                 "parent_id": current_endpoint_id,
                 "url": url,
                 "method": method,
                 "status_code": status_code,
                 "content_type": ct,
+                "content_length": content_length,
                 "params": params,
                 "param_source": param_source,
                 "api_signals": signals,
                 "from_js": from_js,
+                "roles": ["api"] if signals else ["page"],
                 "source": "katana",
             }
             # 若发现来源是 JS 文件，关联到对应 File 节点（与 write_file 的 id 算法一致）
             if from_js:
-                api_finding["file_id"] = f"file:{hashlib.md5(from_js.encode()).hexdigest()[:16]}"
-            findings.append(api_finding)
+                endpoint_finding["parent_id"] = f"file:{hashlib.md5(from_js.encode()).hexdigest()[:16]}"
+            # SPA 壳/普通 404 不再绕回端点模型。
+            # 只有具备 API 强信号的壳路径才作为候选保留。
+            if not is_shell or signals:
+                findings.append(endpoint_finding)
 
             # -fx 表单提取：response.forms 里每个表单 = 一个接口（含参数名 + 真实 method）
             # 这是比从 raw 解析更可靠的参数源，且能拿到页面未直接爬取的 POST 接口
@@ -277,7 +252,7 @@ class KatanaAdapter(BaseAdapter):
                 if "from_form" not in f_signals:
                     f_signals.append("from_form")
                 findings.append({
-                    "type": "api_endpoint",
+                    "type": "http_endpoint",
                     "parent_id": current_endpoint_id,
                     "url": action,
                     "method": f_method,
@@ -286,6 +261,7 @@ class KatanaAdapter(BaseAdapter):
                     "params": f_params,
                     "param_source": f_param_src,
                     "api_signals": sorted(set(f_signals)),
+                    "roles": ["api", "form"],
                     "from_js": "",
                     "source": "katana",
                 })

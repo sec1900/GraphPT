@@ -1,18 +1,19 @@
 desc: "目录/DNS/虚拟主机多模式扫描"
-command: "{bin} dir -u {url} -w {wordlist:web_dirs} {auth_headers}"
+command: "{bin} dir -k -u {url} -w {wordlist:web_dirs} {auth_headers}"
 use_on:
   Endpoint:
     desc: "目录/路径发现"
-    command: "{bin} dir -u {url} -w {wordlist:web_dirs} -t 50 {auth_headers}"
+    command: "{bin} dir -k -u {url} -w {wordlist:web_dirs} -t 50 {auth_headers}"
     params:
       url: "{url}"
-  RootDomain:
+  Domain:
+    domain_scope: root
     desc: "子域名爆破"
     command: "{bin} dns --domain {domain} -w {wordlist:dns_subdomains} -t 50"
     params:
       domain: "{targets_file}"
   IP:
     desc: "虚拟主机发现 — Top100 常见 vhost 名"
-    command: "{bin} vhost -u http://{ip} -w {wordlist:dns_subdomains} -t 50 {auth_headers}"
+    command: "{bin} vhost -k -u http://{ip} -w {wordlist:dns_subdomains} -t 50 {auth_headers}"
     params:
       ip: "{value}"

@@ -12,6 +12,7 @@ from typing import Any
 
 
 class ParamDiscoveryAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'classified_at', 'method', 'params', 'source', 'type', 'url', 'value')
     """参数枚举输出适配器 → 端点参数合并。"""
 
     tool_name = "param_discovery"
@@ -41,7 +42,7 @@ class ParamDiscoveryAdapter(BaseAdapter):
                 "type": "http_endpoint",
                 "url": url,
                 "method": "GET",  # 参数枚举是 GET 探测 — 显式声明，防 ep:: 重复节点
-                "params_detail": params_detail,
+                "params": params_detail,
                 "source": "param_discovery",
                 "asset_id": asset_id,
                 "classified_at": now,

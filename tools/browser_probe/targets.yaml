@@ -1,5 +1,6 @@
 selectors:
   browser_probe:
+    consumes: {node_type: Endpoint}
     desc: "浏览器探测 — 对首页/主要端点做 JS 渲染发现"
     query: |
       MATCH (a:Asset {id: $asset_id})

@@ -214,7 +214,26 @@ def _main_http(worker_id: str, stop: threading.Event) -> None:
         for task in tasks:
             tool = task.get("tool", "")
             asset_id = task.get("asset_id", "")
+            kind = task.get("kind", "scan_tool")  # scan_tool | agent_mission
 
+            # agent_mission：worker 上的 Agent 实例执行挖洞任务
+            if kind == "agent_mission":
+                _log.info("http_agent_mission task_id=%s asset=%s",
+                          task.get("task_id"), asset_id)
+                try:
+                    from graphpt.core.agent_fleet import worker_agent_execute_mission
+                    mission = json.loads(task.get("mission", "{}"))
+                    result = worker_agent_execute_mission(mission, asset_id)
+                    status = result.get("status", "error")
+                    findings = result.get("findings", 0)
+                    log_file = ""
+                except Exception as exc:
+                    _log.error("agent_mission_crash: %s", exc)
+                    status, findings, log_file = "error", 0, ""
+                report_done(worker_id, task, status=status, findings=findings)
+                continue
+
+            # scan_tool：普通工具执行
             # 能力拒领
             if tool:
                 from graphpt.collector.tasks import _find_tool

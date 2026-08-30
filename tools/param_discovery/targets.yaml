@@ -1,10 +1,11 @@
 selectors:
   param_discovery:
+    consumes: {node_type: Endpoint}
     desc: "参数枚举 — 取已分类为 api 的端点（隐藏参数是注入/越权的新攻击面）"
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         WHERE ep.category = 'api'
         RETURN ep
         UNION
@@ -12,7 +13,7 @@ selectors:
         WHERE ep.category = 'api'
         RETURN ep
         UNION
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:EXPOSES]->(ep:HTTPEndpoint)
         WHERE ep.category = 'api'
         RETURN ep
       }

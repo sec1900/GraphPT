@@ -6,6 +6,7 @@ from typing import Any
 
 
 class DnsxAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'cname', 'parent_id', 'source', 'type', 'value')
     """dnsx JSON 输出适配器 → IP + CNAME Finding（统一 Domain 节点）。"""
 
     tool_name = "dnsx"

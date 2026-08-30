@@ -212,6 +212,31 @@ def _rewrite_output_args(
             i += 1
             continue
 
+        # brutespray checkpoint：默认写进程 cwd（污染项目根），重定向到 workspace cache
+        if arg == "-checkpoint" and i + 1 < len(command):
+            orig = command[i + 1]
+            new = _coerce_output_file(
+                orig,
+                output_dir,
+                tool_name,
+                category="checkpoint",
+                default_ext=".json",
+                round_num=round_num,
+                timestamp=ts,
+                target_kind="file",
+                reserved_names=reserved_names,
+            )
+            command[i + 1] = new
+            rewrites.append({
+                "flag": arg, "from": str(orig), "to": str(new),
+                "kind": "file", "target_kind": "file",
+                "category": "checkpoint", "timestamp": ts,
+                "round_num": str(round_num), "tool": tool_name,
+            })
+            output_files.append(new)
+            i += 2
+            continue
+
         if arg in _OUTPUT_FILE_FLAGS and i + 1 < len(command):
             spec = _OUTPUT_FILE_SPECS.get(arg, {"category": "output", "default_ext": ".txt", "target_kind": "file"})
             orig = command[i + 1]
@@ -495,10 +520,21 @@ def _exec_run_command(
 ) -> dict[str, Any]:
     """通用命令执行工具。"""
     command = args.get("command")
+    # 硬约束层：重复/泥潭/大扫描拦截（主 agent 挖洞、CTF、子代理统一生效）
+    from graphpt.tools import guard as _guard
+    _block = _guard.check_bash(str(command or ""), task_id=int(task_id or 0))
+    if _block:
+        return {"error": "guard_blocked", "message": _block, "success": False}
     if isinstance(command, str):
-        import shlex
-        import sys
-        command = shlex.split(command, posix=(sys.platform != "win32"))
+        # CTF/Unix 模式：GRAPHPT_SHELL 指向一个 bash 可执行文件时，整条命令交给
+        # 该 shell 解释（管道/重定向/for 循环可用），跳过 shlex 直译。
+        _shell = os.environ.get("GRAPHPT_SHELL", "").strip().strip('"')
+        if _shell:
+            command = [_shell, "-c", command]
+        else:
+            import shlex
+            import sys
+            command = shlex.split(command, posix=(sys.platform != "win32"))
     if not isinstance(command, list) or not command:
         return {"error": "command_required", "success": False}
 
@@ -530,6 +566,10 @@ def _exec_run_command(
         output_rewrites = rewrite_info.get("rewrites", [])
         output_files = rewrite_info.get("output_files", [])
         output_dirs = rewrite_info.get("output_dirs", [])
+        # brutespray 无 -checkpoint 时注入（默认写进程 cwd 会污染项目根）
+        if tool_name == "brutespray" and not any(a == "-checkpoint" for a in command):
+            cp_file = output_dir / "checkpoint.json"
+            command = command + ["-checkpoint", str(cp_file)]
 
     # 执行前快照（检测工具生成的文件）
     before: dict[str, float] = {}

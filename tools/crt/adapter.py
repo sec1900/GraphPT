@@ -7,6 +7,7 @@ from typing import Any
 
 
 class CrtAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'source', 'type', 'value')
     """crt.sh JSON 输出适配器 → Domain Finding（统一节点模型）。"""
 
     tool_name = "crt"

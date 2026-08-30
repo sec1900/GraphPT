@@ -17,12 +17,10 @@ INDEXES = [
     # Asset 节点
     ("asset_id_idx", "Asset", "id", "资产 ID — 所有查询的入口点"),
 
-    # RootDomain 节点
-    ("root_domain_value_idx", "RootDomain", "value", "根域名值 — 搜索和展示场景"),
-
-    # Subdomain 节点
-    ("subdomain_value_idx", "Subdomain", "value", "子域名值 — 搜索场景（高频）"),
-    ("subdomain_created_idx", "Subdomain", "created_at", "子域名创建时间 — 时间排序"),
+    # Domain 统一节点（根域/子域由 is_root + level 表示）
+    ("domain_value_idx", "Domain", "value", "完整域名值 — 搜索和去重场景"),
+    ("domain_created_idx", "Domain", "created_at", "域名创建时间 — 时间排序"),
+    ("domain_root_idx", "Domain", "registrable_domain", "按可注册根域聚合"),
 
     # IP 节点
     ("ip_value_idx", "IP", "value", "IP 值 — 搜索和去重场景"),
@@ -40,8 +38,7 @@ INDEXES = [
     ("vuln_severity_idx", "Vulnerability", "severity", "漏洞严重程度 — 过滤场景"),
 
     # 节点 ID（全局）
-    ("node_id_idx", "RootDomain", "id", "节点 ID — 节点详情查询"),
-    ("node_id_subdomain_idx", "Subdomain", "id", "节点 ID — 节点详情查询"),
+    ("node_id_domain_idx", "Domain", "id", "Domain 节点 ID — 节点详情查询"),
     ("node_id_ip_idx", "IP", "id", "节点 ID — 节点详情查询"),
     ("node_id_port_idx", "Port", "id", "节点 ID — 节点详情查询"),
     ("node_id_endpoint_idx", "HTTPEndpoint", "id", "节点 ID — 节点详情查询"),

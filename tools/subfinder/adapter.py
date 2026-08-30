@@ -7,9 +7,10 @@ from typing import Any
 
 
 class SubfinderAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'source', 'type', 'value')
     """subfinder 输出适配器 — 支持纯文本和 JSON (-oJ) 两种格式。
 
-    输出统一的 Domain 节点（替代 Subdomain）。
+    输出统一的 Domain 节点。
     """
 
     tool_name = "subfinder"

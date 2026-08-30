@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,8 @@ import yaml
 
 from graphpt.core.graph_agent_prompt import GRAPH_AGENT_METHODOLOGY, GRAPH_SCHEMA_KNOWLEDGE
 from graphpt.tools.core import _TOOL_REGISTRY
+
+_log = logging.getLogger("graphpt.core.graph_agent")
 
 
 # ---- 配置加载 ----
@@ -124,10 +127,14 @@ def run_graph_agent(
     prior_messages: list[dict[str, Any]] | None = None,
     steering_provider: Callable[[], list[str]] | None = None,
 ) -> GraphAgentResult:
-    """启动渗透测试 Agent。"""
+    """启动渗透测试 Agent（统一会话骨架的薄适配器）。
+
+    阶段门禁/伪状态机已废除：全部收敛到 AgentSession（唯一会话骨架，
+    模式 B：零中途干预，reason 调度层执行，conclude 落板）。
+    本函数保留外部签名，内部委托 graphpt.search.agent_session.AgentSession。
+    """
     from graphpt.cli.app import build_ai_config
     from graphpt.common.settings import AppSettings
-    from graphpt.core.agent_loop import run_agent_loop
 
     from dotenv import load_dotenv
     load_dotenv()
@@ -135,59 +142,75 @@ def run_graph_agent(
     settings = AppSettings.from_env()
     ai_config = build_ai_config(settings)
 
-    system_prompt = _build_system_prompt(asset_id)
-    tools = _get_tool_schemas(asset_id)
+    if db_file is None:
+        import os
+        from graphpt.common.paths import PROJECT_ROOT
+
+        configured_db = Path(os.environ.get("GRAPHPT_DB", "data/db/graphpt.db"))
+        db_file = configured_db if configured_db.is_absolute() else PROJECT_ROOT / configured_db
+
+    # Web Graph Agent 没有传统 task 行，分配进程内唯一的合成 task_id，
+    # 让 db_query/db_write/凭据/证据工具拥有可追踪的数据库上下文。
+    import secrets
+    synthetic_task_id = 900_000_000 + secrets.randbelow(90_000_000)
+
+    # 无 workspace 时用默认隔离目录，绝不回退项目根（否则工具产物如
+    # brutespray checkpoint 会污染项目根目录）
+    if workspace_root is None:
+        workspace_root = (Path.cwd() / "data" / "workspaces" /
+                          f"cli-{asset_id}")
 
     if not user_prompt:
         user_prompt = (
             f"对资产 {asset_id} 发起渗透测试。先查询图数据库了解已有攻击面，"
-            f"然后主动尝试利用发现的漏洞和弱点。\n"
-            f"重要：所有图查询工具的 asset_id 参数必须传 {asset_id}（禁止用 default）——"
-            f"该资产的数据都在这个 ID 下。"
+            f"然后主动尝试利用发现的漏洞和弱点。"
         )
 
-    # 阶段门禁：包装外部 steering_provider，每轮迭代注入未完成阶段提示
-    # （对齐 vibe-pentest Phase 状态机 — LLM 无法跳过未完成阶段）
-    def _with_stage_gates(_base_provider):
-        def _provider():
-            msgs: list[str] = []
-            if _base_provider is not None:
-                try:
-                    msgs.extend(_base_provider() or [])
-                except Exception:  # noqa: BLE001
-                    pass
-            try:
-                from graphpt.core.agent_loop import get_agent_run_context
-                from graphpt.core.task_objectives import check_stage_progress
-                _ctx = get_agent_run_context() or {}
-                msgs.extend(check_stage_progress(
-                    asset_id,
-                    dispatch_count=int(_ctx.get("dispatch_count", 0)),
-                ))
-            except Exception:  # noqa: BLE001
-                pass
-            return msgs
-        return _provider
-
-    result = run_agent_loop(
-        ai_config=ai_config,
-        system_prompt=system_prompt,
-        user_prompt=user_prompt,
-        tools=tools,
-        workspace_root=workspace_root or Path.cwd(),
-        db_file=db_file,
-        on_token=on_token,
-        on_reasoning=on_reasoning,
-        on_status=on_status,
-        stop_event=stop_event,
-        session_role=f"graph_agent:{asset_id}",  # 资产 ID 编码进 role，供子代理骨架注入解析
-        prior_messages=prior_messages,
-        steering_provider=_with_stage_gates(steering_provider),
+    # ---- 统一会话骨架 ----
+    from graphpt.search.agent_session import AgentTask, AgentSession
+    task = AgentTask(
+        target=asset_id,
+        objective=user_prompt,
+        output_spec="evidence",
+        workdir=str(workspace_root),
+        project=asset_id,
+        db_file=str(db_file),
+        task_id=synthetic_task_id,
+        session_role=f"graph_agent:{asset_id}",
+        system_prompt_override=_build_system_prompt(asset_id),
+        user_prompt_override=user_prompt,
+        tool_schemas=_get_tool_schemas(asset_id),
     )
+    sess = AgentSession(task, ai_config=ai_config,
+                        conclude_system=_load_src_conclude())
+    try:
+        r = sess.run(on_status=on_status, on_token=on_token,
+                     on_reasoning=on_reasoning, stop_event=stop_event,
+                     prior_messages=prior_messages,
+                     steering_provider=steering_provider)
+    except Exception as _e:  # noqa: BLE001
+        _log.warning("AgentSession run 异常（降级返回空结果）: %s", _e)
+        r = type("R", (), {"final_text": "", "tool_calls": [], "tokens_used": 0,
+                           "iterations": 0})()
 
     return GraphAgentResult(
-        final_text=result.final_text,
+        final_text=r.final_text,
         asset_id=asset_id,
-        tool_calls_count=len(result.tool_calls),
-        total_tokens=result.total_prompt_tokens + result.total_completion_tokens,
+        tool_calls_count=len(r.tool_calls),
+        total_tokens=r.tokens_used,
     )
+
+
+# SRC 收尾语义（takeaways 面向报告）；从 src_domain 引用保持单一事实源
+_SRC_CONCLUDE_SYSTEM = None
+
+
+def _load_src_conclude() -> str:
+    global _SRC_CONCLUDE_SYSTEM
+    if _SRC_CONCLUDE_SYSTEM is None:
+        try:
+            from graphpt.search.src_domain import SRC_CONCLUDE_SYSTEM
+            _SRC_CONCLUDE_SYSTEM = SRC_CONCLUDE_SYSTEM
+        except Exception:
+            _SRC_CONCLUDE_SYSTEM = ""
+    return _SRC_CONCLUDE_SYSTEM

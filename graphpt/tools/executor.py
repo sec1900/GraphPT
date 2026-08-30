@@ -214,6 +214,10 @@ def execute_tool(
     # 导致引号/握手失败，白白浪费多轮迭代）
     from graphpt.common.settings import get_proxy_url
     _proxy = get_proxy_url()
+    # B6：GRAPHPT_NO_PROXY=1 时强制无代理（CTF 靶场会话默认开——靶场环境
+    # 可能被注入失效代理，curl 全 000；prompt 引导不够，代码级保证）
+    if os.getenv("GRAPHPT_NO_PROXY") == "1":
+        _proxy = ""
     _proxy_keys = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
                    "ALL_PROXY", "all_proxy")
     if _proxy:

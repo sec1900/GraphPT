@@ -1,7 +1,8 @@
 desc: "DNS 域传送攻击 — AXFR 获取全部子域名"
 command: "{bin} --domain {domain} --json"
 use_on:
-  RootDomain:
-    desc: "对 RootDomain 的 NS 服务器尝试 AXFR 域传送"
+  Domain:
+    domain_scope: root
+    desc: "对可注册根 Domain 的 NS 服务器尝试 AXFR 域传送"
     params:
       domain: "{targets_file}"

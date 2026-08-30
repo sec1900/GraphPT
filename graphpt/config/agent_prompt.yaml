@@ -21,32 +21,32 @@ schema_knowledge: |
   | 类型 | 关键属性 | 说明 |
   |------|----------|------|
   | Asset | id, name | 顶级资产（公司/目标） |
-  | RootDomain | id, value, icp, sources[] | 根域名 |
-  | Subdomain | id, value, sources[], last_seen_at | 子域名 |
+  | Domain | id, value, registrable_domain, level, is_root, sources[] | 任意层级域名；根域是 level=1/is_root=true |
   | IP | id, value, sources[] | IP 地址 |
   | Port | id, number, protocol, status | 开放端口 |
   | Service | id, name, sources[] | 运行服务 |
-  | HTTPEndpoint | id, url, method, status_code, title, tech[], crawl_status | Web 端点 |
+  | HTTPEndpoint | id, url, method, status_code, title, roles[], params[], crawl_status | 唯一 Web 端点模型；roles 区分目录/API/登录/受保护路径 |
   | HTTPEndpoint.internal | true=内网可达（10.x/192.168.x/169.254.x/内网域名）— SSRF/横向渗透情报 | 端点属性 |
   | HTTPEndpoint.urls | 同路径全部 URL 变体（query 差异） | 端点属性 |
-  | DirEntry | id, path, method, status_code, content_type | 目录/路径 |
   | File | id, url, content_type, local_path | 引用文件 |
+  | TestAttempt | id, kind, technique, success, original_status, final_status, evidence | 端点测试/绕过尝试 |
   | Secret | id, type, value_preview | 发现的密钥/凭据 |
   | Vulnerability | id, type, title, severity, detail, evidence | 漏洞 |
   | ScanRun | id, tool, config, findings_count, started_at, finished_at | 扫描记录 |
 
   ### 关系
   ```
-  Asset -[:HAS_ROOT]-> RootDomain -[:HAS_SUB]-> Subdomain -[:RESOLVES_TO]-> IP
+  Asset -[:HAS_DOMAIN]-> Domain -[:PARENT_OF*0..]-> Domain -[:RESOLVES_TO]-> IP
   Asset -[:HAS_IP]-> IP
   IP -[:HAS_PORT]-> Port
   Port -[:HAS_SERVICE]-> Service
   Port -[:EXPOSES]-> HTTPEndpoint
+  HTTPEndpoint/File -[:DISCOVERED]-> HTTPEndpoint
   HTTPEndpoint -[:MAY_BE_VULNERABLE_TO]-> Vulnerability
-  HTTPEndpoint -[:EXPOSES_PATH]-> DirEntry
+  HTTPEndpoint -[:HAS_ATTEMPT]-> TestAttempt -[:CONFIRMS]-> Vulnerability
   HTTPEndpoint -[:REFERENCES]-> File -[:MAY_CONTAIN]-> Secret
-  ScanRun -[:RAN]-> 任意被扫描目标节点（Asset/RootDomain/Subdomain/IP/Port/HTTPEndpoint）
-  Asset -[:HAS_ICP]-> ICPRecord -[:COVERS]-> RootDomain
+  ScanRun -[:RAN]-> 任意被扫描目标节点（Asset/Domain/IP/Port/HTTPEndpoint）
+  Asset -[:HAS_ICP]-> ICPRecord -[:COVERS]-> Domain
   ```
 
   ### 置信度判断
@@ -58,16 +58,17 @@ schema_knowledge: |
 
   ```cypher
   // 查看资产下所有根域名
-  MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(rd:RootDomain)
+  MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(rd:Domain {is_root: true})
   RETURN rd.value, rd.icp, size(rd.sources) AS source_count
 
   // 查看未解析的子域名
-  MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(sub:Subdomain)
-  WHERE NOT (sub)-[:RESOLVES_TO]->()
+  MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(sub:Domain)
+  WHERE sub.is_root = false
+    AND NOT (sub)-[:RESOLVES_TO]->()
   RETURN sub.value
 
   // 查看高危漏洞及其入口
-  MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->()-[:HAS_SUB]->()-[:RESOLVES_TO]->()-[:HAS_PORT]->()-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
+  MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->()-[:HAS_PORT]->()-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_BE_VULNERABLE_TO]->(v:Vulnerability)
   WHERE v.severity IN ['critical', 'high']
   RETURN ep.url, v.title, v.severity, v.type
   UNION
@@ -81,7 +82,7 @@ schema_knowledge: |
   RETURN p.number, p.protocol, p.status, svc.name
 
   // 查看哪些端点还没跑过 nuclei
-  MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->()-[:HAS_SUB]->()-[:RESOLVES_TO]->()-[:HAS_PORT]->()-[:EXPOSES]->(ep:HTTPEndpoint)
+  MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->()-[:HAS_PORT]->()-[:EXPOSES]->(ep:HTTPEndpoint)
   WHERE NOT EXISTS {
     MATCH (:ScanRun {tool: 'nuclei'})-[:RAN]->(ep)
   }
@@ -177,6 +178,35 @@ methodology: |
      或 confirm_vulnerability 提升已有候选
 
   ### 实战挖洞方法论（经验沉淀 — 表层漏洞已挖尽，深入才有产出）
+
+  #### 侦察固定动作（每个 Web 目标必做，省掉=丢洞）
+  - **首页/登录页正文完整读取**：用 http_test（自动转码）拿完整正文逐行读完——
+    页面常直接写着演示账号/测试凭据/内部接口说明，乱码跳过=亲手扔掉入口
+  - **注释必查**：HTML 注释、JS 单行/块注释是题眼/遗留线索高发位置——
+    见到 TODO/FIXME/临时/测试 字样立刻跟进
+  - **弱口令按变体表逐个试**（见到登录框就做）：admin/admin、admin/admin123、
+    admin/123456、admin/password、admin/Admin@123、test/test、页面披露的演示账号原样试；
+    每个凭据看响应差异（302/长度变化=成功）
+  - **响应指纹**：Server/X-Powered-By/Cookie 名/错误页——认出产品版本先想已知利用路径
+
+  #### 组件识别后：nuclei 优先（别手搓利用链）
+  - 认出任何开源组件/产品名（Dify/Langflow/OFBiz/HugeGraph/泛微/1Panel/任何带版本的），
+    **第一时间打 nuclei**，别从零手写 exploit：
+    `nuclei -u <url> -tags <产品名>,cve -severity critical,high`
+    命中即拿到现成利用路径（比手搓快 10 倍且稳）。手搓只用于 nuclei 无模板的自研目标。
+
+  #### 死路硬切换（强制执行，防烧轮次）
+  同一方法（同端点/同技术类/同一爆破目标）连续 3 次执行仍无新信号——立即停用，
+  换下一个技术类（枚举 → 越权篡改 → 注入 → 逻辑/竞态 → 反序列化/模板/SSRF内网）。
+  爆破类尤其如此：同一目标 3 轮没出新凭据/新入口 = 字典已尽或方向错误，不是再跑一次的理由。
+  本约束由工具层硬执行（guard），重复命令会被直接拦截——收到 guard_blocked 就换方向，别重试。
+
+  #### 编码纪律（别在乱码上烧轮次）
+  - 读 HTTP 响应正文**优先用 http_test 工具**（内置 GBK/UTF-8 自动检测），不要自写脚本读正文
+  - 必须自写 python 处理中文响应时：永远 `r.encoding = r.apparent_encoding` 或
+    `r.content.decode('utf-8', 'ignore')`，脚本开头写死 `sys.stdout.reconfigure(encoding='utf-8', errors='ignore')`
+  - 任何编码/乱码问题最多投入 1 轮，解不出就直接对 bytes 正则匹配目标模式——
+    **严禁连续多轮调试编码**，编码是工具问题不是漏洞，它不产出结果
 
   #### SSRF 判定标准（出网 ≠ 漏洞）
   - 出网流量到达 ≠ SSRF — 很多"出网"是 by-design 设计功能，要明确安全边界

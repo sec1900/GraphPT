@@ -66,8 +66,9 @@ def test_webpack_detection():
         assert is_webpack, "Should detect as Webpack bundle"
 
         # 测试 API 提取
-        findings = webpack_analyzer.analyze_webpack_bundle(content, "test.js")
+        findings, frameworks = webpack_analyzer.analyze_webpack_bundle(content, "test.js")
         print(f"[OK] Found {len(findings)} API endpoints")
+        assert "webpack" in frameworks
 
         for finding in findings:
             print(f"  - {finding['method']} {finding['path']}")
@@ -100,17 +101,18 @@ def test_adapter():
     from adapter import WebpackAnalyzerAdapter
 
     # 模拟工具输出
-    output = '''{"type":"api_endpoint","method":"POST","path":"/api/user/login","params":["username","password"],"source_url":"https://example.com/app.js"}
-{"type":"api_endpoint","method":"GET","path":"/api/user/info","params":[],"source_url":"https://example.com/app.js"}'''
+    output = '''{"type":"http_endpoint","roles":["api"],"method":"POST","path":"/api/user/login","params":["username","password"],"source_url":"https://example.com/app.js"}
+{"type":"http_endpoint","roles":["api"],"method":"GET","path":"/api/user/info","params":[],"source_url":"https://example.com/app.js"}'''
 
     adapter = WebpackAnalyzerAdapter()
-    parsed = adapter.parse_output(output)
+    parsed = adapter.parse(output, asset_id="test-asset")
 
     print(f"[OK] Parsed {len(parsed)} endpoints")
     for api in parsed:
-        print(f"  - {api['method']} {api['path']}")
+        print(f"  - {api['method']} {api['url']}")
 
     assert len(parsed) == 2, "Should parse 2 endpoints"
+    assert parsed[0]['type'] == 'http_endpoint'
     assert parsed[0]['method'] == 'POST', "First endpoint should be POST"
     assert len(parsed[0]['params']) == 2, "Login should have 2 params"
 

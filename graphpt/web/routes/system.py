@@ -130,6 +130,16 @@ async def system_logs_cleanup(force: bool = False):
     try:
         from graphpt.collector.pipeline import cleanup_old_logs
         result = cleanup_old_logs(force=force)
+        # 运行时数据目录（cache/ctf/cli_sessions）、流量库滚动、陈旧 tmp 兜底
+        try:
+            from graphpt.collector.cleanup import (
+                cleanup_runtime_dirs, cleanup_old_traffic, cleanup_stale_tmp,
+            )
+            result["runtime_dirs"] = cleanup_runtime_dirs(force=force)
+            result["traffic"] = cleanup_old_traffic(force=force)
+            result["stale_tmp"] = cleanup_stale_tmp(force=force)
+        except Exception:
+            pass
         return {"ok": True, "data": result}
     except Exception as exc:
         from graphpt.web.app import _json_error

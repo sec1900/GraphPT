@@ -75,6 +75,9 @@ class ResultsConsumer:
     def _loop(self) -> None:
         r = None
         last_worker_check = 0.0
+        retry_count = 0
+        last_err_logged = ""
+        last_err_ts = 0.0
         while not self._stop.is_set():
             try:
                 if r is None:
@@ -99,9 +102,28 @@ class ResultsConsumer:
                         check_and_alert_queue(r, queue_depth)
                     except Exception as exc:
                         _log.debug("alert_check_error: %s", exc)
+                retry_count = 0  # 成功重置退避
+                last_err_logged = ""
             except Exception as exc:
-                _log.warning("consumer_loop_error: %s", exc)
+                # C8：错误去重 + 指数退避——远程 Redis 不可达时旧实现每 1s
+                # 打一条 warning（实测 102 条/小时刷屏），现在：
+                #  前 2 次立即打；之后错误相同且 60s 内 → 静默；退避 1,2,4,8,15s
+                retry_count += 1
+                _msg = str(exc)
+                _nowt = time.time()
+                _should_log = False
+                if _msg != last_err_logged or _nowt - last_err_ts > 60:
+                    _should_log = True
+                elif retry_count <= 2:
+                    _should_log = True
+                if _should_log:
+                    _log.warning("consumer_loop_error: %s", _msg)
+                    last_err_logged = _msg
+                    last_err_ts = _nowt
                 r = None
+                _backoff = min(2 ** min(retry_count - 1, 4), 15.0)  # 1,2,4,8,15
+                self._stop.wait(_backoff)
+                continue
             self._stop.wait(1.0)
 
     def _handle(self, ev: dict[str, Any], r: Any) -> None:

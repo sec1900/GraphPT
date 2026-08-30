@@ -7,6 +7,7 @@ from typing import Any
 
 
 class NaabuAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'parent_id', 'port', 'protocol', 'service', 'source', 'type')
     """naabu -json 输出适配器 → Port Finding。
 
     每行格式: {"host":"1.2.3.4","port":80,"protocol":"tcp"}

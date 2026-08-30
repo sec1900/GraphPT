@@ -26,7 +26,7 @@ def adapt(output: str, target: dict) -> list[dict]:
     findings = []
     for subdomain in data["subdomains"]:
         findings.append({
-            "type": "Subdomain",
+            "type": "domain",
             "value": subdomain,
             "source": "test_adapter",
         })

@@ -19,6 +19,7 @@ import {
   setCurrentAsset
 } from './core/assets.js';
 import { pollingManager, onPageVisible, isPageVisible } from './core/polling.js';
+import { sseBus } from './core/sse.js';
 import * as Dashboard from './pages/dashboard.js';
 import { Targets } from './pages/targets.js';
 import { Vulnerabilities } from './pages/vulnerabilities.js';
@@ -36,6 +37,10 @@ window.assetList = _assetList;
 // 同步 currentAsset 的变化 + 刷新当前页数据
 window.addEventListener('asset-changed', (e) => {
   window.currentAsset = e.detail.assetId;
+  sseAssetHint = e.detail.assetId;
+  // SSE 长连接按资产重建（各订阅 handler 保持，仅换 URL 参数）
+  const sid = _agentSessionId || '';
+  sseBus.connect(e.detail.assetId, sid ? { session_id: sid } : {});
   // Reload current visible page data
   var activePage = document.querySelector('.page.active');
   if (!activePage) return;
@@ -736,10 +741,10 @@ function exToggle(nodeId) {
             config: r.config || '', last_run_at: r.last_run_at,
           });
         });
-        // Then children (dirs + files)
+        // Then unified endpoint/file/attempt/vulnerability children
         for (const child of (data.children || [])) {
           child._depth = depth + 1;
-          child._leaf = true;
+          child._leaf = child.type !== 'Endpoint';
           flatChildren.push(child);
         }
       }
@@ -784,15 +789,16 @@ function removeChildRows(parentRow, parentDepth) {
 }
 
 function findNode(nodeId) {
-  // Read node data from DOM (Assets table rows have data-nid/data-type/data-value)
-  const row = document.querySelector('tr[data-nid="' + nodeId.replace(/"/g, '\\"') + '"]');
-  if (!row) return null;
-  return {
-    id: row.dataset.nid,
-    type: row.dataset.type,
-    value: row.dataset.value,
-    parent_id: row.dataset.parentId || '',
-  };
+  let found = null;
+  function walk(items) {
+    for (const item of (items || [])) {
+      if (item.id === nodeId) { found = item; return; }
+      if (item._children) walk(item._children);
+      if (found) return;
+    }
+  }
+  walk(treeRoots);
+  return found;
 }
 
 let crumbPath = [];
@@ -845,7 +851,7 @@ function renderRow(r) {
   const depth = r._depth || 0;
   const indent = depth * 20;
   const isExpanded = r._expanded;
-  const isLeaf = r._leaf !== false || r.type === 'DirEntry' || r.type === 'File' || r.type === 'ApiEndpoint' || r.type === 'Domain' || r.type === '_load_more';
+  const isLeaf = r._leaf !== false || ['File','Vulnerability','TestAttempt','ScanRun','_load_more'].includes(r.type);
   const hasChildren = !isLeaf && (r.type === 'root_domain' || r.type === 'standalone_ip' || r.type === 'IP' || r.type === 'Endpoint' || r.type === 'Domain');
   if (r.type === '_load_more') {
     return `<tr class="ex-row" style="cursor:pointer" onclick="event.stopPropagation();loadMoreChildren('${esc(r.nodeId)}')">
@@ -863,20 +869,23 @@ function renderRow(r) {
   }
 
   const type = r.type || '';
-  const icon = type === 'root_domain' ? String.fromCodePoint(0x1F4C1) : type === 'standalone_ip' ? String.fromCodePoint(0x1F517) : type === 'Domain' ? String.fromCodePoint(0x1F4C4) : type === 'IP' ? String.fromCodePoint(0x1F517) : type === 'Port' ? String.fromCodePoint(0x1F50C) : type === 'Endpoint' ? String.fromCodePoint(0x1F310) : type === 'DirEntry' ? String.fromCodePoint(0x1F4C2) : type === 'File' ? String.fromCodePoint(0x1F4C4) : type === 'ApiEndpoint' ? String.fromCodePoint(0x1F4E1) : type === 'ScanRun' ? String.fromCodePoint(0x2705) : String.fromCodePoint(0x2022);
+  const displayType = r.display_type || type;
+  const icon = type === 'root_domain' ? String.fromCodePoint(0x1F4C1) : type === 'standalone_ip' ? String.fromCodePoint(0x1F517) : type === 'Domain' ? String.fromCodePoint(0x1F4C4) : type === 'IP' ? String.fromCodePoint(0x1F517) : type === 'Port' ? String.fromCodePoint(0x1F50C) : displayType === 'DirectoryPath' ? String.fromCodePoint(0x1F4C2) : displayType === 'APIEndpoint' ? String.fromCodePoint(0x1F4E1) : displayType === 'LoginEndpoint' ? String.fromCodePoint(0x1F511) : displayType === 'ProtectedPath' ? String.fromCodePoint(0x1F6E1) : displayType === 'BypassSuccess' ? String.fromCodePoint(0x2705) : displayType === 'BypassFailed' ? String.fromCodePoint(0x274C) : type === 'Endpoint' ? String.fromCodePoint(0x1F310) : type === 'File' ? String.fromCodePoint(0x1F4C4) : type === 'Vulnerability' ? String.fromCodePoint(0x26A0) : type === 'ScanRun' ? String.fromCodePoint(0x2705) : String.fromCodePoint(0x2022);
 
   let nameHtml = '';
   if (type === 'Endpoint' && r.url) {
-    nameHtml = `<a href="${esc(r.url)}" target="_blank" onclick="event.stopPropagation()">${esc(r.url)}</a>`;
+    const path = (r.url||'').replace(/^https?:\/\/[^/]+/, '') || '/';
+    const prefix = displayType === 'APIEndpoint' || displayType === 'DirectoryPath' ? `<span style="color:var(--green)">${esc(r.method||'GET')}</span> ` : '';
+    const text = displayType === 'HTTPEndpoint' ? r.url : path;
+    nameHtml = `${prefix}<a href="${esc(r.url)}" target="_blank" onclick="event.stopPropagation()">${esc(text)}</a>`;
   } else if (type === 'Port') {
     nameHtml = `<span style="color:var(--orange)">:${r.number}/${r.protocol||'tcp'}</span> <span style="color:var(--text)">${esc(r.service||'')}</span>`;
   } else if (type === 'standalone_ip') {
     nameHtml = `<span style="color:var(--green)">${esc(r.value||'')}</span>`;
-  } else if (type === 'DirEntry') {
-    nameHtml = `<span style="color:var(--orange)">${esc(r.method||'GET')} ${esc(r.path||'')}</span>`;
-  } else if (type === 'ApiEndpoint') {
-    const p = r.path || (r.url||'').replace(/^https?:\/\/[^/]+/, '') || r.url || '';
-    nameHtml = `<span style="color:var(--green)">${esc(r.method||'GET')}</span> <span style="color:var(--accent)">${esc(p)}</span>`;
+  } else if (type === 'TestAttempt') {
+    nameHtml = `<span style="color:${r.success?'var(--green)':'var(--muted)'}">${esc(r.technique||r.value||'test attempt')}</span>`;
+  } else if (type === 'Vulnerability') {
+    nameHtml = `<span style="color:var(--red)">${esc(r.title||r.value||'Vulnerability')}</span>`;
   } else if (type === 'File') {
     const fn = (r.url || '').split('/').pop() || r.url || '';
     nameHtml = `<span style="color:var(--purple)">${esc(fn)}</span>`;
@@ -915,6 +924,16 @@ function renderRow(r) {
     if (r.tech && r.tech.length) parts.push(r.tech.join(', '));
     if (r.content_length) parts.push(fmtSize(r.content_length));
     if (r.crawl_status) parts.push(`<span class="badge ${r.crawl_status==='success'?'ok':r.crawl_status==='error'?'err':'warn'}">${esc(r.crawl_status)}</span>`);
+    (r.roles || []).forEach(role => parts.push(`<span class="badge">${esc(role)}</span>`));
+    if (r.params && r.params.length) {
+      const ps = r.params.slice(0, 8).map(esc).join(', ');
+      parts.push(`<span style="color:var(--muted)" title="参数名（不含参数值）">${esc(r.param_source||'params')}: ${ps}${r.params.length>8?' …':''}</span>`);
+    }
+    (r.api_signals || []).slice(0, 5).forEach(sig => parts.push(`<span class="badge" style="color:var(--accent)">${esc(sig)}</span>`));
+    if (r.from_js) {
+      const sourceName = (r.from_js || '').split('/').pop();
+      parts.push(`<span style="color:var(--purple)" title="${esc(r.from_js)}">⛓ ${esc(sourceName)}</span>`);
+    }
     // Coverage indicators
     const dc = r.dir_count || (r.dir_count === 0 ? 0 : -1);
     const fc = r.file_count || (r.file_count === 0 ? 0 : -1);
@@ -926,28 +945,19 @@ function renderRow(r) {
       else if (fc === 0) covParts.push(`<span style="color:var(--orange)" title="No JS crawl yet">📄0</span>`);
       if (covParts.length) parts.push(covParts.join(' '));
     }
+    if (r.api_count) parts.push(`<span style="color:var(--accent)">API ${r.api_count}</span>`);
+    if (r.attempt_count) parts.push(`<span style="color:var(--muted)">tests ${r.attempt_count}</span>`);
+    if (r.vulnerability_count) parts.push(`<span class="badge err">vulns ${r.vulnerability_count}</span>`);
     detail = parts.join(' ');
-  } else if (type === 'DirEntry') {
+  } else if (type === 'TestAttempt') {
     const parts = [];
-    if (r.status_code) parts.push(statusBadge(r.status_code));
-    if (r.content_type) parts.push(esc(r.content_type));
-    if (r.size) parts.push(fmtSize(r.size));
+    parts.push(`<span class="badge ${r.success?'ok':'warn'}">${r.success?'SUCCESS':'FAILED'}</span>`);
+    if (r.original_status) parts.push(`${r.original_status} → ${r.final_status||0}`);
+    if (r.tool) parts.push(esc(r.tool));
+    if (r.confirms && r.confirms.length) parts.push(`<span class="badge err">confirmed vuln</span>`);
     detail = parts.join(' ');
-  } else if (type === 'ApiEndpoint') {
-    const parts = [];
-    if (r.status_code) parts.push(statusBadge(r.status_code));
-    if (r.params && r.params.length) {
-      const ps = r.params.slice(0, 8).map(esc).join(', ');
-      parts.push(`<span style="color:var(--muted)" title="参数名（已脱敏，不含值）">${r.param_source||'param'}: ${ps}${r.params.length>8?' …':''}</span>`);
-    }
-    (r.api_signals || []).forEach(sig => {
-      parts.push(`<span class="badge" style="background:var(--bg2);color:var(--accent)">${esc(sig)}</span>`);
-    });
-    if (r.from_js) {
-      const jn = (r.from_js || '').split('/').pop();
-      parts.push(`<span style="color:var(--purple)" title="${esc(r.from_js)}">⛓ ${esc(jn)}</span>`);
-    }
-    detail = parts.join(' ');
+  } else if (type === 'Vulnerability') {
+    detail = `${severityBadge(r.severity)} ${esc(r.vuln_type||r.status||'')}`;
   } else if (type === 'File') {
     const parts = [];
     if (r.content_type) parts.push(esc(r.content_type));
@@ -975,7 +985,7 @@ function renderRow(r) {
 
   const timeStr = r.created_at ? fmtTime(r.created_at) : (r.first_seen_at ? fmtTime(r.first_seen_at) : '');
 
-  return `<tr class="ex-row${hasChildren ? ' can-expand' : ''}" data-nid="${nodeId}" data-depth="${depth}">
+  return `<tr class="ex-row${hasChildren ? ' can-expand' : ''}" data-nid="${nodeId}" data-type="${esc(type)}" data-value="${esc(r.value||r.url||'')}" data-parent-id="${esc(r.parent_id||'')}" data-depth="${depth}">
     <td>${toggleHtml}</td>
     <td style="padding-left:${indent}px;${hasChildren?'cursor:pointer':''}" onclick="${hasChildren ? `exToggle('${nodeId}')` : ''}"><div class="ex-name"><span class="ico">${icon}</span><span class="val">${nameHtml}</span></div></td>
     <td><div class="ex-detail">${detail}</div></td>
@@ -1035,8 +1045,7 @@ function normalizedNodeType(node) {
   if (!node) return '';
   var t = node.type || '';
   var MAP = {
-    'root_domain': 'Domain', 'domain': 'Domain',
-    'subdomain': 'Domain', 'Subdomain': 'Domain',
+    'domain': 'Domain', 'Domain': 'Domain',
     'standalone_ip': 'IP', 'ip': 'IP', 'IP': 'IP',
     'port': 'Port', 'Port': 'Port',
     'endpoint': 'Endpoint', 'Endpoint': 'Endpoint',
@@ -1467,64 +1476,11 @@ async function savePipeline() {
   } catch(e) { toast(e.message, false); }
 }
 
-let _lastPipelineRun = null;
-let _pipelineRunWatcher = null;
 let _pipelineRunData = null; // {name, task_id, stages: [], total, status}
 
-async function watchPipelineRun(taskId, name, intervalMs = 1500, maxWait = 600000, logFn = null) {
-  if (_pipelineRunWatcher) clearInterval(_pipelineRunWatcher);
-  const start = Date.now();
-  _pipelineRunData = {name, task_id: taskId, stages: [], total: 0, status: 'running'};
-  updatePipelineStatus();
-  const log = logFn || (() => {});
-
-  _pipelineRunWatcher = setInterval(async () => {
-    try {
-      const r = await fetch(API + '/tasks/result/' + taskId);
-      const j = await r.json();
-      if (!j.ok) return;
-      const d = j.data;
-      const meta = d?.result || d?.meta || {};
-
-      if (d?.status === 'PROGRESS' || meta?.status === 'running') {
-        const prevLen = _pipelineRunData.stages.length;
-        _pipelineRunData.total = meta.total || _pipelineRunData.total;
-        _pipelineRunData.stages = meta.stages || [];
-        _pipelineRunData.stage = meta.stage;
-        updatePipelineStatus();
-        // Log new stages
-        for (let i = prevLen; i < _pipelineRunData.stages.length; i++) {
-          const s = _pipelineRunData.stages[i];
-          const tool = s.tool || (s.details ? s.details.map(d=>d.tool).join('+') : 'stage');
-          log(`Stage ${i+1}: ${tool} — ${s.status} findings=${s.findings||0}`, s.status==='ok'?'ok':'err');
-        }
-      } else if (d?.status === 'SUCCESS') {
-        clearInterval(_pipelineRunWatcher); _pipelineRunWatcher = null;
-        _pipelineRunData.status = 'ok';
-        _pipelineRunData.stages = meta.stages || d?.result?.stages || [];
-        updatePipelineStatus();
-        log('All stages complete');
-        document.getElementById('pl-log-status').innerHTML = '<span style="color:var(--green)">Complete</span>';
-        document.getElementById('pl-run-btn').style.display = '';
-      } else if (d?.status === 'FAILURE') {
-        clearInterval(_pipelineRunWatcher); _pipelineRunWatcher = null;
-        _pipelineRunData.status = 'fail';
-        _pipelineRunData.stages = meta.stages || [];
-        _pipelineRunData.resumeFrom = meta.resume_from;
-        updatePipelineStatus();
-        log('FAILED at stage ' + ((meta.resume_from||0)+1), 'err');
-        document.getElementById('pl-log-status').innerHTML = '<span style="color:var(--red)">Failed</span>';
-        document.getElementById('pl-run-btn').style.display = '';
-      }
-    } catch(e) {
-      if (Date.now() - start > maxWait) {
-        clearInterval(_pipelineRunWatcher); _pipelineRunWatcher = null;
-        log('Timeout — task may still be running in background');
-        document.getElementById('pl-run-btn').style.display = '';
-      }
-    }
-  }, intervalMs);
-}
+// 注：Celery 遗留的 watchPipelineRun（轮询 /tasks/result/{id}，后端已无此路由）
+// 已删除。run_pipeline / run_tool 均为同步执行（await fetch 即等待完成），
+// 最终 result 由 runPipeline 直接写入 _pipelineRunData 驱动 pl-status。
 
 function updatePipelineStatus() {
   const el = document.getElementById('pl-status');
@@ -1581,7 +1537,11 @@ async function resumePipeline(name) {
       body: JSON.stringify({asset_id: currentAsset, params})
     });
     const jr = await res.json();
-    if (jr.ok) watchPipelineRun(jr.task_id, name);
+    if (jr.ok) {
+      const d = jr.data || {};
+      const n = (d.stages || []).length;
+      toast(`Resume finished: ${n} stages executed`);
+    }
     else toast(jr.detail || jr.error, false);
   } catch(e) { toast(e.message, false); }
 }
@@ -1729,12 +1689,11 @@ async function runPipeline() {
       body: JSON.stringify({params, target, node_type: nodeType, node, asset_id: currentAsset})
     });
     const json = await res.json();
-    if (json.ok && json.task_id) {
-      log('Task queued: ' + json.task_id);
-      document.getElementById('pl-log-status').innerHTML = '<span style="color:var(--accent)">Running...</span>';
-      watchPipelineRun(json.task_id, name, 2000, 600000, log);
-    } else if (json.ok) {
+    if (json.ok) {
       const d = json.data || {};
+      // 同步执行：await fetch 返回即完成，直接用最终 result 驱动状态条
+      _pipelineRunData = {name, task_id: json.task_id || null, stages: d.stages || [], total: 0, status: (d.status || json.status) === 'error' ? 'fail' : 'ok'};
+      updatePipelineStatus();
       log(`${tool || name} finished: ${d.status || json.status || 'ok'}`);
       for (const stage of (d.stages || [])) {
         log(`Stage ${stage.stage + 1}: ${stage.tool || stage.name || 'tool'} — ${stage.status} findings=${stage.findings || 0} written=${stage.written || 0}`);
@@ -1789,29 +1748,33 @@ async function schedulerAdvance() {
     }
     const tools = (d.dispatched || []).map(x => `${x.tool}(${x.targets})`).join(', ');
     toast(`已派发 第${d.layer}层[${d.node}]: ${tools}`, true);
-    // 轮询进度（2秒一次）
+    // 实时进度：SSE scan 事件推送（替代原 2s 轮询）
+    _schedSseOff?.();
+    sseAssetHint = currentAsset;
+    _schedSseOff = sseBus.on('scan', (data) => {
+      if (currentAsset !== sseAssetHint) return;  // 资产切换后旧订单一律忽略
+      renderSchedulerSnapshot(data.progress, data.logs);
+    });
     showSchedulerProgress();
-    stopSchedulerProgressPoll();
-    _schedProgressTimer = setInterval(showSchedulerProgress, 2000);
-    setTimeout(() => { stopSchedulerProgressPoll(); if (typeof loadExplorer === 'function') loadExplorer(); }, 60000);
+    setTimeout(() => { if (typeof loadExplorer === 'function') loadExplorer(); }, 60000);
   } catch (e) {
     toast(e.message, false);
   }
 }
 
+let _schedSseOff = null;
+let sseAssetHint = 'default';
+
 function stopSchedulerProgressPoll() {
   if (_schedProgressTimer) { clearInterval(_schedProgressTimer); _schedProgressTimer = null; }
 }
 
-async function showSchedulerProgress() {
+// 渲染调度器进度面板（数据源可来自 SSE scan 事件或手动 fetch）
+function renderSchedulerSnapshot(pr, lg) {
   try {
-    const [pr, lg] = await Promise.all([
-      fetch(API + '/scheduler/progress?asset_id=' + encodeURIComponent(currentAsset)).then(r => r.json()),
-      fetch(API + '/scheduler/logs?asset_id=' + encodeURIComponent(currentAsset)).then(r => r.json()),
-    ]);
     // 进度条
     const panel = document.getElementById('scheduler-progress');
-    if (panel && pr.ok && pr.data) {
+    if (panel && pr && pr.ok && pr.data) {
       const layers = pr.data;
       if (!layers.length) { panel.style.display = 'none'; } else {
         panel.style.display = 'block';
@@ -1832,7 +1795,7 @@ async function showSchedulerProgress() {
     }
     // 实时日志
     const lp = document.getElementById('scheduler-logs');
-    if (lp && lg.ok && lg.data) {
+    if (lp && lg && lg.ok && lg.data) {
       const tools = Object.keys(lg.data);
       if (!tools.length) { lp.innerHTML = ''; return; }
       lp.innerHTML = tools.map(tool => {
@@ -1843,6 +1806,16 @@ async function showSchedulerProgress() {
           '<pre style="margin:0;white-space:pre-wrap;word-break:break-all">' + (last ? esc(last) : '(等待输出...)') + '</pre></div>';
       }).join('');
     }
+  } catch(e) { /* ignore */ }
+}
+
+async function showSchedulerProgress() {
+  try {
+    const [pr, lg] = await Promise.all([
+      fetch(API + '/scheduler/progress?asset_id=' + encodeURIComponent(currentAsset)).then(r => r.json()),
+      fetch(API + '/scheduler/logs?asset_id=' + encodeURIComponent(currentAsset)).then(r => r.json()),
+    ]);
+    renderSchedulerSnapshot(pr, lg);
   } catch(e) { /* ignore */ }
 }
 
@@ -1882,27 +1855,38 @@ function scanAllStart() {
 }
 
 function pollScanAll() {
-  if(_scanAllPoll) clearInterval(_scanAllPoll);
-  _scanAllPoll = setInterval(()=>{
-    if(!_scanAllJobId) return;
-    fetch(`/api/scan-all/status?job_id=${_scanAllJobId}`).then(r=>r.json()).then(d=>{
-      const txt = document.getElementById('scan-all-status-text');
-      const bar = document.getElementById('scan-all-bar');
-      if(d.error==='not found'){ clearInterval(_scanAllPoll); return; }
-      const [done,total] = (d.progress||'0/0').split('/').map(Number);
-      const pct = total ? Math.round(done/total*100) : 0;
-      bar.style.width = pct+'%';
-      txt.textContent = d.current_tool ? `${d.progress} — running ${d.current_tool}...` : `${d.progress} — ${d.status}`;
-      if(d.status==='done'||d.status==='stopped'||d.status==='error'){
-        clearInterval(_scanAllPoll);
-        document.getElementById('scan-all-stop').style.display='none';
-        txt.textContent += d.status==='done' ? ' Complete!' : '';
-        bar.style.width = '100%';
-        loadDashboard();
-      }
-    });
-  }, 2000);
+  // SSE scanall 事件推送（替代原 2s 轮询）：服务端快照 diff，job 变化即推
+  _scanAllSseOff?.();
+  _scanAllSseOff = sseBus.on('scanall', (jobs) => {
+    if (!_scanAllJobId) return;
+    const d = jobs && jobs[_scanAllJobId];
+    if (!d || d.error !== undefined && !d.status) return;
+    const txt = document.getElementById('scan-all-status-text');
+    const bar = document.getElementById('scan-all-bar');
+    if (!txt || !bar) return;
+    if (d.error === 'not found') { _scanAllSseOff?.(); _scanAllSseOff = null; return; }
+    const [done, total] = (d.progress || '0/0').split('/').map(Number);
+    const pct = total ? Math.round(done / total * 100) : 0;
+    bar.style.width = pct + '%';
+    txt.textContent = d.current_tool ? `${d.progress} — running ${d.current_tool}...` : `${d.progress} — ${d.status}`;
+    if (d.status === 'done' || d.status === 'stopped' || d.status === 'error') {
+      _scanAllSseOff?.(); _scanAllSseOff = null;
+      document.getElementById('scan-all-stop').style.display = 'none';
+      txt.textContent += d.status === 'done' ? ' Complete!' : '';
+      bar.style.width = '100%';
+      loadDashboard();
+    }
+  });
+  // 立即拉一次（SSE 可能尚未建立连接）
+  if (_scanAllJobId) {
+    fetch(`/api/scan-all/status?job_id=${_scanAllJobId}`).then(r => r.json()).then(d => {
+      if (d.error === 'not found') return;
+      sseBus && sseBus; // noop：随后的 SSE 事件会接手
+    }).catch(() => {});
+  }
 }
+
+let _scanAllSseOff = null;
 
 function scanAllStop() {
   if(!_scanAllJobId) return;
@@ -1921,10 +1905,10 @@ let _graphNetwork = null;
 let _graphRawData = null;
 
 // Graph config — loaded from /api/catalog, hardcoded as fallback
-let _graphColors = {Asset:'#58a6ff',Domain:'#a371f7',IP:'#d2991d',Port:'#f85149',HTTPEndpoint:'#f0883e',Vulnerability:'#da3633',Secret:'#d29922',File:'#8b949e',Unknown:'#6e7681'};
-let _graphShapes = {Asset:'diamond',Domain:'dot',IP:'square',Port:'triangle',HTTPEndpoint:'star',Vulnerability:'triangleDown',Unknown:'dot'};
-let _graphLevels = {Asset:0,Domain:1,IP:3,Port:4,Service:4,HTTPEndpoint:5,File:6,Vulnerability:6,Unknown:7};
-let _graphTypeNames = {Asset:'Asset',Domain:'域名',IP:'IP',Port:'端口',HTTPEndpoint:'端点',Vulnerability:'漏洞',File:'文件',Unknown:'?'};
+let _graphColors = {Asset:'#58a6ff',Domain:'#a371f7',IP:'#d2991d',Port:'#f85149',HTTPEndpoint:'#f0883e',DirectoryPath:'#a5d6ff',APIEndpoint:'#39c5cf',LoginEndpoint:'#d2a8ff',ProtectedPath:'#f2cc60',BypassSuccess:'#3fb950',BypassFailed:'#6e7681',Vulnerability:'#da3633',Secret:'#d29922',File:'#8b949e',Unknown:'#6e7681'};
+let _graphShapes = {Asset:'diamond',Domain:'dot',IP:'square',Port:'triangle',HTTPEndpoint:'star',DirectoryPath:'box',APIEndpoint:'hexagon',LoginEndpoint:'triangle',ProtectedPath:'box',BypassSuccess:'star',BypassFailed:'dot',Vulnerability:'triangleDown',Unknown:'dot'};
+let _graphLevels = {Asset:0,Domain:1,IP:3,Port:4,Service:4,HTTPEndpoint:5,DirectoryPath:5,APIEndpoint:5,LoginEndpoint:5,ProtectedPath:5,File:6,Vulnerability:6,BypassSuccess:6,BypassFailed:6,Unknown:7};
+let _graphTypeNames = {Asset:'Asset',Domain:'域名',IP:'IP',Port:'端口',HTTPEndpoint:'HTTP 端点',DirectoryPath:'目录路径',APIEndpoint:'API 端点',LoginEndpoint:'登录端点',ProtectedPath:'受保护路径',BypassSuccess:'绕过成功',BypassFailed:'绕过失败',Vulnerability:'漏洞',File:'文件',Unknown:'?'};
 let _graphHiddenTypes = new Set(['Service']);
 let _graphConfigLoaded = false;
 
@@ -2005,9 +1989,10 @@ function _renderGraph(data) {
   const isHierarchical = (layout === 'hierarchical' || layout === 'radial');
 
   const allNodes = dedupedNodes.map(n => {
-    const lbl = (n.labels||[])[0]||'Unknown';
+    const physicalLabel = (n.labels||[])[0]||'Unknown';
+    const lbl = n.display_type || physicalLabel;
     let displayLabel = (n.value||n.id||'').substring(0, 40);
-    if (lbl === 'Port' && serviceByPort[n.id]) displayLabel += '\n' + serviceByPort[n.id];
+    if (physicalLabel === 'Port' && serviceByPort[n.id]) displayLabel += '\n' + serviceByPort[n.id];
     const node = {
       id: n.id,
       label: displayLabel,
@@ -2015,9 +2000,12 @@ function _renderGraph(data) {
       shape: _graphShapes[lbl]||'dot',
       title: (_graphTypeNames[lbl]||lbl) + ': ' + (n.value||n.id),
       font: {color:'#c9d1d9', size:10},
-      _lbl: lbl, _props: n,
+      _lbl: lbl, _physicalLbl: physicalLabel, _props: n,
     };
-    if (isHierarchical) node.level = _graphLevels[lbl] ?? 7;
+    if (isHierarchical) {
+      const graphDepth = Number(n.depth);
+      node.level = Number.isFinite(graphDepth) ? graphDepth : (_graphLevels[lbl] ?? 7);
+    }
     return node;
   });
 
@@ -2081,26 +2069,39 @@ function _renderGraph(data) {
       const node = nodes.find(n => n.id === params.nodes[0]);
       if (node && node._props) {
         const p = node._props;
-        const lbl = (p.labels||[])[0]||'';
+        const physicalLabel = (p.labels||[])[0]||'';
+        const lbl = p.display_type || physicalLabel;
         let html = '<b>' + esc(_graphTypeNames[lbl]||lbl) + '</b><br>';
         html += '<span style="word-break:break-all">' + esc(p.value||p.id) + '</span>';
+        if (lbl !== physicalLabel) html += '<br><span style="color:var(--muted)">Physical type: ' + esc(physicalLabel) + '</span>';
         if (p.created_at) html += '<br><span style="color:var(--muted)">Created: ' + fmtTime(p.created_at) + '</span>';
         html += '<br><span style="color:var(--muted)">ID: ' + esc(p.id||'') + '</span>';
-        // 节点操作：按类型提供可添加的子节点
-        html += '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">';
-        html += '<div style="font-size:11px;color:var(--muted);margin-bottom:4px">添加子节点</div>';
-        html += '<select id="graph-add-kind" style="font-size:12px;width:100%;margin-bottom:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px">';
-        const kinds = _graphChildKinds[lbl] || ['domain','subdomain','ip'];
-        const kindNames = {domain:'根域名', subdomain:'子域名', ip:'IP', port:'端口', endpoint:'端点'};
-        kinds.forEach(k => { html += '<option value="' + k + '">' + (kindNames[k]||k) + '</option>'; });
-        html += '</select>';
-        html += '<input id="graph-add-value" placeholder="' + (lbl==='IP' ? '8080/tcp' : lbl==='Port' ? 'http://example.com/' : '值') + '" style="font-size:12px;width:100%;margin-bottom:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px" onkeydown="if(event.key===\'Enter\')graphAddChild()" />';
-        html += '<button class="btn small" style="width:100%" onclick="graphAddChild()">添加</button>';
-        html += '<div id="graph-add-status" style="font-size:11px;color:var(--muted);margin-top:4px"></div></div>';
+        const detailProps = Object.entries(p.properties || {}).filter(([,v]) => v !== null && v !== '' && !(Array.isArray(v) && !v.length));
+        if (detailProps.length) {
+          html += '<div style="margin-top:8px;border-top:1px solid var(--border);padding-top:6px;font-size:11px">';
+          detailProps.forEach(([k,v]) => {
+            const text = Array.isArray(v) ? v.join(', ') : String(v);
+            html += '<div><span style="color:var(--muted)">' + esc(k) + ':</span> <span style="word-break:break-all">' + esc(text) + '</span></div>';
+          });
+          html += '</div>';
+        }
+        // 仅物理基础设施节点允许手工添加合法子节点。
+        const kinds = _graphChildKinds[physicalLabel];
+        if (kinds && kinds.length) {
+          html += '<div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">';
+          html += '<div style="font-size:11px;color:var(--muted);margin-bottom:4px">添加子节点</div>';
+          html += '<select id="graph-add-kind" style="font-size:12px;width:100%;margin-bottom:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px">';
+          const kindNames = {domain:'根域名', subdomain:'子域名', ip:'IP', port:'端口', endpoint:'端点'};
+          kinds.forEach(k => { html += '<option value="' + k + '">' + (kindNames[k]||k) + '</option>'; });
+          html += '</select>';
+          html += '<input id="graph-add-value" placeholder="' + (physicalLabel==='IP' ? '8080/tcp' : physicalLabel==='Port' ? 'http://example.com/' : '值') + '" style="font-size:12px;width:100%;margin-bottom:4px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:3px" onkeydown="if(event.key===\'Enter\')graphAddChild()" />';
+          html += '<button class="btn small" style="width:100%" onclick="graphAddChild()">添加</button>';
+          html += '<div id="graph-add-status" style="font-size:11px;color:var(--muted);margin-top:4px"></div></div>';
+        }
         info.innerHTML = html;
         info.style.display = 'block';
         info.dataset.parentId = p.id || '';
-        info.dataset.parentLabel = lbl;
+        info.dataset.parentLabel = physicalLabel;
       }
     } else {
       info.style.display = 'none';
@@ -2112,8 +2113,6 @@ function _renderGraph(data) {
 const _graphChildKinds = {
   'Asset': ['domain', 'subdomain', 'ip', 'endpoint'],
   'Domain': ['subdomain', 'endpoint', 'ip'],
-  'RootDomain': ['subdomain', 'endpoint', 'ip'],
-  'Subdomain': ['endpoint', 'ip'],
   'IP': ['port', 'endpoint'],
   'Port': ['endpoint']
 };
@@ -2155,11 +2154,29 @@ async function loadGraph() {
   const loading = document.getElementById('graph-loading');
   loading.style.display = 'block';
   try {
-    const res = await fetch(aq(API + '/graph/data', currentAsset));
+    await _loadGraphConfig();
+    const budgetRaw = (document.getElementById('graph-budget-sel')?.value || '1500,3000,16').split(',');
+    const graphParams = new URLSearchParams({
+      max_nodes: budgetRaw[0] || '1500',
+      max_edges: budgetRaw[1] || '3000',
+      max_depth: budgetRaw[2] || '16',
+    });
+    const res = await fetch(aq(API + '/graph/data?' + graphParams.toString(), currentAsset));
     const json = await res.json();
     if (!json.ok) { toast(json.error||'Failed','err'); loading.style.display='none'; return; }
     _graphRawData = json.data;
     _renderGraph(_graphRawData);
+    // 截断提示：图过大时告知用户（原实现静默截断 1000 节点/2000 边）
+    const warn = document.getElementById('graph-warn');
+    if (warn) {
+      const d = json.data || {};
+      if (d.truncated) {
+        warn.textContent = `⚠ 可达子图超过展示预算：共 ${d.total_nodes||'?'} 节点 / ${d.total_edges||'?'} 边，当前显示 ${(d.nodes||[]).length} / ${(d.edges||[]).length}，遍历深度 ${d.max_depth||'?'}`;
+        warn.style.display = 'block';
+      } else {
+        warn.style.display = 'none';
+      }
+    }
   } catch(e) { toast(e.message, false); }
   loading.style.display = 'none';
 }
@@ -2278,53 +2295,61 @@ function sendAgentPrompt() {
     });
 }
 
+function renderAgentSnapshot(d) {
+  if (!d || !_agentSessionId || d.session_id && d.session_id !== _agentSessionId) return;
+  const out = document.getElementById('agent-output');
+  const toolsDiv = document.getElementById('agent-tools');
+
+  // Update tool calls log
+  if (toolsDiv && d.logs && d.logs.length) {
+    let html = '';
+    for (let i = Math.max(0, d.logs.length - 40); i < d.logs.length; i++) {
+      const l = d.logs[i];
+      if (typeof l === 'string' && (l.includes('调用工具') || l.includes('tool'))) {
+        html += '<div style="font-size:11px;padding:3px 0;border-bottom:1px solid var(--border)">' + esc(l.substring(0, 220)) + '</div>';
+      }
+    }
+    if (html) toolsDiv.innerHTML = html;
+  }
+
+  if (d.status === 'running') {
+    let txt = '';
+    if (d.output_buf) txt += d.output_buf;
+    if (txt) out.textContent = txt;
+    out.scrollTop = out.scrollHeight;
+  } else if (d.status === 'done') {
+    _agentSseOff?.(); _agentSseOff = null;
+    agentReset();
+    document.getElementById('agent-status').textContent = 'Done (' + (d.tool_calls || 0) + ' tool calls)';
+    loadAgentSessions();
+    let txt = '';
+    if (d.output_buf) txt += d.output_buf + '\n\n';
+    txt += '=== FINAL REPORT ===\n\n';
+    txt += d.result || '(no output)';
+    out.textContent = txt;
+    out.scrollTop = out.scrollHeight;
+  } else if (d.status === 'error') {
+    _agentSseOff?.(); _agentSseOff = null;
+    agentReset();
+    loadAgentSessions();
+    document.getElementById('agent-status').innerHTML = `<span class="badge err">error</span> ${_agentSessionId}`;
+    out.textContent = d.error || 'Unknown error';
+  }
+}
+
+let _agentSseOff = null;
+
 function pollAgent() {
-  if(_agentPoll) clearInterval(_agentPoll);
-  _agentPoll = setInterval(()=>{
-    if(!_agentSessionId) return;
-    fetch(`/api/agent/status?session_id=${_agentSessionId}`).then(r=>r.json()).then(d=>{
-      const out = document.getElementById('agent-output');
-      const toolsDiv = document.getElementById('agent-tools');
-
-      // Update tool calls log
-      if (toolsDiv && d.logs && d.logs.length) {
-        let html = '';
-        for (let i = Math.max(0, d.logs.length - 40); i < d.logs.length; i++) {
-          const l = d.logs[i];
-          if (l.includes('调用工具') || l.includes('tool')) {
-            html += '<div style="font-size:11px;padding:3px 0;border-bottom:1px solid var(--border)">' + esc(l.substring(0, 220)) + '</div>';
-          }
-        }
-        if (html) toolsDiv.innerHTML = html;
-      }
-
-      if(d.status==='running'){
-        let txt = '';
-        if(d.output_buf) txt += d.output_buf;
-        if(txt) out.textContent = txt;
-        out.scrollTop = out.scrollHeight;
-      } else if(d.status==='done'){
-        clearInterval(_agentPoll);
-        _agentPoll = null;
-        agentReset();
-        document.getElementById('agent-status').textContent = 'Done (' + (d.tool_calls||0) + ' tool calls)';
-        loadAgentSessions();
-        let txt = '';
-        if(d.output_buf) txt += d.output_buf + '\n\n';
-        txt += '=== FINAL REPORT ===\n\n';
-        txt += d.result||'(no output)';
-        out.textContent = txt;
-        out.scrollTop = out.scrollHeight;
-      } else if(d.status==='error'){
-        clearInterval(_agentPoll);
-        _agentPoll = null;
-        agentReset();
-        loadAgentSessions();
-        document.getElementById('agent-status').innerHTML = `<span class="badge err">error</span> ${_agentSessionId}`;
-        out.textContent = d.error||'Unknown error';
-      }
-    });
-  }, 2000);
+  // 订阅单会话状态：SSE agent 事件推送（替代原 2s 轮询）
+  _agentSseOff?.();
+  sseBus.connect(currentAsset, { session_id: _agentSessionId || '' });
+  _agentSseOff = sseBus.on('agent', renderAgentSnapshot);
+  // 立即拉一次快照（SSE 建立前先渲染）
+  if (_agentSessionId) {
+    fetch(`/api/agent/status?session_id=${_agentSessionId}`).then(r => r.json()).then(d => {
+      if (d.ok) renderAgentSnapshot(d);
+    }).catch(() => {});
+  }
 }
 window.agentStart = startAgent;
 window.agentStop = agentStop;
@@ -2426,12 +2451,16 @@ function toggleAutoRefresh() {
   if (!cb) return;
   const on = cb.checked;
   if (on && document.getElementById('page-logs')?.classList.contains('active')) {
-    _logsPoll = setInterval(refreshLog, 10000);
+    // SSE logs 事件推送（10s 节奏），替代原 10s setInterval
+    _logsSseOff?.();
+    _logsSseOff = sseBus.on('logs', () => refreshLog());
   } else {
+    _logsSseOff?.(); _logsSseOff = null;
     if (_logsPoll) clearInterval(_logsPoll);
     _logsPoll = null;
   }
 }
+let _logsSseOff = null;
 // toggleAutoRefresh(); // deferred to Logs page
 
 // ============================================================
@@ -2480,100 +2509,103 @@ async function abortScan() {
   } catch(e) { toast(e.message, false); }
 }
 
+// 纯渲染：/api/scan/progress 的 data → Dashboard 进度 UI。返回 alive（false=空闲完成）
+function renderScanProgressData(data) {
+  if (!data) return true;
+  // -- cumulative progress (from scan/progress — 本轮扫描的已扫/未扫目标) --
+  try {
+    const cum = data.cumulative || null;
+    const sp = data.scan_progress || {};
+    let topHtml = (sp.current_layer != null ? 'L' + sp.current_layer + ' ' + (sp.current_tool || '') : '');
+    if (cum) {
+      const pct = cum.total_estimate > 0 ? Math.round(cum.scanned / cum.total_estimate * 100) : 0;
+      topHtml = (topHtml ? topHtml + ' &middot; ' : '') + cum.scanned + '/' + cum.total_estimate + ' targets (' + pct + '%)';
+    }
+    document.getElementById('scan-progress-summary').innerHTML = topHtml || '&nbsp;';
+    // progress bar
+    if (cum && cum.total_estimate > 0) {
+      const pct = Math.min(100, Math.round(cum.scanned / cum.total_estimate * 100));
+      document.getElementById('scan-progress-fill').style.width = pct + '%';
+      document.getElementById('scan-progress-fill').textContent = pct > 10 ? pct + '%' : '';
+    }
+  } catch(e) {}
+
+  // 每层独立进度条（并行层各自推进，互不等待）
+  var html = '';
+  for (var li = 0; li < data.layers.length; li++) {
+    var l = data.layers[li];
+    var pct = l.pct || 0;
+    var actives = l.tools.filter(function(t){ return t.active; }).map(function(t){ return t.tool; });
+    var status = actives.length > 0
+      ? ' <span style="color:var(--green)">● ' + esc(actives.join(', ')) + '</span>'
+      : (pct >= 100 ? ' <span style="color:var(--green)">✓ done</span>' : '');
+    var barColor = pct >= 100 ? 'var(--green)' : (actives.length > 0 ? 'var(--accent)' : 'var(--muted)');
+    var dim = (pct === 0 && actives.length === 0) ? 'opacity:0.5' : '';
+    html += '<div style="margin:3px 0;' + dim + '">' +
+      '<div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:1px">' +
+        '<span>L' + l.layer + ' ' + esc(l.node) + status + '</span>' +
+        '<span style="color:var(--muted)">' + (l.scans||0) + '/' + (l.total||0) + ' (' + Math.round(pct) + '%)</span>' +
+      '</div>' +
+      '<div style="background:var(--bg);border-radius:2px;height:6px;overflow:hidden">' +
+        '<div style="width:' + Math.min(100, pct) + '%;height:100%;background:' + barColor + ';transition:width .5s"></div>' +
+      '</div>' +
+    '</div>';
+  }
+  document.getElementById('scan-progress-layers').innerHTML = html;
+
+  // 人工验证警告：enscan 等爬虫工具遇到反爬，需用户打开浏览器验证
+  // 从 verification_alerts 读取（独立字典，不会被并行工具覆盖）
+  var verifEl = document.getElementById('scan-verif-warning');
+  var va = (data.scan_progress && data.scan_progress.verification_alerts) || {};
+  // 退回兼容：verification_alerts 为空时检查 tool_health
+  var th = (data.scan_progress && data.scan_progress.tool_health) || {};
+  var verifTools = Object.values(va);
+  var needsVerif = verifTools.length > 0 || th.needs_verification;
+  if (verifEl && needsVerif) {
+    verifEl.style.display = '';
+    // 优先使用 verification_alerts 中的第一条，退回 tool_health
+    var vinfo = verifTools.length > 0 ? verifTools[0] : th;
+    document.getElementById('scan-verif-tool').textContent = vinfo.tool || 'tool';
+    // 显示触发文本（匹配到的验证输出片段）
+    var triggerEl = document.getElementById('scan-verif-trigger');
+    if (triggerEl) {
+      triggerEl.textContent = vinfo.trigger_text || '';
+      triggerEl.style.display = vinfo.trigger_text ? '' : 'none';
+    }
+    var waitSec = vinfo.verification_since_s || 0;
+    var graceTotal = (data.scan_progress && data.scan_progress.verification_grace_s) || 600;
+    var remain = Math.max(0, graceTotal - waitSec);
+    var min = Math.floor(remain / 60);
+    var sec = remain % 60;
+    document.getElementById('scan-verif-waiting').textContent =
+      '(waiting ' + Math.floor(waitSec/60) + 'm' + (waitSec%60) + 's — timeout in ' + min + 'm' + sec + 's)';
+  } else if (verifEl) {
+    verifEl.style.display = 'none';
+  }
+
+  if (data.active_tools.length === 0 && data.scan_running === false) {
+    document.getElementById('btn-start-scan').style.display = '';
+    document.getElementById('btn-start-scan').style.background = '';
+    document.getElementById('btn-abort-scan').style.display = 'none';
+    document.getElementById('scan-progress-fill').style.width = '100%';
+    document.getElementById('scan-progress-fill').textContent = '100%';
+    document.getElementById('scan-progress-bar').style.display = 'none';
+    return false; // done
+  }
+  // 扫描进行中：显示 Abort 按钮，隐藏 Start
+  if (data.scan_running || data.active_tools.length > 0) {
+    document.getElementById('btn-start-scan').style.display = 'none';
+    document.getElementById('btn-abort-scan').style.display = 'inline-block';
+  }
+  return true;
+}
+
 async function refreshScanProgress() {
   try {
     const r = await fetch('/api/scan/progress?asset_id=' + currentAsset);
     const d = await r.json();
     if (!d.ok) return false;
-    const data = d.data;
-
-    // -- cumulative progress (from scan/progress — 本轮扫描的已扫/未扫目标) --
-    try {
-      const cum = data.cumulative || null;
-      const sp = data.scan_progress || {};
-      let topHtml = (sp.current_layer != null ? 'L' + sp.current_layer + ' ' + (sp.current_tool || '') : '');
-      if (cum) {
-        const pct = cum.total_estimate > 0 ? Math.round(cum.scanned / cum.total_estimate * 100) : 0;
-        topHtml = (topHtml ? topHtml + ' &middot; ' : '') + cum.scanned + '/' + cum.total_estimate + ' targets (' + pct + '%)';
-      }
-      document.getElementById('scan-progress-summary').innerHTML = topHtml || '&nbsp;';
-      // progress bar
-      if (cum && cum.total_estimate > 0) {
-        const pct = Math.min(100, Math.round(cum.scanned / cum.total_estimate * 100));
-        document.getElementById('scan-progress-fill').style.width = pct + '%';
-        document.getElementById('scan-progress-fill').textContent = pct > 10 ? pct + '%' : '';
-      }
-    } catch(e) {}
-
-    // 每层独立进度条（并行层各自推进，互不等待）
-    var html = '';
-    for (var li = 0; li < data.layers.length; li++) {
-      var l = data.layers[li];
-      var pct = l.pct || 0;
-      var actives = l.tools.filter(function(t){ return t.active; }).map(function(t){ return t.tool; });
-      var status = actives.length > 0
-        ? ' <span style="color:var(--green)">● ' + esc(actives.join(', ')) + '</span>'
-        : (pct >= 100 ? ' <span style="color:var(--green)">✓ done</span>' : '');
-      var barColor = pct >= 100 ? 'var(--green)' : (actives.length > 0 ? 'var(--accent)' : 'var(--muted)');
-      var dim = (pct === 0 && actives.length === 0) ? 'opacity:0.5' : '';
-      html += '<div style="margin:3px 0;' + dim + '">' +
-        '<div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:1px">' +
-          '<span>L' + l.layer + ' ' + esc(l.node) + status + '</span>' +
-          '<span style="color:var(--muted)">' + (l.scans||0) + '/' + (l.total||0) + ' (' + Math.round(pct) + '%)</span>' +
-        '</div>' +
-        '<div style="background:var(--bg);border-radius:2px;height:6px;overflow:hidden">' +
-          '<div style="width:' + Math.min(100, pct) + '%;height:100%;background:' + barColor + ';transition:width .5s"></div>' +
-        '</div>' +
-      '</div>';
-    }
-    document.getElementById('scan-progress-layers').innerHTML = html;
-
-    // 人工验证警告：enscan 等爬虫工具遇到反爬，需用户打开浏览器验证
-    // 从 verification_alerts 读取（独立字典，不会被并行工具覆盖）
-    var verifEl = document.getElementById('scan-verif-warning');
-    var va = (data.scan_progress && data.scan_progress.verification_alerts) || {};
-    // 退回兼容：verification_alerts 为空时检查 tool_health
-    var th = (data.scan_progress && data.scan_progress.tool_health) || {};
-    var verifTools = Object.values(va);
-    var needsVerif = verifTools.length > 0 || th.needs_verification;
-    if (verifEl && needsVerif) {
-      verifEl.style.display = '';
-      // 优先使用 verification_alerts 中的第一条，退回 tool_health
-      var vinfo = verifTools.length > 0 ? verifTools[0] : th;
-      document.getElementById('scan-verif-tool').textContent = vinfo.tool || 'tool';
-      // 显示触发文本（匹配到的验证输出片段）
-      var triggerEl = document.getElementById('scan-verif-trigger');
-      if (triggerEl) {
-        triggerEl.textContent = vinfo.trigger_text || '';
-        triggerEl.style.display = vinfo.trigger_text ? '' : 'none';
-      }
-      var waitSec = vinfo.verification_since_s || 0;
-      var graceTotal = (data.scan_progress && data.scan_progress.verification_grace_s) || 600;
-      var remain = Math.max(0, graceTotal - waitSec);
-      var min = Math.floor(remain / 60);
-      var sec = remain % 60;
-      document.getElementById('scan-verif-waiting').textContent =
-        '(waiting ' + Math.floor(waitSec/60) + 'm' + (waitSec%60) + 's — timeout in ' + min + 'm' + sec + 's)';
-    } else if (verifEl) {
-      verifEl.style.display = 'none';
-    }
-
-    if (data.active_tools.length === 0 && data.scan_running === false) {
-      document.getElementById('btn-start-scan').style.display = '';
-      document.getElementById('btn-start-scan').style.background = '';
-      document.getElementById('btn-abort-scan').style.display = 'none';
-      document.getElementById('scan-progress-fill').style.width = '100%';
-      document.getElementById('scan-progress-fill').textContent = '100%';
-      document.getElementById('scan-progress-bar').style.display = 'none';
-      if (_scanPoll) { clearInterval(_scanPoll); _scanPoll = null; }
-      return false; // done
-    }
-    // 扫描进行中：显示 Abort 按钮，隐藏 Start
-    if (data.scan_running || data.active_tools.length > 0) {
-      document.getElementById('btn-start-scan').style.display = 'none';
-      document.getElementById('btn-abort-scan').style.display = 'inline-block';
-    }
-    return true;
+    return renderScanProgressData(d.data);
   } catch(e) { return true; }
 }
 
@@ -2581,26 +2613,20 @@ let _lastAlertCount = 0;
 function pollScanProgress() {
   document.getElementById('scan-progress-bar').style.display = 'block';
   if (_scanPoll) clearInterval(_scanPoll);
+  _scanSseOff?.();
   var wasRunning = false;
   var idleCount = 0;  // 连续 idle 次数，避免启动初期误判为完成
-  _scanPoll = setInterval(async () => {
-    var alive = await refreshScanProgress();
-    // Check for new vulnerability alerts
-    try {
-      const ar = await fetch('/api/scan/alerts?asset_id=' + currentAsset);
-      const ad = await ar.json();
-      if (ad.ok && ad.data.length > _lastAlertCount) {
-        const newest = ad.data[0];
-        toast('&#9888; ' + newest.severity.toUpperCase() + ': ' + newest.title, false);
-        _lastAlertCount = ad.data.length;
-      }
-    } catch(e) {}
+  var lastAlertCheck = 0;
+
+  // 完成判定共享路径（SSE 事件与兜底定时器都会进来）
+  function _scanTick(alive) {
     if (alive) { wasRunning = true; idleCount = 0; }
     else { idleCount++; }
-    // 连续 3 次 idle（30s）且之前确实运行过 → 才算完成
+    // 连续 idle（SSE 2s/次 ≈ 少量几轮）且之前确实运行过 → 才算完成
     // ★ wasRunning 一旦设 true 就保持，不随 alive=false 重置
     if (!alive && wasRunning && idleCount >= 3) {
-      clearInterval(_scanPoll); _scanPoll = null;
+      _scanSseOff?.(); _scanSseOff = null;
+      if (_scanPoll) { clearInterval(_scanPoll); _scanPoll = null; }
       toast('Scan complete! All tools finished.');
       document.getElementById('btn-start-scan').style.display = '';
       document.getElementById('btn-start-scan').style.background = '';
@@ -2614,9 +2640,32 @@ function pollScanProgress() {
       }
       loadDashboard();
     }
-    // wasRunning 已在 alive 分支设为 true，不随 idle 重置
-  }, 10000);
+  }
+
+  _scanSseOff = sseBus.on('scan', async (snap) => {
+    if (!snap.progress) return;
+    if (currentAsset !== sseAssetHint) return;
+    _scanTick(renderScanProgressData(snap.progress));
+    // Check for new vulnerability alerts（节流 10s，避免 2s 事件频率放大请求）
+    if (Date.now() - lastAlertCheck > 10000) {
+      lastAlertCheck = Date.now();
+      try {
+        const ar = await fetch('/api/scan/alerts?asset_id=' + currentAsset);
+        const ad = await ar.json();
+        if (ad.ok && ad.data.length > _lastAlertCount) {
+          const newest = ad.data[0];
+          toast('&#9888; ' + newest.severity.toUpperCase() + ': ' + newest.title, false);
+          _lastAlertCount = ad.data.length;
+        }
+      } catch(e) {}
+    }
+  });
+  sseAssetHint = currentAsset;
+  // 低频兜底：SSE 无变化时不推送，idle 完成态需主动确认（15s 一次，替代原 10s 轮询）
+  _scanPoll = setInterval(() => { refreshScanProgress().then(_scanTick); }, 15000);
 }
+
+let _scanSseOff = null;
 
 // Ask for notification permission on first user click
 document.addEventListener('click', () => {
@@ -2624,21 +2673,24 @@ document.addEventListener('click', () => {
 }, {once: true});
 
 // Auto-refresh toggle (变量已在顶部声明)
+// 30s 整页刷新 → SSE dashboard 事件推送（后端 /api/events 30s 节奏 diff）
 function toggleAutoDashboard() {
   _autoRefresh = !_autoRefresh;
   const btn = document.getElementById('btn-auto-refresh');
   const icon = document.getElementById('auto-refresh-icon');
 
   if (_autoRefresh) {
-    _autoRefreshTimer = setInterval(loadDashboard, 30000);
+    _dashSseOff?.();
+    _dashSseOff = sseBus.on('dashboard', () => { if (currentAsset === sseAssetHint) loadDashboard(); });
+    sseAssetHint = currentAsset;
     if (btn) {
       btn.style.background = 'var(--accent)';
       btn.style.color = '#fff';
     }
     if (icon) icon.style.animation = 'spin 2s linear infinite';
-    toast('Dashboard auto-refresh enabled (30s)', 'success');
+    toast('Dashboard auto-refresh enabled (SSE)', 'success');
   } else {
-    if (_autoRefreshTimer) clearInterval(_autoRefreshTimer);
+    _dashSseOff?.(); _dashSseOff = null;
     if (btn) {
       btn.style.background = '';
       btn.style.color = '';
@@ -2647,6 +2699,7 @@ function toggleAutoDashboard() {
     toast('Dashboard auto-refresh disabled', 'info');
   }
 }
+let _dashSseOff = null;
 window.toggleAutoDashboard = toggleAutoDashboard;
 
 // ---- MITM Intercept toggle ----
@@ -3398,4 +3451,3 @@ window.showScanConfig = showScanConfig;
 window.selectProfile = selectProfile;
 window.saveScanConfig = saveScanConfig;
 window.closeScanConfig = closeScanConfig;
-

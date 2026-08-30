@@ -1,6 +1,6 @@
 """dns_zonetransfer — DNS 域传送攻击。
 
-对 RootDomain 的 NS 服务器尝试 AXFR 域传送，一次性获取全部子域名。
+对可注册根 Domain 的 NS 服务器尝试 AXFR 域传送，一次性获取全部子域名。
 
 用法:
   python dns_zonetransfer.py --domain example.com --json

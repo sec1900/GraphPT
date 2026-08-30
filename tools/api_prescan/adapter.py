@@ -6,12 +6,13 @@
   - 敏感参数 → category=info（sensitive_param）
 """
 
-from graphpt.collector.adapter import BaseAdapter, register_adapter
+from graphpt.collector.adapter import BaseAdapter, register_adapter, _endpoint_id_from_url
 import json
 from typing import Any
 
 
 class ApiPrescanAdapter(BaseAdapter):
+    output_fields = ('api_signals', 'asset_id', 'category', 'method', 'parent_id', 'requires_auth', 'roles', 'source', 'status_code', 'type', 'url')
     tool_name = "api_prescan"
 
     def parse(self, raw_output: str, **ctx) -> list[dict]:
@@ -27,15 +28,23 @@ class ApiPrescanAdapter(BaseAdapter):
                 url = asset.get("api_url", "")
                 if not url:
                     continue
+                is_doc = asset.get("asset_category") == "api_docs"
+                methods = asset.get("methods_available", []) or []
                 findings.append({
-                    "type": "api_doc" if asset.get("asset_category") == "api_docs" else "api_endpoint",
+                    "type": "http_endpoint",
                     "url": url,
-                    "api_type": asset.get("api_type", ""),
-                    "category": asset.get("asset_category", ""),
-                    "status": asset.get("status"),
-                    "auth_required": asset.get("auth_required"),
-                    "methods": asset.get("methods_available", []),
-                    "risk_flags": asset.get("risk_flags", []),
+                    "method": str(methods[0] if methods else "GET").upper(),
+                    "roles": ["api", "api_documentation"] if is_doc else ["api"],
+                    "api_signals": [
+                        f"api_type:{asset.get('api_type', '')}",
+                        *[f"risk:{flag}" for flag in (asset.get("risk_flags", []) or [])],
+                    ],
+                    "category": "api",
+                    "status_code": asset.get("status"),
+                    "requires_auth": bool(asset.get("auth_required")),
+                    "parent_id": ctx.get("parent_id") or _endpoint_id_from_url(base),
+                    "asset_id": ctx.get("asset_id", ""),
+                    "source": "api_prescan",
                 })
         return findings
 

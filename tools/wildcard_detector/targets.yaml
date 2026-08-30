@@ -1,5 +1,6 @@
 selectors:
   wildcard_detector:
+    consumes: {node_type: Domain, domain_scope: root}
     desc: "泛解析检测 — 对所有根域名检测 Wildcard DNS"
     query: |
       MATCH (a:Asset {id: $asset_id})

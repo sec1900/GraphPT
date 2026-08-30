@@ -8,6 +8,7 @@ from urllib.parse import urlsplit as _urlsplit
 
 
 class UrlfinderAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'content_hash', 'content_length', 'content_type', 'crawl_status', 'method', 'parent_id', 'source', 'type', 'url', 'value')
     """urlfinder JSONL 输出适配器 → Domain / HTTPEndpoint / File Finding（统一 Domain 节点）。
 
     urlfinder 纯被动收集历史 URL（Wayback/CommonCrawl/OTX），不实际抓取目标，
@@ -107,18 +108,20 @@ class UrlfinderAdapter(BaseAdapter):
                     "parent_id": root_ep_id,
                     "url": url,
                     "content_type": "",
-                    "size": 0,
+                    "content_length": 0,
                     "content_hash": hashlib.md5(url.encode()).hexdigest()[:16],
                     "source": "urlfinder",
                 })
                 continue
 
-            # 4) 其余 → http_endpoint，挂在对应 Subdomain 下
+            # 4) 其余 → http_endpoint，挂在对应 Domain 下
+            #    （parent 使用唯一 Domain 节点 id，
+            #     与 write_domain 的唯一 Domain 节点一致）
             findings.append({
                 "type": "http_endpoint",
                 "url": url,
                 "method": "GET",
-                "parent_id": sub_id,
+                "parent_id": f"domain:{host}",
                 "crawl_status": "not_fetched",
                 "source": "urlfinder",
                 "asset_id": asset_id,

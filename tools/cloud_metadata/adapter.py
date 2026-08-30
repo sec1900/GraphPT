@@ -5,6 +5,7 @@ import json
 
 
 class CloudMetadataAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'detail', 'endpoint_id', 'evidence', 'severity', 'source', 'title', 'type', 'vuln_type')
     tool_name = "cloud_metadata"
 
     def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:

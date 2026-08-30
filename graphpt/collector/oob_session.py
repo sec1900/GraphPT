@@ -39,6 +39,27 @@ def _callback_key(asset_id: str) -> str:
     return f"oob:callbacks:{asset_id}"
 
 
+def _callback_archive_path(asset_id: str, ts: float | None = None) -> Path:
+    """OOB 回调落盘归档：data/responses/oob/oob_{asset}_{YYYYMMDD}.jsonl。
+
+    按天分片 → 归档文件可被 cleanup 按 7 天策略整体回收，
+    Redis（24h TTL/200 条上限）易失的问题由此兜底。
+    """
+    d = time.strftime("%Y%m%d", time.localtime(ts if ts is not None else time.time()))
+    return _PROJECT_ROOT / "data" / "responses" / "oob" / f"oob_{asset_id}_{d}.jsonl"
+
+
+def _archive_callback(asset_id: str, data: dict) -> None:
+    """追加单条 OOB 回调到当日归档文件（幂等，失败静默——不影响主链路）。"""
+    try:
+        path = _callback_archive_path(asset_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(data, ensure_ascii=False, default=str) + "\n")
+    except Exception:
+        pass
+
+
 def _start_callback_poller(asset_id: str, proc: subprocess.Popen) -> None:
     """后台线程：读 interactsh-client 后续输出（回调）→ Redis 列表。
 
@@ -62,6 +83,8 @@ def _start_callback_poller(asset_id: str, proc: subprocess.Popen) -> None:
                     continue
                 if not data.get("protocol"):
                     continue
+                # Redis 实时缓冲 + 磁盘归档双写（归档按天分片，随 7 天清理策略回收）
+                _archive_callback(asset_id, data)
                 try:
                     r = _redis()
                     key = _callback_key(asset_id)
@@ -80,15 +103,47 @@ def _start_callback_poller(asset_id: str, proc: subprocess.Popen) -> None:
 
 
 def get_callbacks(asset_id: str = "default", limit: int = 50) -> list[dict]:
-    """读该资产的 OOB 回调记录（最新在前）。"""
+    """读该资产的 OOB 回调记录（最新在前）。
+
+    Redis（实时缓冲）优先；Redis 空时回读磁盘归档（按天分片的 jsonl），
+    保证进程重启/Redis 清空后证据仍可溯源。
+    """
     try:
         r = _redis()
         raw_list = r.lrange(_callback_key(asset_id), 0, max(0, limit - 1))
-        out = []
-        for raw in raw_list or []:
+        if raw_list:
+            out = []
+            for raw in raw_list or []:
+                try:
+                    out.append(json.loads(raw))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+            return out
+    except Exception:
+        pass
+    # Redis 无缓冲 → 读磁盘归档（跨天按文件名倒序，取最新 N 条）
+    try:
+        arch_dir = _PROJECT_ROOT / "data" / "responses" / "oob"
+        if not arch_dir.is_dir():
+            return []
+        files = sorted(arch_dir.glob(f"oob_{asset_id}_*.jsonl"), reverse=True)
+        out: list[dict] = []
+        for fp in files:
+            if len(out) >= limit:
+                break
             try:
-                out.append(json.loads(raw))
-            except (json.JSONDecodeError, TypeError):
+                with open(fp, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            out.append(json.loads(line))
+                            if len(out) >= limit:
+                                break
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+            except OSError:
                 continue
         return out
     except Exception:

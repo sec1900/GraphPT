@@ -166,6 +166,24 @@ def execute_registered_tool(
 
     tool_def, executor = entry
 
+    # ---- Scope 守卫（SRC 域）：needs_scope_check 工具对授权范围外目标拦截 ----
+    # 只对结构化 target（http_test.url 等）生效；查询失败一律放行（守卫不能当故障源）。
+    if tool_def.needs_scope_check and (arguments or {}):
+        try:
+            from graphpt.core.agent_loop import get_agent_run_context
+            from graphpt.search.scope import extract_asset_id_from_role, scope_check_hook
+            _ctx = get_agent_run_context() or {}
+            _aid = extract_asset_id_from_role(str(_ctx.get("session_role") or ""))
+            _target = (arguments or {}).get("url") or (arguments or {}).get("target")
+            if _aid and _target:
+                _block = scope_check_hook(_aid, str(_target))
+                if _block:
+                    _log.warning("scope_blocked", extra={
+                        "tool": name, "asset": _aid, "target": str(_target)[:200]})
+                    return _block
+        except Exception as _se:  # noqa: BLE001
+            _log.warning("scope check 失败（放行，避免守卫成为故障源）: %s", _se)
+
     # 确保工作目录存在
     if workspace_root:
         Path(workspace_root).mkdir(parents=True, exist_ok=True)

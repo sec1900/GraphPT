@@ -95,20 +95,34 @@ def main():
     # 5. 工具检查
     print()
     print("[4/4] 外部工具")
-    tools_dir = PROJECT / "tools"
     missing = 0
-    for t in TOOLS:
-        path = tools_dir / t
-        if path.is_file():
-            print(f"  [OK] tools/{t}")
-        else:
-            print(f"  [MISS] tools/{t}")
-            missing += 1
+    try:
+        from graphpt.collector.tasks import _find_tool, _load_all_tools_config
+
+        configured_tools = sorted(_load_all_tools_config())
+        for name in configured_tools:
+            resolved = _find_tool(name)
+            if resolved:
+                print(f"  [OK] {name}: {resolved}")
+            else:
+                print(f"  [MISS] {name}")
+                missing += 1
+    except Exception as exc:
+        # 安装器自身环境异常时仍保留最小静态检查，不让诊断步骤崩溃。
+        print(f"  [WARN] 动态工具注册表读取失败，回退核心工具检查: {exc}")
+        tools_dir = PROJECT / "tools"
+        for t in TOOLS:
+            path = tools_dir / t
+            if path.is_file():
+                print(f"  [OK] tools/{t}")
+            else:
+                print(f"  [MISS] tools/{t}")
+                missing += 1
 
     if missing:
         print()
         print(f"  [WARN] {missing} 个工具未找到，请下载后放入 tools/ 目录")
-        print("  下载地址见 README.md")
+        print("  请按对应 tools/<name>/README.md 安装，或把可执行文件放入工具目录")
 
     print()
     print("=" * 60)

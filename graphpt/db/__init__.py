@@ -49,17 +49,10 @@ def bootstrap_db(db_file: Path) -> None:
 
     规则：
     - `init_db` 负责基础建表和旧库安全索引
-    - fresh DB 在进入迁移器前直接标记到最新 schema_version
+    - fresh DB 也必须从 version 0 顺序执行迁移，不能在列尚未创建时伪装成最新
     - `migrate_db` 负责历史迁移、ensure 和 backfill
     """
-    was_missing = (not db_file.exists()) or db_file.stat().st_size == 0
     init_db(db_file)
-    if was_missing:
-        conn = open_db(db_file)
-        try:
-            stamp_schema_version_latest(conn)
-        finally:
-            conn.close()
     migrate_db(db_file)
 
 

@@ -1,10 +1,11 @@
 selectors:
   traffic_analyzer:
+    consumes: {node_type: Endpoint}
     desc: "流量信号分析 — 取高价值类别（api/login/upload/cms）端点，信号来自 traffic_store 成对流量"
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
         WHERE ep.category IN ['api', 'login', 'upload', 'cms']
            OR coalesce(ep.internal, false) = true
         RETURN ep
@@ -14,7 +15,7 @@ selectors:
            OR coalesce(ep.internal, false) = true
         RETURN ep
         UNION
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:EXPOSES]->(ep:HTTPEndpoint)
         WHERE ep.category IN ['api', 'login', 'upload', 'cms']
            OR coalesce(ep.internal, false) = true
         RETURN ep

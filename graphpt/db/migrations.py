@@ -831,7 +831,7 @@ def _backfill_goal_state_records(conn: sqlite3.Connection) -> None:
                 "goal_state_backfill",
                 json.dumps(
                     {
-                        "finding_backfill_count": len(finding_ids),
+                        "finding_backfill_count": len(finding_rows),
                         "project_backfill_count": len(project_rows),
                     },
                     ensure_ascii=False,

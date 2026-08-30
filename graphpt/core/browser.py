@@ -692,10 +692,8 @@ def _site_host_key(host: str) -> str:
         return ""
     if normalized.replace(".", "").isdigit():
         return normalized
-    parts = [part for part in normalized.split(".") if part]
-    if len(parts) >= 2:
-        return ".".join(parts[-2:])
-    return normalized
+    from graphpt.common.asset_identity import registrable_domain
+    return registrable_domain(normalized) or normalized
 
 
 def _hosts_share_site(host_a: str, host_b: str) -> bool:

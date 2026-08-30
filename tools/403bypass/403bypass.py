@@ -355,19 +355,22 @@ def run(url: str, target_id: str, timeout: float, waf: str = "") -> dict:
         if r is None:
             continue
         ok = _is_success(r["status"], r["body_len"], base_status, base_len)
+        results.append({
+            "target_id": target_id,
+            "technique": tech,
+            "raw_request": r["raw_request"],
+            "raw_response": r["raw_response"],
+            "original_status": base_status,
+            "original_body_len": base_len,
+            "final_status": r["status"],
+            "final_body_len": r["body_len"],
+            "success": ok,
+        })
         if ok:
-            results.append({
-                "target_id": target_id,
-                "technique": tech,
-                "raw_request": r["raw_request"],
-                "raw_response": r["raw_response"],
-                "final_status": r["status"],
-                "success": True,
-            })
             print(f"[+] 绕过成功 [{tech}] {method} {mpath} → {r['status']} (len={r['body_len']})",
                   file=sys.stderr)
 
-    return {"attempts": attempts, "successes": len(results), "results": results}
+    return {"attempts": attempts, "successes": sum(1 for item in results if item["success"]), "results": results}
 
 
 def main() -> int:
@@ -380,13 +383,13 @@ def main() -> int:
 
     ap = argparse.ArgumentParser(description="403 访问限制绕过工具（GraphPT）")
     ap.add_argument("--url", required=True, help="要绕过的 403 资源完整 URL")
-    ap.add_argument("--target-id", default="", help="DirEntry/HTTPEndpoint 节点 id（回写用）")
+    ap.add_argument("--target-id", default="", help="HTTPEndpoint 节点 id（回写用）")
     ap.add_argument("--timeout", type=float, default=_DEFAULT_TIMEOUT, help="单请求超时秒数")
     ap.add_argument("--waf", default="", help="WAF/tech 类型 (逗号分隔)，用于选择专用绕过 payload")
     args = ap.parse_args()
 
     out = run(args.url, args.target_id, args.timeout, args.waf)
-    # 成功结果以 JSONL 输出到 stdout，供 adapter 解析入图
+    # 所有尝试以 JSONL 输出，成功/失败都进入 TestAttempt。
     for item in out["results"]:
         print(json.dumps(item, ensure_ascii=False))
     print(f"[*] 完成：尝试 {out['attempts']} 种技术，成功 {out['successes']} 种",
@@ -396,6 +399,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
 
 

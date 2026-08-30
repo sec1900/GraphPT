@@ -17,8 +17,8 @@ JS 文件额外做隐藏 URL / API 接口 / 子域名提取。
 输出（stdout，每行一个 JSON，均带 source_url 标明来源）:
     {"type":"secret","secret_type":"AWS Access Key","value_preview":"AKIA****","line":12,"source_url":"..."}
     {"type":"http_endpoint","url":"...","source_url":"..."}            # 仅 JS 来源
-    {"type":"api_endpoint","url":"...","params":[...],"source_url":"..."}  # 仅 JS 来源
-    {"type":"subdomain","value":"...","source_url":"..."}             # 仅 JS 来源
+    {"type":"http_endpoint","roles":["api"],"url":"...","params":[...],"source_url":"..."}  # 仅 JS 来源
+    {"type":"domain","value":"...","source_url":"..."}                # 仅 JS 来源
 """
 
 from __future__ import annotations
@@ -241,7 +241,8 @@ def _extract_js_assets(content: str, js_url: str) -> list[dict]:
     """JS 专属：提取隐藏 URL / API 接口 / 子域名（非敏感信息部分）。"""
     findings: list[dict] = []
     js_host = (urlsplit(js_url).hostname or "").strip(".").lower()
-    root = ".".join(js_host.split(".")[-2:]) if js_host.count(".") >= 1 else js_host
+    from graphpt.common.asset_identity import registrable_domain
+    root = registrable_domain(js_host)
 
     seen_hosts: set[str] = set()
 
@@ -263,7 +264,8 @@ def _extract_js_assets(content: str, js_url: str) -> list[dict]:
         if _is_api(url) or _param_names(url):
             params = _param_names(url)
             findings.append({
-                "type": "api_endpoint",
+                "type": "http_endpoint",
+                "roles": ["api"],
                 "url": url,
                 "method": "GET",
                 "params": params,

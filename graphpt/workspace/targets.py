@@ -23,14 +23,6 @@ _SCAN_IP_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})(?:/(\d{1,2}))?\b")
 _SCAN_DOMAIN_RE = re.compile(r"\b((?:[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+([a-zA-Z]{2,}))\b")
 _TARGET_SCHEMA_FILENAMES = ("targets.yaml", "targets.yml", "targets.json")
 _SCHEMA_TARGET_KEYS = ("domains", "subdomains", "urls", "ips", "cidrs", "companies")
-_COMPOUND_PUBLIC_SUFFIXES = frozenset({
-    "co.uk", "org.uk", "gov.uk", "ac.uk",
-    "com.cn", "net.cn", "org.cn", "gov.cn",
-    "com.hk", "com.tw", "com.au", "net.au",
-    "co.jp", "or.jp", "com.br",
-})
-
-
 def extract_targets_from_text(text: str) -> list[str]:
     """从自然语言文本中扫描提取域名/IP/URL，用 TLD 白名单过滤误判。"""
     seen: set[str] = set()
@@ -177,35 +169,17 @@ def _empty_targets_schema() -> dict[str, Any]:
 
 
 def _split_domain_kind(value: str) -> str:
-    host = str(value or "").strip().strip(".").lower()
-    if not host:
-        return "domains"
-    labels = [part for part in host.split(".") if part]
-    if len(labels) <= 2:
-        return "domains"
-    tail2 = ".".join(labels[-2:])
-    tail3 = ".".join(labels[-3:]) if len(labels) >= 3 else ""
-    if tail2 in _COMPOUND_PUBLIC_SUFFIXES:
-        return "domains" if len(labels) <= 3 else "subdomains"
-    if tail3 in _COMPOUND_PUBLIC_SUFFIXES:
-        return "domains" if len(labels) <= 4 else "subdomains"
-    return "subdomains"
+    from graphpt.common.asset_identity import normalize_fqdn, registrable_domain
+
+    host = normalize_fqdn(value)
+    root = registrable_domain(host)
+    return "domains" if host and host == root else "subdomains"
 
 
 def _base_domain(value: str) -> str:
-    host = str(value or "").strip().strip(".").lower()
-    if not host:
-        return ""
-    labels = [part for part in host.split(".") if part]
-    if len(labels) <= 2:
-        return host
-    tail2 = ".".join(labels[-2:])
-    if tail2 in _COMPOUND_PUBLIC_SUFFIXES:
-        return ".".join(labels[-3:]) if len(labels) >= 3 else host
-    tail3 = ".".join(labels[-3:]) if len(labels) >= 3 else ""
-    if tail3 in _COMPOUND_PUBLIC_SUFFIXES:
-        return ".".join(labels[-4:]) if len(labels) >= 4 else host
-    return ".".join(labels[-2:])
+    from graphpt.common.asset_identity import registrable_domain
+
+    return registrable_domain(value)
 
 
 def _add_unique_value(targets: dict[str, list[str]], bucket: str, value: str) -> None:

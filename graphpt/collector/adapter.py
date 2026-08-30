@@ -3,6 +3,10 @@
 适配器模式：每个外部工具封装为一个 Adapter，输入工具原始输出，
 输出 dict[str, Any] 格式的 Finding，由 GraphWriter 统一写入 Neo4j。
 
+字段契约（0.2 起强制）：Finding 的键必须是 graphpt.collector.fields 中
+FIELD_REGISTRY 的规范名。adapter 应声明 output_fields/required_fields，
+register_adapter() 加载时校验，非法键拒绝注册。
+
 扩展新工具：在 tools/<name>/ 下创建 adapter.py，继承 BaseAdapter，
 实现 parse() 并调用 register_adapter() 即可。无需修改此文件。
 
@@ -18,6 +22,13 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+from graphpt.collector.fields import (
+    FIELD_REGISTRY,
+    alias_hints,
+    validate_finding_keys,
+    validate_finding_type,
+)
+
 _log = logging.getLogger("graphpt.adapter")
 
 
@@ -25,19 +36,30 @@ class Finding(dict):
     """一个采集发现，由工具适配器输出，GraphWriter 消费。
 
     必需字段：
-      - type: "subdomain" | "ip" | "port" | "http_endpoint" | "vulnerability" | "file" | "api_endpoint"
+      - type: "domain" | "ip" | "port" | "http_endpoint" | "test_attempt" | "vulnerability" | "file"
     根据 type 不同，附加不同字段（参见 GraphWriter.write_* 方法签名）。
     """
 
 
 class BaseAdapter(ABC):
-    """工具适配器基类。"""
+    """工具适配器基类。
+
+    子类契约（0.2 起）：
+      - output_fields : tuple — 本工具返回 Finding 可能用到的规范键
+        （FIELD_REGISTRY 的子集）。注册时校验，缺省则 warning。
+      - required_fields: tuple — output_fields 中必填的子集。
+    """
 
     tool_name: str = ""
+    output_fields: tuple[str, ...] = ()
+    required_fields: tuple[str, ...] = ()
 
     @abstractmethod
     def parse(self, raw_output: str | bytes, **ctx: Any) -> list[dict[str, Any]]:
-        """解析工具原始输出，返回 Finding 列表。"""
+        """解析工具原始输出，返回 Finding 列表。
+
+        Finding 键必须使用 FIELD_REGISTRY 规范名（见 graphpt.collector.fields）。
+        """
         ...
 
 
@@ -47,8 +69,61 @@ ADAPTER_MAP: dict[str, type[BaseAdapter]] = {}
 
 
 def register_adapter(tool_name: str, adapter_cls: type[BaseAdapter]) -> None:
-    """注册工具适配器。"""
+    """注册工具适配器。
+
+    校验输出字段契约：
+      - 声明了 output_fields → 必须全部属于 FIELD_REGISTRY，否则 ValueError 拒绝注册；
+      - 未声明 → 直接拒绝加载，避免无契约输出进入图数据库。
+    """
+    own = getattr(adapter_cls, "__dict__", {})
+    if "output_fields" in own:
+        # 显式声明（含空元组 = 合法：辅助工具不产出 finding）
+        declared = own.get("output_fields") or ()
+        required = own.get("required_fields") or ()
+        unknown = [k for k in declared if k not in FIELD_REGISTRY]
+        if unknown:
+            hints = "; ".join(alias_hints(unknown)) or "（无已知别名，需先在 FIELD_REGISTRY 登记）"
+            raise ValueError(
+                f"adapter {tool_name}: output_fields 含非法键 {unknown}。"
+                f"迁移提示：{hints}"
+            )
+        bad_req = [k for k in required if k not in set(declared)]
+        if bad_req:
+            raise ValueError(
+                f"adapter {tool_name}: required_fields {bad_req} 不在 output_fields 中"
+            )
+    else:
+        # 0.3 起强制：adapter 必须声明输出字段契约，否则拒绝加载。
+        # 防"新发明键名"——先改 FIELD_REGISTRY，再声明；注册层是编译期错误。
+        raise ValueError(
+            f"adapter {tool_name}: 未声明 output_fields。"
+            f"请在类上声明 output_fields（FIELD_REGISTRY 子集），"
+            f"规范表见 graphpt.collector.fields；辅助工具可声明空元组 ()"
+        )
+
     ADAPTER_MAP[tool_name] = adapter_cls
+
+
+def validate_finding(f: dict[str, Any]) -> bool:
+    """校验单条 Finding：键名规范 + type 合法。返回是否通过。
+
+    供 parse() 调用方（pipeline/collector）在消费前复核；
+    非法键通过日志 warning 暴露，并给出 别名→规范键 迁移提示。
+    """
+    illegal = validate_finding_keys(f)
+    if illegal:
+        hints = alias_hints(illegal)
+        hint_s = ("；" + "; ".join(hints)) if hints else ""
+        _log.warning(
+            "finding_illegal_keys",
+            extra={"keys": illegal, "hint": hint_s, "finding_type": f.get("type")},
+        )
+        return False
+    t_bad = validate_finding_type(f.get("type"))
+    if t_bad:
+        _log.warning("finding_illegal_type", extra={"detail": t_bad})
+        return False
+    return True
 
 
 # ---- 共享工具 ----
@@ -94,12 +169,3 @@ def _discover_adapters() -> None:
 
 # 模块首次导入时自动发现
 _discover_adapters()
-
-# 向后兼容：将适配器类注入模块命名空间，使 from graphpt.collector.adapter import XxxAdapter 继续工作
-for __mod_name, __mod in list(__sys.modules.items()):
-    if __mod_name.startswith("graphpt_tool_") and __mod_name.endswith("_adapter"):
-        for __attr in dir(__mod):
-            if __attr.endswith("Adapter") and not __attr.startswith("_"):
-                __obj = getattr(__mod, __attr)
-                if isinstance(__obj, type) and issubclass(__obj, BaseAdapter) and __obj is not BaseAdapter:
-                    globals()[__attr] = __obj

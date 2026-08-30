@@ -40,6 +40,7 @@ def _parse_raw_http(raw: str) -> tuple[dict[str, str], str]:
 
 
 class NucleiAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'cvss_score', 'cvss_vector', 'cwe_id', 'detail', 'endpoint_id', 'evidence', 'impact', 'remediation', 'severity', 'source', 'status', 'tags', 'title', 'type', 'url', 'vuln_type')
     """nuclei JSONL 输出适配器 → Vulnerability Finding。"""
 
     tool_name = "nuclei"

@@ -150,6 +150,7 @@ def classify_body(
 # ---- httpx JSONL 解析 ----
 
 class HttpxAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'body_hash', 'category', 'classified_at', 'content_length', 'content_type', 'crawl_status', 'fingerprint', 'internal', 'js_urls', 'method', 'params', 'parent_id', 'requires_auth', 'response_file', 'response_headers', 'rule_classified', 'source', 'status_code', 'title', 'type', 'url', 'value')
     """httpx JSON 输出适配器 → HTTPEndpoint Finding。
 
     自动保存所有响应为 .http 文件（Burp/Yakit 兼容格式），
@@ -169,7 +170,7 @@ class HttpxAdapter(BaseAdapter):
         try:
             ip_address(host)
         except ValueError:
-            return f"sub:{host}"
+            return f"domain:{host}"
 
         port = parsed.port
         if port is None:
@@ -253,6 +254,20 @@ class HttpxAdapter(BaseAdapter):
             )
             category = classification.get("category", "")
             params_detail = classification.get("params", [])
+
+            # 修复断链：login/upload 页面但参数为空时，主动重新请求获取完整 body
+            # （httpx 的 body_preview 只有 100 字符，看不到 <input> 表单）
+            if category in ("login", "upload") and not params_detail:
+                try:
+                    import urllib.request
+                    req = urllib.request.Request(url, method=method or "GET")
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        full_body = resp.read().decode("utf-8", errors="replace")
+                    # 用完整 body 重新提取参数
+                    params_detail = _extract_params(url, full_body)
+                except Exception:
+                    pass  # 重新请求失败不影响入图
+
             # 内网标记（SSRF 情报）：目标可达的私网地址显性入图，供信号层/Agent
             # 识别"目标可触达内网 X" — 渗透测试视角内网是攻击面不是噪音
             try:
@@ -275,7 +290,7 @@ class HttpxAdapter(BaseAdapter):
                 "response_headers": resp_headers,
                 "ssl_cert_cn": ssl_cert_cn,
                 "ssl_cert_issuer": ssl_cert_issuer,
-                "tech": obj.get("tech", []),
+                "fingerprint": obj.get("fingerprint", []),
                 "crawl_status": "success" if status_code else "error",
                 "response_file": response_file,
                 "source": "httpx",
@@ -285,7 +300,7 @@ class HttpxAdapter(BaseAdapter):
                 "category": category,
                 "requires_auth": bool(classification.get("requires_auth", False)),
                 "internal": internal,
-                "params_detail": params_detail,
+                "params": params_detail,
                 "js_urls": classification.get("js_urls", []),
                 "rule_classified": bool(category),
                 "classified_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),

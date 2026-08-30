@@ -24,6 +24,7 @@ def _confidence_threshold() -> float:
 
 
 class ClassifierAdapter(BaseAdapter):
+    output_fields = ('category', 'classified_at', 'params', 'product', 'requires_auth', 'rule_classified', 'type', 'url')
     """classifier 输出适配器 → 端点分类属性写回。"""
 
     tool_name = "classifier"
@@ -62,7 +63,7 @@ class ClassifierAdapter(BaseAdapter):
                     "category": category,
                     "product": str(obj.get("product", "") or "").strip(),
                     "requires_auth": bool(obj.get("requires_auth", False)),
-                    "params_detail": obj.get("params", []) if isinstance(obj.get("params", []), list) else [],
+                    "params": obj.get("params", []) if isinstance(obj.get("params", []), list) else [],
                     "classified_at": now,
                     "rule_classified": False,  # AI 来源，与规则分类区分
                 })

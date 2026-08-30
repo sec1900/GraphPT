@@ -4,6 +4,7 @@ from typing import Any
 
 
 class InteractshAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'full_id', 'protocol', 'raw_request', 'remote_address', 'source', 'timestamp', 'type', 'unique_id')
     """interactsh JSON 输出适配器 → OOB 回调证据。"""
 
     tool_name = "interactsh"

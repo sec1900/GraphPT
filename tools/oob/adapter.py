@@ -4,6 +4,7 @@ from typing import Any
 
 
 class OobAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'full_id', 'protocol', 'raw_request', 'remote_address', 'source', 'timestamp', 'type', 'unique_id')
     """interactsh JSON 输出适配器 → OOB 回调证据。
 
     每行格式: {"protocol":"dns","unique_id":"xxx","full_id":"xxx.<domain>","remote_address":"1.2.3.4","raw_request":"...","timestamp":"..."}

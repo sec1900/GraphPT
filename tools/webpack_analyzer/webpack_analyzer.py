@@ -8,8 +8,8 @@
     python webpack_analyzer.py -u <website_url>
 
 输出（stdout，每行一个 JSON）:
-    {"type":"api_endpoint","method":"POST","path":"/api/user/login","params":["username","password"],"source_url":"..."}
-    {"type":"api_endpoint","method":"GET","path":"/api/user/info","params":[],"source_url":"..."}
+    {"type":"http_endpoint","roles":["api"],"method":"POST","path":"/api/user/login","params":["username","password"],"source_url":"..."}
+    {"type":"http_endpoint","roles":["api"],"method":"GET","path":"/api/user/info","params":[],"source_url":"..."}
 """
 
 import argparse
@@ -365,7 +365,8 @@ def analyze_webpack_bundle(content: bytes, source_url: str) -> tuple[list[dict],
         context = extract_context_snippet(text, path)
 
         findings.append({
-            "type": "api_endpoint",
+            "type": "http_endpoint",
+            "roles": ["api"],
             "method": method,
             "path": path,
             "params": params,

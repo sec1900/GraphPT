@@ -1,23 +1,24 @@
 selectors:
   sqlmap:
+    consumes: {node_type: Endpoint}
     desc: "SQLi 检测 — 已分类为 API/登录/上传且含 query 参数的端点（GET 注入）"
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-        WHERE ep.category IN ('api', 'login', 'upload')
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category IN ['api', 'login', 'upload']
           AND ep.params_query IS NOT NULL
           AND size(ep.params_query) > 0
         RETURN ep
         UNION
         MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-        WHERE ep.category IN ('api', 'login', 'upload')
+        WHERE ep.category IN ['api', 'login', 'upload']
           AND ep.params_query IS NOT NULL
           AND size(ep.params_query) > 0
         RETURN ep
         UNION
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
-        WHERE ep.category IN ('api', 'login', 'upload')
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category IN ['api', 'login', 'upload']
           AND ep.params_query IS NOT NULL
           AND size(ep.params_query) > 0
         RETURN ep
@@ -28,24 +29,26 @@ selectors:
     mapping:
       url: "{url}"
   sqlmap:post:
+    consumes:
+      node_type: Endpoint
     desc: "SQLi 检测 — 已分类为 API/登录/上传且含 POST body 参数的端点（--data 注入）"
     query: |
       MATCH (a:Asset {id: $asset_id})
       CALL (a, a) {
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-        WHERE ep.category IN ('api', 'login', 'upload')
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category IN ['api', 'login', 'upload']
           AND ep.params_body IS NOT NULL
           AND size(ep.params_body) > 0
         RETURN ep
         UNION
         MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-        WHERE ep.category IN ('api', 'login', 'upload')
+        WHERE ep.category IN ['api', 'login', 'upload']
           AND ep.params_body IS NOT NULL
           AND size(ep.params_body) > 0
         RETURN ep
         UNION
-        MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:EXPOSES]->(ep:HTTPEndpoint)
-        WHERE ep.category IN ('api', 'login', 'upload')
+        MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:EXPOSES]->(ep:HTTPEndpoint)
+        WHERE ep.category IN ['api', 'login', 'upload']
           AND ep.params_body IS NOT NULL
           AND size(ep.params_body) > 0
         RETURN ep

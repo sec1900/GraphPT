@@ -19,6 +19,13 @@ export function setCurrentAsset(id) {
 }
 
 /**
+ * 替换资产列表（项目过滤联动用，projects.js 调用）
+ */
+export function setAssetList(list) {
+  assetList = list || [];
+}
+
+/**
  * 加载资产列表
  */
 export async function loadAssets() {
@@ -108,11 +115,15 @@ export async function createAsset() {
 
   if (!id) return toast('Asset ID is required (slug, e.g. acme-corp)', false);
 
+  // 项目归属（弹窗项目下拉，可空=未归属）
+  const projectSel = document.getElementById('modal-asset-project');
+  const projectId = projectSel ? projectSel.value : '';
+
   try {
     const res = await fetch(API + '/assets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, name, domains })
+      body: JSON.stringify({ id, name, domains, project_id: projectId || null })
     });
     const json = await res.json();
     if (json.ok) {

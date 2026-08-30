@@ -19,6 +19,7 @@ _DEFAULT_SEVERITY = {
 
 
 class TrafficAnalyzerAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'detail', 'endpoint_id', 'evidence', 'severity', 'source', 'status', 'title', 'type', 'url', 'vuln_type')
     """流量信号输出适配器 → Vulnerability(status=candidate)。"""
 
     tool_name = "traffic_analyzer"

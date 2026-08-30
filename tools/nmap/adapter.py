@@ -4,6 +4,7 @@ from typing import Any
 
 
 class NmapAdapter(BaseAdapter):
+    output_fields = ('accuracy', 'asset_id', 'cpe', 'extrainfo', 'ip', 'os_name', 'output', 'parent_id', 'port', 'product', 'protocol', 'service', 'source', 'template_id', 'type', 'version')
     """nmap XML 输出适配器 → Port/Service/OS/Script Finding。"""
 
     tool_name = "nmap"
@@ -59,7 +60,7 @@ class NmapAdapter(BaseAdapter):
                         "type": "nse_script",
                         "parent_id": parent_id,
                         "ip": host_ip,
-                        "script_id": script_id,
+                        "template_id": script_id,
                         "output": script_output,
                         "source": "nmap",
                         "asset_id": asset_id,

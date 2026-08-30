@@ -71,7 +71,7 @@ def offline_classify(asset_id: str = "default", *, limit: int = 0) -> dict[str, 
         WHERE e.asset_id = $aid
           AND (e.category IS NULL OR e.category = '')
         RETURN e.id AS eid, e.url AS url, e.status_code AS sc,
-               e.content_type AS ct, e.title AS title, e.tech AS tech
+               e.content_type AS ct, e.title AS title, e.fingerprint AS tech
     """
     if limit > 0:
         query += " LIMIT $limit"

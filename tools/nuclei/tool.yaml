@@ -6,8 +6,9 @@ use_on:
     params:
       urls_file: "{urls_file}"
     command: "{bin} -list {urls_file} -jsonl -silent -rate-limit 100 -timeout 10 -retries 2 {tech} {poc} {oob_args} {auth_headers} {severity} -t res/nuclei-templates/ -t res/poc/ -irr"
-  Subdomain:
-    desc: "对 Subdomain 执行子域名接管检测"
+  Domain:
+    domain_scope: all
+    desc: "对 Domain 执行子域名接管检测"
     params:
       urls_file: "{urls_file}"
     command: "{bin} -list {urls_file} -jsonl -silent -rate-limit 100 -timeout 10 -retries 1 -t res/nuclei-templates/http/takeovers/ -t res/nuclei-templates/dns/ -irr"

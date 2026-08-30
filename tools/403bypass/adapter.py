@@ -7,14 +7,8 @@ from typing import Any
 
 
 class BypassAdapter(BaseAdapter):
-    """403bypass JSONL 输出适配器 → Vulnerability Finding。
-
-    废弃 BypassResult，403 绕过成功视为访问控制漏洞。
-
-    脚本每行输出一个成功的绕过尝试，字段：
-      target_id, technique, raw_request, raw_response, final_status, success
-    转成 vulnerability finding，类型为 access_control_bypass。
-    """
+    output_fields = ('asset_id', 'attempt_kind', 'detail', 'endpoint_id', 'evidence', 'final_status', 'original_status', 'raw_request', 'raw_response', 'severity', 'source', 'success', 'tags', 'technique', 'title', 'tool', 'type', 'vuln_type')
+    """403bypass JSONL → TestAttempt；成功尝试同时确认 Vulnerability。"""
 
     tool_name = "403bypass"
 
@@ -42,12 +36,11 @@ class BypassAdapter(BaseAdapter):
             if not target_id or not technique:
                 continue
 
-            # 只有成功绕过才创建漏洞
-            if not success:
-                continue
-
-            # 构造漏洞证据
-            evidence = f"403 绕过成功\n方法: {technique}\n原始状态: 403\n绕过后状态: {final_status}"
+            original_status = int(obj.get("original_status") or 403)
+            evidence = (
+                f"403 绕过{'成功' if success else '失败'}\n"
+                f"方法: {technique}\n原始状态: {original_status}\n绕过后状态: {final_status}"
+            )
             raw_request = str(obj.get("raw_request") or "")
             raw_response = str(obj.get("raw_response") or "")
 
@@ -56,15 +49,32 @@ class BypassAdapter(BaseAdapter):
             if raw_response:
                 evidence += f"\n\n响应:\n{raw_response[:500]}"
 
+            if success:
+                findings.append({
+                    "type": "vulnerability",
+                    "endpoint_id": target_id,
+                    "vuln_type": "access_control_bypass",
+                    "title": "403 Access Control Bypass",
+                    "severity": "medium",
+                    "detail": f"至少一种技术可绕过 403 访问限制；确认技术: {technique}",
+                    "evidence": evidence,
+                    "tags": ["403bypass", "access_control"],
+                    "asset_id": asset_id,
+                    "source": "403bypass",
+                })
+
             findings.append({
-                "type": "vulnerability",
+                "type": "test_attempt",
                 "endpoint_id": target_id,
-                "vuln_type": "access_control_bypass",
-                "title": f"403 Bypass via {technique}",
-                "severity": "medium",
-                "detail": f"通过 {technique} 方法成功绕过 403 访问限制，获得 {final_status} 响应",
+                "attempt_kind": "access_control_bypass",
+                "tool": "403bypass",
+                "technique": technique,
+                "success": success,
+                "original_status": original_status,
+                "final_status": final_status,
+                "raw_request": raw_request,
+                "raw_response": raw_response,
                 "evidence": evidence,
-                "tags": ["403bypass", "access_control", technique.lower().replace(" ", "_")],
                 "asset_id": asset_id,
                 "source": "403bypass",
             })

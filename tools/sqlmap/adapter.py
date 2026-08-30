@@ -5,6 +5,7 @@ import re
 
 
 class SqlmapAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'detail', 'endpoint_id', 'evidence', 'payload', 'raw_request', 'raw_response', 'severity', 'source', 'title', 'type', 'vuln_type')
     """sqlmap 输出适配器 → 确认的 SQLi 漏洞。
 
     解析 sqlmap stdout，提取：
@@ -84,8 +85,8 @@ class SqlmapAdapter(BaseAdapter):
             "asset_id": asset_id,
             # 结构化证据字段（红队复现用）
             "payload": param,           # 注入参数名
-            "request_raw": curl_cmd,    # 复现 curl 命令
-            "response_raw": text[-2000:],  # sqlmap 输出尾部
+            "raw_request": curl_cmd,    # 复现 curl 命令
+            "raw_response": text[-2000:],  # sqlmap 输出尾部
         })
 
         return findings

@@ -1000,7 +1000,7 @@ def scan_target_plan(plan, threads=10, show_progress=True):
     for finding in all_findings:
         finding["target"] = target_domain
         finding["base_url"] = base_url
-        finding["source_type"] = "javascript" if ".js" in finding.get("url", "").lower() else finding.get("source_type", "api_endpoint")
+        finding["source_type"] = "javascript" if ".js" in finding.get("url", "").lower() else finding.get("source_type", "api")
         finding["file_path"] = finding.get("url", "").split("?")[0] if finding.get("url") else ""
 
         rule_type = finding.get("rule_type") or finding.get("type")

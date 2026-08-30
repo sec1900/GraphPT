@@ -7,6 +7,7 @@ from typing import Any
 
 
 class EnscanAdapter(BaseAdapter):
+    output_fields = ('asset_id', 'company', 'domains', 'icp', 'source', 'type', 'value', 'website')
     """enscan 输出适配器 — JSON 格式的公司域名列表。"""
 
     tool_name = "enscan"
@@ -45,12 +46,12 @@ class EnscanAdapter(BaseAdapter):
                         "asset_id": asset_id,
                         "icp": icp_num,
                         "website": item.get("website", ""),
-                        "website_name": item.get("website_name", ""),
+                        "website": item.get("website", ""),
                     })
                     if icp_num:
                         if icp_num not in icp_groups:
                             icp_groups[icp_num] = {
-                                "company_name": item.get("company_name", item.get("website_name", "")),
+                                "company": item.get("company", item.get("website", "")),
                                 "domains": [],
                             }
                         icp_groups[icp_num]["domains"].append(domain)
@@ -59,8 +60,8 @@ class EnscanAdapter(BaseAdapter):
             for icp_num, info in icp_groups.items():
                 findings.append({
                     "type": "icp_record",
-                    "number": icp_num,
-                    "company_name": info["company_name"],
+                    "icp": icp_num,
+                    "company": info["company"],
                     "domains": info["domains"],
                     "source": "enscan",
                     "asset_id": asset_id,

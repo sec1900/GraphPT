@@ -150,6 +150,39 @@ class AgentLoopResult:
     iterations: int = 0
 
 
+def _compact_old_tool_outputs(
+    messages: list[dict[str, Any]],
+    *,
+    keep_recent_tools: int = 10,
+    head_chars: int = 500,
+) -> int:
+    """把早于最近 keep_recent_tools 条的 role=tool 消息内容截断为头部摘要。
+
+    返回压缩掉的消息数。跳过已被压缩过的（幂等）。
+    """
+    tool_idx = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+    if len(tool_idx) <= keep_recent_tools:
+        return 0
+    compact_upto = len(tool_idx) - keep_recent_tools
+    done = 0
+    for i in tool_idx[:compact_upto]:
+        m = messages[i]
+        content = m.get("content")
+        if not isinstance(content, str):
+            continue
+        if "[... 已压缩" in content:
+            continue
+        if len(content) <= head_chars + 80:
+            continue
+        messages[i] = dict(m, content=(
+            content[:head_chars]
+            + f"\n[... 已压缩：原 {len(content)} 字符，完整输出见会话证据记录；"
+              "如需重看请换更精确的命令重新获取（禁止原样重跑）]")
+        )
+        done += 1
+    return done
+
+
 def _persist_agent_session_snapshot(
     *,
     db_file: Path | None,
@@ -1163,6 +1196,7 @@ def run_agent_loop(
 
     result = AgentLoopResult(messages=messages)
     all_tool_records: list[dict[str, Any]] = []
+    _err_counts: dict[str, int] = {}  # P2-⑫ 同错误计数（失败诊断/停止条件）
 
     _persist_agent_session_snapshot(
         db_file=db_file,
@@ -1252,6 +1286,12 @@ def run_agent_loop(
                         meta={"type": "ai_degraded", "step_id": step_id, "iteration": iteration, "reason": degraded_reason},
                     )
                 break
+        # 工具输出滚动压缩（默认开，GRAPHPT_TOOL_COMPACT=0 关闭）：早于最近 N 条的 tool 输出
+        # 截断为头部摘要，防长会话上下文/token 爆炸。原 messages 中原地替换——完整输出
+        # 仍保留在 tool_record / audit log / 会话快照之外的证据链里。
+        if os.environ.get("GRAPHPT_TOOL_COMPACT", "1").strip() not in ("0", "false", "no"):
+            _compact_old_tool_outputs(messages)
+
         try:
             chat_result, tool_call_requests = _call_ai_with_tools(
                 ai_config, messages, tools, on_token=on_token,
@@ -1320,8 +1360,36 @@ def run_agent_loop(
                 },
             ))
 
-        # 无工具调用 → 循环结束
+        # 无工具调用 → 循环结束（带退出验证门）
         if not tool_call_requests:
+            # ── P1-⑦ 退出验证门 ──────────────────────────
+            # force_tool_use（默认 True）：禁止"零工具调用空手交答案"——
+            # 无证据结论等于编造。给一轮机会强制取证。
+            tool_calls_total = sum(1 for m in messages if m.get("tool_calls"))
+            if force_tool_use and tool_calls_total == 0 and iteration < max_iterations - 1:
+                messages.append({"role": "user", "content":
+                    "你尚未执行任何工具调用就准备结束。请至少调用一次工具（http_test/Bash/Grep/run_script 等）"
+                    "获取真实证据后，再基于证据输出结论。不要无证据直接回答。"})
+                _log.info("agent_loop_force_tool_use_gate",
+                          extra={"task_id": task_id, "iteration": iteration})
+                continue
+            # CTF 模式：文本里出现 flag 但语境里从未有工具输出出现 → 疑似编造，
+            # 强制一轮把 flag 的来源落实（对应 ctf/verify.py 的 grounding 门）
+            if str(session_role).startswith("ctf:"):
+                _final_text = (chat_result.text or "").strip()
+                _flag_re = __import__("re").compile(r"flag\{[^}]+\}")
+                if _flag_re.search(_final_text):
+                    _has_tool_output = any(
+                        "tool_output" in str(m.get("content") or "")
+                        for m in messages
+                    )
+                    if not _has_tool_output and iteration < max_iterations - 1:
+                        messages.append({"role": "user", "content":
+                            "你的最终答案包含 flag，但整个会话从未出现工具输出。"
+                            "flag 必须来自真实工具输出（响应体/命令输出）——请重放取证并在下一轮给出带来源的答案。"})
+                        _log.info("agent_loop_ctf_grounding_gate",
+                                  extra={"task_id": task_id, "iteration": iteration})
+                        continue
             if on_status:
                 on_status(f"[iter {iteration+1}] 生成最终回答...")
             _text = (chat_result.text or "").strip()
@@ -1383,6 +1451,36 @@ def run_agent_loop(
             tool_record: dict[str, Any],
             tool_result_str: str,
         ) -> None:
+
+            # ── P2-⑫ 失败诊断注入 ──────────────────────
+            # 业界基准：35.9% 生成命令无效（被拒 or 参数错伪装成网络错误）+ 兔子洞
+            # 倾向。对失败工具结果附加诊断 hint + 同错误 ≥3 次强制换方向。
+            _res = tool_record.get("result")
+            _diag = ""
+            if isinstance(_res, dict):
+                try:
+                    import re as _re
+                    _rc = _res.get("return_code", _res.get("rc"))
+                    _err = str(_res.get("error") or "").strip() or str(_res.get("stderr") or "").strip()[:200]
+                    _is_fail = bool(_err) or (_rc not in (None, 0, ""))
+                    if _is_fail and tc.name in ("Bash", "http_test", "run_script"):
+                        _fp = _re.sub(r"[\d\.]+", "#", str(tc.name) + ":" + _err)[:100]
+                        _err_counts[_fp] = _err_counts.get(_fp, 0) + 1
+                        _n = _err_counts[_fp]
+                        if _n >= 3:
+                            _diag = ("\n[诊断] 同一错误已出现 ≥3 次（" + _err[:80] + "）——这条路径无产出，"
+                                     "立即换技术类；若是网络类报错先排除代理（echo $http_proxy，"
+                                     "curl 加 --noproxy '*'），不要继续盲重试。")
+                        elif any(k in _err.lower() for k in ("refused", "timed out", "timeout", "000", "connection")):
+                            _diag = ("\n[诊断] 疑似网络类错误——先确认代理环境变量（echo $http_proxy $https_proxy），"
+                                     "对不可达代理用 --noproxy '*' 或 proxies=None 绕过；不要对同一命令盲重试。")
+                        elif _rc not in (None, 0, ""):
+                            _diag = ("\n[诊断] 命令执行失败（rc=" + str(_rc) + "）——检查参数拼写/路径/权限；"
+                                     "被工具拒绝与参数语义错误是两类问题，先读报错原文再修正。")
+                except Exception:
+                    _diag = ""
+            if _diag:
+                tool_result_str = tool_result_str + _diag
 
             # S3: 用 XML 标签隔离工具输出与指令，防止提示注入
             wrapped = f"<tool_output>{tool_result_str}</tool_output>"
@@ -2129,6 +2227,8 @@ def _exec_save_credential_with_db(
     target = str(args.get("target", "")).strip()
     username = str(args.get("username", "")).strip()
     password = str(args.get("password", "")).strip()
+    from graphpt.common.crypto import _encode_password
+    password_enc = _encode_password(password)
     cred_type = str(args.get("credential_type", "password")).strip()
     source = str(args.get("source", "")).strip()
     notes = str(args.get("notes", "")).strip()
@@ -2141,7 +2241,7 @@ def _exec_save_credential_with_db(
         cur = conn.execute(
             "INSERT INTO credentials(task_id, source, username, password_enc, credential_type, target, notes, status, created_at_utc, updated_at_utc) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, 'found', ?, ?)",
-            (task_id, source, username, password, cred_type, target, notes, now, now),
+            (task_id, source, username, password_enc, cred_type, target, notes, now, now),
         )
         conn.commit()
         cred_id = int(cur.lastrowid or 0)
@@ -2159,7 +2259,7 @@ def _exec_save_credential_with_db(
             if username:
                 detail_lines.append(f"username={username}")
             if password:
-                detail_lines.append(f"password={password}")
+                detail_lines.append("password_saved=true")
             if target:
                 detail_lines.append(f"target={target}")
             if notes:
@@ -2494,4 +2594,3 @@ def _exec_search_http_traffic_with_db(
         return {"records": records, "count": len(records), "success": True}
     finally:
         conn.close()
-

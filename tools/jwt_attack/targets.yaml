@@ -1,14 +1,15 @@
 selectors:
   jwt_attack:
+    consumes: {node_type: Secret}
     desc: "JWT token 检测 — secretfinder 发现的 JWT"
     query: |
       MATCH (a:Asset {id: $asset_id})
-      MATCH (a)-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_CONTAIN]->(s:Secret)
+      MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:MAY_CONTAIN]->(s:Secret)
       WHERE s.type CONTAINS 'jwt'
         AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.id }
       RETURN s.value_preview AS value, s.id AS target_id
       UNION
-      MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(:RootDomain)-[:HAS_SUB]->(:Subdomain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:REFERENCES]->(f:File)-[:MAY_CONTAIN]->(s:Secret)
+      MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)-[:REFERENCES]->(f:File)-[:MAY_CONTAIN]->(s:Secret)
       WHERE s.type CONTAINS 'jwt'
         AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = s.id }
       RETURN s.value_preview AS value, s.id AS target_id

@@ -3,10 +3,11 @@ command: "{bin} {domain}"
 output_type: "wildcard_result"
 
 use_on:
-  RootDomain:
+  Domain:
+    domain_scope: root
     desc: "检测根域名的泛解析配置"
     params:
       domain: "{domain}"
     target_query: |
-      MATCH (a:Asset {id: $asset_id})-[:HAS_ROOT]->(r:RootDomain)
+      MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(r:Domain {is_root: true})
       RETURN r.value AS domain

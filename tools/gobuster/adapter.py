@@ -6,9 +6,8 @@ from typing import Any
 
 
 class GobusterAdapter(BaseAdapter):
-    """gobuster 多模式输出适配器 → HTTPEndpoint / Subdomain / IP / Port。
-
-    废弃 DirEntry，统一使用 HTTPEndpoint。
+    output_fields = ('asset_id', 'content_length', 'content_type', 'crawl_status', 'method', 'parent_id', 'port', 'protocol', 'roles', 'service', 'source', 'status_code', 'title', 'type', 'url', 'value')
+    """gobuster 多模式输出适配器 → HTTPEndpoint / Domain / IP / Port。
 
     支持三种使用场景：
       - dir 模式: 目录爆破文本输出
@@ -24,7 +23,8 @@ class GobusterAdapter(BaseAdapter):
 
     # ---- 目录爆破解析（原 DirectoryTextAdapter 内联） ----
 
-    def _parse_dir_entries(self, text: str, target_url: str, asset_id: str, source: str) -> list[dict[str, Any]]:
+    def _parse_dir_entries(self, text: str, target_url: str, asset_id: str, source: str,
+                           parent_id: str) -> list[dict[str, Any]]:
         """解析目录爆破结果，输出 HTTPEndpoint"""
         findings: list[dict[str, Any]] = []
         for line in text.strip().splitlines():
@@ -60,12 +60,14 @@ class GobusterAdapter(BaseAdapter):
 
             findings.append({
                 "type": "http_endpoint",  # 改为 http_endpoint
+                "parent_id": parent_id,
                 "url": url,
                 "method": "GET",
                 "status_code": status_code,
                 "content_type": ct,
                 "content_length": size,
                 "crawl_status": "success",
+                "roles": ["directory"],
                 "asset_id": asset_id,
                 "source": source,
             })
@@ -75,13 +77,12 @@ class GobusterAdapter(BaseAdapter):
 
     @staticmethod
     def _root_for_host(host: str, ctx: dict[str, Any]) -> str:
-        from graphpt.common.asset_identity import normalize_domain_name
+        from graphpt.common.asset_identity import registrable_domain
 
-        root = normalize_domain_name(ctx.get("root_domain") or ctx.get("domain") or "")
+        root = registrable_domain(ctx.get("root_domain") or ctx.get("domain") or "")
         if root:
             return root
-        parts = host.split(".")
-        return ".".join(parts[-2:]) if len(parts) >= 2 else host
+        return registrable_domain(host)
 
     @classmethod
     def _found_value(cls, line: str) -> str:
@@ -209,7 +210,7 @@ class GobusterAdapter(BaseAdapter):
                 findings.append({
                     "type": "ip",
                     "value": ip,
-                    "parent_id": f"sub:{host}",
+                    "parent_id": f"domain:{host}",
                     "source": "gobuster",
                     "asset_id": ctx.get("asset_id", ""),
                 })
@@ -234,6 +235,7 @@ class GobusterAdapter(BaseAdapter):
             "status_code": status_code,
             "content_length": size,
             "title": host,
+            "roles": ["page"],
             "source": "gobuster",
             "asset_id": ctx.get("asset_id", ""),
         })
@@ -247,7 +249,8 @@ class GobusterAdapter(BaseAdapter):
         source = ctx.get("tool_name") or self.tool_name
 
         # 1) 目录爆破入口
-        findings = self._parse_dir_entries(text, target_url, asset_id, source)
+        parent_id = ctx.get("parent_id") or _endpoint_id_from_url(target_url)
+        findings = self._parse_dir_entries(text, target_url, asset_id, source, parent_id)
 
         # 2) DNS / VHOST 覆盖行
         for line in text.strip().splitlines():

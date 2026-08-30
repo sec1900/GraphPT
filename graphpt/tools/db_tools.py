@@ -450,6 +450,8 @@ def _insert_credential(
     target = str(args.get("target", "")).strip()
     username = str(args.get("username", "")).strip()
     password = str(args.get("password", "")).strip()
+    from graphpt.common.crypto import _encode_password
+    password_enc = _encode_password(password)
     cred_type = str(args.get("credential_type", "password")).strip()
     source = str(args.get("source", "")).strip()
     notes = str(args.get("notes", "")).strip()
@@ -473,7 +475,7 @@ def _insert_credential(
             " target, notes, status, role_label, auth_cookie_string, auth_headers_json,"
             " jwt_payload_json, session_json, created_at_utc, updated_at_utc)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, 'found', ?, ?, ?, ?, ?, ?, ?)",
-            (task_id, source, username, password, cred_type, target, notes,
+            (task_id, source, username, password_enc, cred_type, target, notes,
              role_label, auth_cookie_string,
              json.dumps(auth_headers, ensure_ascii=False),
              jwt_payload if isinstance(jwt_payload, str) else json.dumps(jwt_payload, ensure_ascii=False),
@@ -494,7 +496,7 @@ def _insert_credential(
             if username:
                 detail_lines.append(f"username={username}")
             if password:
-                detail_lines.append(f"password={password}")
+                detail_lines.append("password_saved=true")
             if target:
                 detail_lines.append(f"target={target}")
             if notes:

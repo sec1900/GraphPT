@@ -138,6 +138,36 @@ def verify_candidate(
     """
     checks: list[dict[str, Any]] = []
     vtype = str(vuln_type or "unknown").strip().lower()
+    raw_vtype = vtype
+
+    # ── 类型归一化（P0-3）─────────────────────────────
+    # nuclei 写模板 type/CWE（cve-2023-xxxx / CWE-79），sqlmap 写
+    # sqli_confirmed —— 都与 verifier 的标准枚举名不匹配，导致几乎所有
+    # 命中掉进"默认分支永不 verified"黑洞。统一归一化后再分派。
+    # 42 类标准枚举表在 graph_write_tools._VULN_TYPE_ENUM
+    try:
+        from graphpt.tools.graph_write_tools import _VULN_TYPE_ENUM
+        vtype = _VULN_TYPE_ENUM.get(vtype, vtype)
+    except Exception:
+        pass
+    # CWE 编号 → 漏洞类（nuclei info.cwe 常见形态）
+    _CWE_TO_VTYPE = {
+        "cwe-89": "sqli", "cwe-79": "xss", "cwe-22": "path-traversal",
+        "cwe-918": "ssrf", "cwe-78": "command_injection", "cwe-77": "command_injection",
+        "cwe-611": "xxe", "cwe-352": "csrf", "cwe-601": "open-redirect",
+        "cwe-200": "info-leak", "cwe-434": "file-upload", "cwe-95": "el_injection",
+        "cwe-94": "el_injection", "cwe-502": "insecure_deserialization",
+    }
+    vtype = _CWE_TO_VTYPE.get(vtype, vtype)
+
+    # sqlmap 已找出库 = 强证据，直接 verified（差分重放对已注入端点无意义）
+    if raw_vtype == "sqli_confirmed":
+        return {
+            "status": "verified",
+            "evidence": evidence or "sqlmap confirmed injection",
+            "checks": [{"check": "sqlmap_confirmed", "ok": True,
+                        "note": "sqlmap 已确认注入（强证据，跳过差分重放）"}],
+        }
 
     # 原始请求：优先 traffic_store 记录，退化默认 GET
     # 注意：traffic 可能为 None，必须先判空再 .get()
