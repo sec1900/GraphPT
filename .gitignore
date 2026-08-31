@@ -93,3 +93,10 @@ brutespray-checkpoint.jsonl
 *.bin
 graphpt/.claude/
 anthropic-ai-claude-code-2.1.88/
+
+# enscan 断点续扫缓存（治理 C）
+enscan.gob
+
+# 治理 2026-08-31
+.pytest_tmp/
+data/backups/*gov_cleanup*

@@ -22,6 +22,9 @@ from graphpt.common.log import get_logger
 
 _log = get_logger(__name__)
 
+# 泛解析打标日志去重（(domain_id, ip) → 只警告一次，防高频解析刷屏）
+_logged_wildcard_probe: set[tuple[str, str]] = set()
+
 # 项目根目录（neo4j_client.py 在 graphpt/collector/ 下，上溯三级）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -294,11 +297,31 @@ class GraphWriter:
 
         返回: {"id": "domain:xxx", "created": True/False, "value": "xxx"}
         """
-        from graphpt.common.asset_identity import domain_hierarchy, normalize_fqdn
+        from graphpt.common.asset_identity import (
+            domain_hierarchy,
+            is_wildcard_probe_hostname,
+            normalize_fqdn,
+        )
 
         value = normalize_fqdn(value)
         if not value:
             raise ValueError("invalid domain")
+
+        # 域名质量门（A1）：泛解析探测名拒收。
+        # 观测实证（2026-08-31 大学）：*.gzky.edu.cn 泛解析后，枚举器把随机
+        # 子域（3ie…-3ie…）当真实资产写入图，污染 Domain/Endpoint/URL 全线。
+        # 拒收返回 rejected 占位（created=False），兼容 `r.get("created")` 调用方；
+        # 丢弃域名在本仓库内无噪音——可注册根域由 targets.yaml/手动注册兜底。
+        if is_wildcard_probe_hostname(value):
+            _log.warning(
+                "domain_rejected_wildcard_probe value=%s asset=%s source=%s",
+                value, asset_id, source,
+            )
+            return {
+                "id": "", "created": False, "value": value,
+                "rejected": "wildcard_probe",
+            }
+
         hierarchy = domain_hierarchy(value)
         if not hierarchy:
             raise ValueError("invalid domain hierarchy")
@@ -494,6 +517,38 @@ class GraphWriter:
                     source=source,
                     now=now,
                 )
+                # 域名质量门（A1 辅防线）：该域名解析到资产已知的泛解析出口 IP
+                # → 打 is_wildcard_probe 标记（供 targets 排除/清理/UI 展示）；
+                # 不做阻断（真实子域也可能合法解析到出口 IP，阻断会误伤）。
+                try:
+                    asset_has = asset_id or ""
+                    if asset_has:
+                        probe_hit = session.run(
+                            """
+                            MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(root:Domain)
+                            WHERE root.is_root = true
+                              AND $ip IN coalesce(root.wildcard_ips, [])
+                            RETURN root.wildcard_ips AS ips LIMIT 1
+                            """,
+                            asset_id=asset_has, ip=ip,
+                        ).single()
+                        if probe_hit:
+                            session.run(
+                                """
+                                MATCH (d:Domain {id: $domain_id})
+                                SET d.is_wildcard_probe = true
+                                """,
+                                domain_id=domain_id,
+                            ).consume()
+                            key = (domain_id, ip)
+                            if key not in _logged_wildcard_probe:
+                                _logged_wildcard_probe.add(key)
+                                _log.warning(
+                                    "domain_marked_wildcard_probe domain=%s ip=%s asset=%s",
+                                    domain_id, ip, asset_has,
+                                )
+                except Exception:  # noqa: BLE001 — 标记失败不阻断写入
+                    pass
             # 独立 IP 路径
             if asset_id:
                 session.run(
@@ -726,8 +781,10 @@ class GraphWriter:
                     e.js_urls = $js_urls,
                     e.classified_at = $classified_at, e.rule_classified = $rule_classified,
                     e.classifier_attempts = $classifier_attempts,
+                    e.likely_waf = $likely_waf,
                     e.first_seen = $now, e.last_seen = $now, e.is_new = true
                   ON MATCH SET
+                    e.likely_waf = CASE WHEN $likely_waf = true THEN true ELSE coalesce(e.likely_waf, false) END,
                     e.status_code = $status_code, e.title = $title,
                     e.body_hash = $body_hash, e.content_length = $content_length,
                     e.content_type = $content_type,
@@ -781,6 +838,7 @@ class GraphWriter:
                 url=normalized,
                 method=method,
                 status_code=status_code,
+                likely_waf=bool(status_code == 403),
                 title=title,
                 body_hash=body_hash,
                 content_length=content_length,

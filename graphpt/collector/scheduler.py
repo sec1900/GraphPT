@@ -447,6 +447,13 @@ def _count_targets(tool: str, asset_id: str, force_rescan: bool = False,
         #   数量语义退化为 500 封顶近似值（进度显示足够，派发准确性由
         #   advance_once → _query_targets 的真实查询保证）。
         qparams = {"asset_id": asset_id, "tool": tool}
+        # 治理 D：冷却窗参数（与 pipeline._query_targets 同源；targets.yaml
+        # 引用 $cooldown_hours 时生效，默认 0 = 无冷却）
+        try:
+            from graphpt.collector.pipeline import _load_tool_cooldown_hours
+            qparams["cooldown_hours"] = _load_tool_cooldown_hours(tool)
+        except Exception:
+            pass
         qparams = {k: v for k, v in qparams.items() if v is not None and v != ""}
         if _session is not None:
             # 共享 session（progress() 批量调用）：调用方 with 保证存活期内完成
@@ -526,6 +533,112 @@ def _redis_client():
 
 
 _last_lock_clear: dict[str, float] = {}  # asset_id → 上次清理时间
+
+# ═══════════════════════════════════════════════════════════════
+# 根域扫描线互斥（治理 B）—— 双任务重叠根治
+# 昨夜实证：scan:default 与 scan:gzky 两条 run_full_scan 并行线同时消费
+# gzky 根域 → 整链 ×2（请求/发现/垃圾全翻倍，783/785 目标双写）。
+# 方案：可注册根域级 Redis 互斥锁（比 asset 级更细——default 与专用线
+# 可能共享同一根域）。先到者持锁（扫描期间心跳续期），后到者本次推进
+# 直接返回 locked；锁 TTL 120s，扫描进程死亡自动让出。
+# 降级：Redis/Neo4j 不可用 → 放行（与全仓库降级策略一致，绝不阻塞扫描）。
+# ═══════════════════════════════════════════════════════════════
+
+_ROOT_LINE_TTL = 120          # 秒；主监控循环 15s 续期，进程死亡 2min 自动释放
+
+
+def _asset_root_domains(asset_id: str) -> list[str]:
+    """Neo4j 查资产可注册根域。失败/空返回 []（调用方视为无互斥需求）。"""
+    try:
+        from graphpt.collector.neo4j_client import get_graph_writer
+        w = get_graph_writer()
+        with w._driver.session() as s:
+            rows = s.run(
+                """
+                MATCH (a:Asset {id: $asset_id})-[:HAS_DOMAIN]->(d:Domain)
+                WHERE d.is_root = true OR coalesce(d.is_root, false) = true
+                RETURN DISTINCT coalesce(d.registrable_domain, d.value) AS root
+                """,
+                asset_id=asset_id,
+            ).fetch(64)
+            return sorted(
+                str(r["root"]).strip().lower()
+                for r in rows if str(r["root"] or "").strip()
+            )[:32]
+    except Exception:  # noqa: BLE001 — 降级：查不到就当无互斥需求
+        _log.warning("root_lines_query_failed asset=%s", asset_id, exc_info=True)
+        return []
+
+
+def _acquire_root_lines(asset_id: str, _r: Any, *, check_only: bool = False) -> tuple[list[str], list[str]]:
+    """持有（或检查）资产根域级扫描锁。
+
+    check_only=False：setnx 抢占全部根域，返回 (owned, blocked)。
+                     owned=本线持有的根域；blocked=被其他线持有的根域。
+    check_only=True： 只读探测，返回 (owned, blocked)，owned 此时指的是
+                     "已被本资产持有"的根域集合（用于 advance_once 判断
+                     "本线是否还是线主"）。
+    """
+    roots = _asset_root_domains(asset_id)
+    if not roots:
+        return [], []
+    owned: list[str] = []
+    blocked: list[str] = []
+    for root in roots:
+        key = f"scheduler:root-line:{root}"
+        try:
+            if check_only:
+                owner = _r.get(key)
+                if owner == asset_id:
+                    owned.append(root)
+                elif owner:
+                    blocked.append(root)
+                continue
+            if _r.set(key, asset_id, nx=True):
+                _r.expire(key, _ROOT_LINE_TTL)
+                owned.append(root)
+            else:
+                owner = _r.get(key)
+                if owner == asset_id:
+                    owned.append(root)  # 上轮遗留自己 → 续持
+                else:
+                    blocked.append(root)
+                    _log.info(
+                        "scan_line_blocked root=%s by=%s requester=%s",
+                        root, owner, asset_id,
+                    )
+        except Exception:  # noqa: BLE001 — Redis 故障降级放行该根域
+            owned.append(root)
+    if blocked:
+        _log.warning(
+            "scan_line_conflict asset=%s owned=%d blocked=%d blocked_roots=%s",
+            asset_id, len(owned), len(blocked), blocked[:8],
+        )
+    return owned, blocked
+
+
+def _heartbeat_root_lines(owned: list[str], _r: Any, owner: str) -> None:
+    """续期持有的根域锁（TTL 重置，值保留 owner 供释放时校验）。失败静默。"""
+    if not owned:
+        return
+    try:
+        for root in owned:
+            _r.setex(f"scheduler:root-line:{root}", _ROOT_LINE_TTL, owner)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _release_root_lines(owned: list[str], _r: Any, owner: str) -> None:
+    """释放持有的根域锁。仅在 owner 校验后删除，防误删新线主的锁。"""
+    if not owned:
+        return
+    try:
+        for root in owned:
+            key = f"scheduler:root-line:{root}"
+            if _r.get(key) == owner:
+                _r.delete(key)
+    except Exception:  # noqa: BLE001
+        pass
 
 def _clear_stale_locks(asset_id: str) -> int:
     """检查所有调度锁的心跳，心跳停止超 5 分钟则自动释放锁+槽位。
@@ -613,6 +726,23 @@ def advance_once(asset_id: str = "default", *, dispatch: bool = True) -> dict[st
     # 自动清理超时锁（任务挂死后自动重启）
     if _r:
         _clear_stale_locks(asset_id)
+
+    # 根域扫描线互斥（治理 B）轻量检查：本资产根域全被其他扫描线持有
+    # 且自身未持锁 → 本次推进让路（防 default/专用线并发消费同一根域）
+    if _r:
+        try:
+            _own_lines, _foreign_lines = _acquire_root_lines(
+                asset_id, _r, check_only=True)
+            if not _own_lines and _foreign_lines:
+                _log.info("advance_once_blocked asset=%s foreign_roots=%s",
+                          asset_id, _foreign_lines[:8])
+                return {
+                    "status": "locked", "asset_id": asset_id,
+                    "reason": "root domains locked by another scan line",
+                    "blocked_roots": _foreign_lines[:8],
+                }
+        except Exception:  # noqa: BLE001 — 互斥检查失败不阻塞推进
+            pass
 
     for spec in _DEPENDENCY_LAYERS:
         tools = spec["tools"]
@@ -1030,6 +1160,38 @@ def run_full_scan(asset_id: str, *,
             "active_layers": {},  # layer_num → tool_name
         }
 
+    # 根域扫描线互斥（治理 B）：先到者持锁，后到者本次不启动。
+    # 昨夜的 default/gzky 双样本正是"两条线并行消费同一根域"——
+    # 此时 asset 级扫描锁互不可见，必须在根域级把门。
+    _root_lines_owned: list[str] = []
+    _root_redis = None
+    try:
+        _r = _redis_client()
+        _r.ping()
+        _root_redis = _r
+    except Exception:
+        _root_redis = None
+    if _root_redis is not None:
+        owned, blocked = _acquire_root_lines(asset_id, _root_redis)
+        if blocked:
+            with _SCAN_STATE_LOCK:
+                st = _SCAN_STATE.get(asset_id, {})
+                st["status"] = "locked"
+                st["root_line_conflicts"] = blocked
+            _scan_log(f"blocked by foreign scan lines: {','.join(blocked[:8])}")
+            _notify_completion(asset_id, "locked", 0, 0, 0)
+            return {
+                "status": "locked", "asset_id": asset_id,
+                "reason": "root domains locked by another scan line",
+                "blocked_roots": blocked,
+            }
+        _root_lines_owned = owned
+        if owned:
+            _log.info("scan_line_acquired asset=%s roots=%d", asset_id, len(owned))
+            # 存进 SCAN_STATE 供监控循环续期 / _notify_completion 释放
+            with _SCAN_STATE_LOCK:
+                _SCAN_STATE[asset_id]["_root_lines"] = owned
+
     _scan_log_path = os.environ.get("GRAPHPT_SCAN_LOG", "")
     def _scan_log(msg: str) -> None:
         if _scan_log_path:
@@ -1264,6 +1426,10 @@ def run_full_scan(asset_id: str, *,
                     _stop.set()
                     break
 
+                # 根域锁续期（治理 B）— 每轮监控心跳保活，进程死亡 TTL 自动让出
+                if _root_lines_owned and _root_redis is not None:
+                    _heartbeat_root_lines(_root_lines_owned, _root_redis, asset_id)
+
                 # 收集已完成的层（异常退出等少数情况）
                 done = [f for f in layer_futures if f.done()]
                 for f in done:
@@ -1379,12 +1545,37 @@ def _notify_completion(asset_id: str, status: str, round_num: int,
                       total_findings: int, total_errors: int) -> None:
     """扫描完成时写 Redis 通知（TTL 1h），前端可轮询获取。
 
-    所有结束路径（done/aborted/crashed）都经过这里 — OOB 会话在此回收。
+    所有结束路径（done/aborted/crashed/locked）都经过这里 — OOB 会话在此回收。
     """
     try:
         from graphpt.collector.oob_session import stop as _oob_stop
         _oob_stop(asset_id)
     except Exception:
+        pass
+    # 根域扫描锁释放（治理 B）——从 SCAN_STATE 读本线持有的根域
+    try:
+        owned = list(_SCAN_STATE.get(asset_id, {}).get("_root_lines") or [])
+        if owned:
+            _r_line = _redis_client()
+            _r_line.ping()
+            _release_root_lines(owned, _r_line, asset_id)
+            _log.info("scan_line_released asset=%s roots=%d", asset_id, len(owned))
+    except Exception:  # noqa: BLE001 — 释放失败交给锁 TTL 自动让出
+        pass
+    # 指纹 → 资产属性 + 攻击面档案（治理 G）：扫描收尾聚合端点指纹，
+    # 命中档案（VSB9/金智/CAS…）写回 Asset.fingerprints/profiles，
+    # 供报告与 agent 会话首帧直接消费（不再"现查模板"）。
+    try:
+        if status in ("done", "aborted"):
+            from graphpt.common.fingerprint_profiles import asset_fingerprint_summary
+            summary = asset_fingerprint_summary(asset_id)
+            if summary.get("fingerprints"):
+                _log.info(
+                    "asset_fingerprint_summary asset=%s fps=%d profiles=%s",
+                    asset_id, len(summary["fingerprints"]),
+                    [p.get("product") for p in summary.get("profiles", [])],
+                )
+    except Exception:  # noqa: BLE001 — 指纹聚合失败不影响收尾
         pass
     # 扫描信号 → agent intent 桥（stats=done 时把发现映射为探索意图，
     # 供 dispatcher/pool 派 explore 深挖；失败静默，env 可关 GRAPHPT_SCAN_BRIDGE=0）

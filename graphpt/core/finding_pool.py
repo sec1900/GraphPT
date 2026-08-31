@@ -1513,6 +1513,31 @@ def upsert_vuln_finding_from_graph(payload: dict[str, Any]) -> None:
         _log.warning("scan_vuln_finding_projection_failed", exc_info=True)
 
 
+def _build_probe_target_collapser():
+    """构造 canonical_target 折叠器（A3 弓（弓）指归一）。
+
+    泛解析探测名（3ie…-3ie….gzky.edu.cn 类随机子域）若作为指纹 target，
+    每条垃圾各自成键 → 去重失效（昨夜实证 1500 条）。折叠规则：
+      host 是探测名 → 指纹 target 用其可注册根域（保持 URL 形态以便跨库一致）；
+      其余原样返回。仅影响指纹/去重键，不改动存储的 canonical_target 证据值。
+    """
+    from graphpt.common.asset_identity import is_wildcard_probe_hostname, registrable_domain
+    from graphpt.common.asset_identity import normalize_host_label
+
+    def _collapse(target: str) -> str:
+        text = str(target or "").strip()
+        if not text:
+            return text
+        host = normalize_host_label(text)
+        if not host or not is_wildcard_probe_hostname(host):
+            return text
+        root = registrable_domain(host) or host
+        scheme = "https" if text.lower().startswith("https://") else "http"
+        return f"{scheme}://{root}"
+
+    return _collapse
+
+
 def save_findings(
     db_file: Path,
     task_id: int,
@@ -1546,6 +1571,15 @@ def save_findings(
     updated_finding_ids: list[int] = []
     changed_finding_ids: list[int] = []
     change_events_by_id: dict[int, str] = {}
+    # 跨 task 全局去重（治理 A3）：
+    # 昨夜 scan:default 与 scan:gzky 双任务并行扫同一资产，各写一份同样的
+    # findings（783/785 目标双写）——根因即此处旧版 `WHERE task_id = ?`
+    # 使去重视野被锁定在单任务内。现改全表去重：
+    #   - 同指纹跨任务命中 → 走 UPDATE 分支合并进首见行（task_id 保留首见）
+    #   - findings 表规模 ≤ 万级，全表载入无压力
+    # 指纹一致性注意：_vuln_projection 投影用的是本函数算出的 dedup_key
+    # （折叠后），Neo4j 侧同值——折叠修改必须在两侧生效，禁止另处再算。
+    _collapse_probe_target = _build_probe_target_collapser()
     # 桥①：vuln 类行收集（UPDATE + INSERT 两路径），循环结束后投影 Neo4j
     _vuln_projection: list[dict[str, Any]] = []
     try:
@@ -1556,9 +1590,7 @@ def save_findings(
                    business_impact, exploit_difficulty, src_bounty_estimate, fingerprint,
                    canonical_target, http_method, entry_point, param_name, vuln_type
             FROM findings
-            WHERE task_id = ?
             """.strip(),
-            (task_id,),
         ).fetchall()
         existing_keys: dict[str, dict[str, Any]] = {}
         existing_relaxed_keys: dict[str, dict[str, Any]] = {}
@@ -1595,13 +1627,14 @@ def save_findings(
             # 显式结构化身份优先：vuln 类且未显式传 fingerprint 时，用
             # canonical_target/method/param 等显式字段预计算精确指纹
             # （common 共享算法，与 Neo4j 侧同值）——避免从 title/detail
-            # 猜测提取导致跨库对不上
+            # 猜测提取导致跨库对不上。A3：指纹 target 折叠泛解析探测名。
             _fp_explicit = str(finding.get("fingerprint", "") or "").strip()
             if cat == "vuln" and not _fp_explicit:
                 from graphpt.common.finding_identity import compute_vuln_fingerprint
                 _fp_explicit = compute_vuln_fingerprint(
                     vuln_type=str(finding.get("vuln_type") or ""),
-                    canonical_target=str(finding.get("canonical_target") or ""),
+                    canonical_target=_collapse_probe_target(
+                        str(finding.get("canonical_target") or "")),
                     http_method=str(finding.get("http_method") or ""),
                     entry_point=str(finding.get("entry_point") or ""),
                     param_name=str(finding.get("param_name") or ""),
@@ -1627,7 +1660,8 @@ def save_findings(
             if cat == "vuln":
                 relaxed_dedup_key = _vuln_relaxed_identity_key(
                     fingerprint=incoming_identity["fingerprint"],
-                    canonical_target=incoming_identity["canonical_target"],
+                    canonical_target=_collapse_probe_target(
+                        incoming_identity["canonical_target"]),
                     entry_point=incoming_identity["entry_point"],
                     param_name=incoming_identity["param_name"],
                     vuln_type=incoming_identity["vuln_type"],
@@ -1669,7 +1703,7 @@ def save_findings(
 
             # 语义去重：同 category + canonical_target 下，title 关键词重叠度 >60% 视为重复
             if existing is None and not skip_dedup:
-                _ct = incoming_identity.get("canonical_target", "")
+                _ct = _collapse_probe_target(incoming_identity.get("canonical_target", ""))
                 _match = _find_semantically_similar(existing_rows, cat, title, _ct)
                 if _match is not None:
                     existing = dict(_match)

@@ -110,6 +110,31 @@ class NucleiAdapter(BaseAdapter):
                 continue
             seen.add(key)
 
+            # ── 治理 A2：wildcard-dns-detect 模板特判 ────────────────────────
+            # 2026-08-31 大学观测实证：*.gzky.edu.cn 泛解析时，该模板对每个
+            # 枚举出的随机子域（3ie…-3ie…）都命中 → 1500 条 info 垃圾发现。
+            # 处理：按可注册根域折叠为 1 条 wildcard_result（写回根域节点
+            # 的 wildcard_ips 资产属性），不产生 vulnerability finding。
+            if template_id == "wildcard-dns-detect" or "wildcard" in template_id:
+                from graphpt.common.asset_identity import registrable_domain
+                root = registrable_domain(url) or ""
+                if root:
+                    ips = []
+                    er = obj.get("extracted-results")
+                    if isinstance(er, list):
+                        ips = [str(x) for x in er if str(x or "").strip()]
+                    wkey = ("wildcard", root)
+                    if wkey not in seen:
+                        seen.add(wkey)
+                        findings.append({
+                            "type": "wildcard_result",
+                            "domain": root,
+                            "has_wildcard": True,
+                            "wildcard_ips": ips,
+                            "source": "nuclei",
+                        })
+                continue  # 同行的其余 vuln 分支全部跳过
+
             # OOB 回调确认：nuclei 命中盲模板（SSRF/XXE/RCE/盲 SQLi）时
             # JSONL 带 interactsh 字段（目标服务器回连了我们的 OAST 域）—
             # 回调到达即强证据，直接 verified（不再停留 candidate）

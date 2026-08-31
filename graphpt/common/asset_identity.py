@@ -229,6 +229,44 @@ def build_url_identity_key(raw: str) -> str:
     return base if not query else f"{base}?{query}"
 
 
+# ═══════════════════════════════════════════════════════════════
+# 泛解析探测名识别（域名质量门 A1）
+# 2026-08-31 大学观测实证：*.gzky.edu.cn 配置泛解析后，枚举器把"能解析"
+# 的随机子域当真实资产写入，产生 785 个垃圾域名 / 1500 条 wildcard findings /
+# 33698 行 URL 中 ~90% 垃圾。特征：
+#   - 双写标签 'X-X'（X≥14 位小写字母数字），如
+#     3iepe1fpkz7c2nxcete6jytzpmp-3iepe1fpkz7c2nxcete6jytzpmp.gzky.edu.cn
+#   - 单标签 >32 位的纯小写字母数字
+# 只检查可注册根域之前的前缀标签，真实子域（jwgl/www/api…）不受影响。
+# ═══════════════════════════════════════════════════════════════
+
+_PROBE_DOUBLED_LABEL_RE = re.compile(r"^[a-z0-9]{14,}(?:-[a-z0-9]{14,})+$")
+_PROBE_MAX_LABEL_LEN = 32
+
+
+@lru_cache(maxsize=16384)
+def is_wildcard_probe_hostname(raw: str) -> bool:
+    """判定域名是否为泛解析探测产生的伪名（域名质量门）。
+
+    幂等、零查询、可缓存。命中返回 True，调用方应拒绝写入域实体。
+    """
+    host = normalize_fqdn(raw)
+    if not host:
+        return False
+    root = registrable_domain(host) or host
+    root_len = len(root.split(".")) if root else 0
+    labels = host.split(".")
+    prefix = labels[: len(labels) - root_len] if root_len else labels
+    for label in prefix:
+        if not label:
+            continue
+        if _PROBE_DOUBLED_LABEL_RE.match(label):
+            return True
+        if len(label) > _PROBE_MAX_LABEL_LEN and re.fullmatch(r"[a-z0-9]+", label):
+            return True
+    return False
+
+
 def normalize_host_port(raw: str) -> str:
     candidate = str(raw or "").strip().rstrip(_URL_TRAILING_NOISE)
     if not candidate:
