@@ -22,7 +22,9 @@ from .prompts import (CTFTask, build_task_prompt, write_memory_file,
 
 _log = logging.getLogger("graphpt.ctf.session")
 
-CTF_TOOL_NAMES = ("Bash", "Read", "Write", "Edit", "Grep", "Glob", "http_test", "oob_callback", "run_script")
+# P0-4（治理 2026-09-01）：CTF 最小执行面八件套。oob_callback 一并去除——
+# 最短闭环阶段不回 OASt 回调，只保留"对明确地址持续行动"的工具。
+CTF_TOOL_NAMES = ("Bash", "Read", "Write", "Edit", "Grep", "Glob", "http_test", "run_script")
 
 _GIT_BASH_CANDIDATES = (
     r"C:\Program Files\Git\bin\bash.exe",
@@ -196,18 +198,36 @@ def run_solve_session(
     try:
         # 【一套提示词/一套执行】统一 AgentSession 生成（build_unified_system/user），
         # 无任务类型差异——CTF 目标就是真实环境，与实战挖洞同一套。
+        # P0-1（治理 2026-09-01）：target 必须是当前真实 ip:port，绝不用题号。
+        # 实锤：上一版 target=task.unique_code（"e1-02"），agent 收到的地址
+        # 是题号 → 开场 10 分钟扫网段找目标，白烧一轮。targets[0] 若无则
+        # 回退题号并让 prompt 明确"待启动提供"（测试门会拦住空地址）。
+        _target_addr = (task.targets[0] if task.targets else "")
+        if not _target_addr:
+            _log.error("[%s] 无目标地址（targets 为空）——拒绝启动会话", task.unique_code)
+            res.error = "no target addr"
+            return res
         atask = AgentTask(
-            target=task.unique_code,
+            target=_target_addr,
             objective=task.objective or task.unique_code,
             targets=tuple(task.targets or []),
             workdir=task.workdir,
-            project=task.unique_code,
+            # P0-2：黑板 project key 用实例 ID（非题号）——旧实例事实/锚点
+            # 永不混入新实例；无 instance_id 时才回退题号（防历史调用方崩）。
+            project=task.instance_id or task.unique_code,
             timebox_s=session_seconds,
             max_iterations=max_iterations,
             tried_commands=tuple(tried_commands or []),
+            # P0-4（治理 2026-09-01）：CTF 最小执行面——显式传八件套工具，
+            # 不再让 AgentSession 走全量工具（杜绝图工具/子代理/SRC 报告
+            # 混入 CTF 会话；昨夜 agent 甚至读了 agent_pool.json/state.json）。
+            tool_schemas=_ctf_tool_schemas(),
+            # P0-4：关闭自动知识卡注入（kb 卡片已按盲测原则封存；earned
+            # 组件卡同样不进 CTF 会话——最短闭环阶段只靠模型+当前实例证据）。
+            kb_inject=False,
             # 2026-08-31 政策（用户拍板）：允许自产知识卡——组件级 earned 卡
             # （自身经验沉淀，非外部知识）在 CTF 域注入，同组件题可复用打法。
-            kb_inject=True,
+            # 2026-09-01 P0-4 收紧：最短闭环阶段全部关闭，恢复得分后再开。
         )
         r = AgentSession(atask, ai_config=ai_config).run(
             on_status=on_status, stop_event=stop_event)
@@ -249,9 +269,26 @@ def run_solve_session(
             if f not in seen:
                 seen.add(f)
                 ordered.append(f)
-    # FLAG 文件声明的排前面，其余按出现顺序
-    declared_first = [f for f in ordered if f in declared]
-    res.flags = declared_first + [f for f in ordered if f not in declared]
+    # P0-3（治理 2026-09-01）：来源校验——候选必须出现在**本会话工具证据**
+    # （observed_output/tool_outputs）中，或由 FLAG 文件声明（且须在证据中出现，
+    # 防纯手工编辑 FLAG 注入幻觉）。final_answer 里出现但证据中没有的
+    # 一律剔除（模型幻觉来源，不是当前实例输出）。
+    _evidence = (res.observed_output or "") + "\n".join(
+        str(o) for _t, _a, o in (res.tool_outputs or []))
+    _evidence_lower = _evidence.lower()
+    evidence_seen: list[str] = []
+    for f in ordered:
+        if f in _evidence_lower or f.lower() in _evidence_lower:
+            evidence_seen.append(f)
+    # FLAG 文件声明的排前面，其余按出现顺序（仅保留证据佐证的）
+    declared = declared & set(evidence_seen)
+    declared_first = [f for f in evidence_seen if f in declared]
+    res.flags = declared_first + [f for f in evidence_seen if f not in declared]
+    dropped = [f for f in ordered if f not in evidence_seen]
+    if dropped:
+        _log.info("[%s] P0-3 剔除无证据候选 %d 个: %s", task.unique_code, len(dropped),
+                  [f[:24] for f in dropped[:5]])
+    res.declared = declared
 
     if res.handoff:
         write_memory_file(task.workdir, handoff=res.handoff,

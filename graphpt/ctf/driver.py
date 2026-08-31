@@ -35,6 +35,10 @@ from .session import run_solve_session
 _KB_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
                        "data", "ctf", "kb")
 
+# 治理 2026-08-31：本轮任务窗口起点（driver 进程启动时间）。
+# B7 只提交窗口内新写入的 FLAG 文件（旧战役残留的过期 flag 不再自动提交）。
+_WINDOW_START: float = time.time()
+
 
 def _pool_daemon_running() -> bool:
     """pool daemon（新调度器）是否在跑：检测其单实例端口绑定。
@@ -99,6 +103,28 @@ def _board_win_fact(code: str, flag: str) -> None:
         pass
 
 
+def _board_reject_fact(code: str, flag: str, *, accepted: bool) -> None:
+    """P0-3：平台 wrong/duplicate 反馈落事实板（source=platform）——
+
+    写入"候选 X 已被平台拒绝"事实，供 agent/reason 下一轮读到；
+    正确提交也落账（verified=1），防后续轮把已入库 flag 当新候选反复提交。
+    """
+    try:
+        from graphpt.search.board import Board
+        board = Board()
+        try:
+            if accepted:
+                board.add_fact(code, f"flag 已提交正确：{flag}", source="platform",
+                               grounding=flag, verified=1)
+            else:
+                board.add_fact(code, f"平台拒绝候选：{flag}（禁止再次提交）", source="platform",
+                               grounding="platform submit wrong", verified=0)
+        finally:
+            board.close()
+    except Exception:
+        pass
+
+
 def _save_solve_card(code: str, ch: Challenge, claim, flag: str, state) -> None:
     """P1-⑩ 经验知识库：正确 flag 固化为解题卡片（后续同题/同难度会话可复用配方）。"""
     try:
@@ -143,6 +169,8 @@ class ChallengeState:
         self.dry_sessions = 0          # 连续无新 flag 候选的会话数（止损用）
         self.tokens_spent = 0          # 累计 token（成本观测）
         self.held_addr: list[str] | None = None   # 保活的容器地址（不 close，下轮同 IP 续打）
+        self.instance_id = ""          # P0-2：当前容器实例 ID（重建后更新）
+        self.rejected_bodies: set[str] = set()   # P0-3：平台拒绝过的 flag 归一化体（永久拉黑）
         self.last_error = ""           # 最近一次 visit 的错误（可观测）
 
 
@@ -210,14 +238,35 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
     log.info("=== %s visit#%d started: %s (timebox=%ds) ===",
              code, state.session_idx + 1, addrs, timebox)
 
+    # P0-2（治理 2026-09-01）：实例隔离。每次【新 start】生成新的 instance_id
+    # （保活复用则沿用上一实例 id）。工作区一律用
+    #   data/ctf/runs/<code>/<instance_id>/
+    # 旧目录（data/ctf/e1-xx/）与旧实例事实永不进入新实例。
+    _seq = state.session_idx
+    if state.instance_id and state.held_addr == addrs:
+        inst_id = state.instance_id          # 同容器续打：沿用
+    else:
+        inst_id = f"{code.replace('/', '_')}_{int(time.time())}_{_seq}"
+        state.instance_id = inst_id          # 新容器/新地址：换实例
+    workdir = os.path.join(workdir_root, "runs", code.replace("/", "_"), inst_id)
+    os.makedirs(workdir, exist_ok=True)
+    log.info("[%s] instance=%s workdir=%s", code, inst_id, workdir)
+
     # B7：存量 FLAG 文件中的 flag 先自动提交（不依赖 agent 重新发现）
     # —— d-02 实证：FLAG 里 2 个正确 flag 从未被提交，白丢分数。
+    # 修复（治理 2026-08-31 + 09-01）：只提交**本实例目录内**且窗口内写入的
+    # FLAG——旧战役残留（data/ctf/e1-xx/）不会出现在 runs/ 新实例目录，
+    # mtime 时间窗再兜一层（8/29 残留 flag 实锤不再自动提交）。
     try:
         from .prompts import read_flag_file as _rff
-        workdir = os.path.join(workdir_root, code.replace("/", "_"))
-        for _f in sorted(_rff(workdir) - state.submitted):
+        _fresh = _rff(workdir, min_mtime=_WINDOW_START)
+        for _f in sorted(_fresh - state.submitted):
             _nb = normalize_flag_body(_f)
             if _nb in state.submitted_bodies:
+                state.submitted.add(_f)
+                continue
+            # P0-3：平台已拒绝的候选不得再次提交（含 B7 存量路径）
+            if _nb in state.rejected_bodies:
                 state.submitted.add(_f)
                 continue
             try:
@@ -236,7 +285,10 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
                         state.solved = True
                         return out
                 else:
-                    log.info("[%s] B7 存量 FLAG 提交 wrong: %s...", code, _f[:16])
+                    # P0-3：B7 路径 wrong 同样拉黑 + 落实例事实板
+                    state.rejected_bodies.add(_nb)
+                    _board_reject_fact(code, _f, accepted=False)
+                    log.info("[%s] B7 存量 FLAG 提交 wrong: %s...（已拉黑）", code, _f[:16])
             except DuplicateSubmit:
                 state.submitted.add(_f)
                 state.submitted_bodies.add(_nb)
@@ -250,10 +302,24 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
     except Exception as e:  # noqa: BLE001
         log.warning("[%s] B7 stale flag submit skipped: %s", code, e)
 
-    workdir = os.path.join(workdir_root, code.replace("/", "_"))
+    # workdir 已在实例隔离段（P0-2）构建为 runs/<code>/<instance_id>/
     task = CTFTask(unique_code=code, objective=ch.description or "",
                    targets=addrs, flag_count=ch.flag_count, flag_format=flag_format,
-                   difficulty=ch.difficulty, workdir=workdir)
+                   difficulty=ch.difficulty, workdir=workdir, instance_id=inst_id)
+    # 治理 2026-08-31：TARGET 环境变量注入——prompt/剧本约定"脚本用 $TARGET
+    # 参数化"，但此前从未设置该变量，agent echo $TARGET 拿到空值后开始扫网段
+    # 找目标（10 分钟瞎扫实锤）。以 addrs[0] 为准（host:port 拆分），
+    # 并把 target.txt 写入工作区供 agent Read 一次确认。
+    try:
+        _t_host, _, _t_port = addrs[0].partition(":")
+        os.environ["TARGET"] = addrs[0]
+        os.environ["TARGET_HOST"] = _t_host
+        os.environ["TARGET_PORT"] = _t_port or "80"
+        os.makedirs(workdir, exist_ok=True)
+        with open(os.path.join(workdir, "target.txt"), "w", encoding="utf-8") as _tf:
+            _tf.write(addrs[0] + "\n")
+    except Exception:  # noqa: BLE001
+        pass
     stop_event = threading.Event()
     wrong_this_visit = 0
     t0 = time.monotonic()
@@ -282,6 +348,11 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
                 continue
             nb = normalize_flag_body(flag)
             if nb in state.submitted_bodies:
+                continue
+            # P0-3（治理 2026-09-01）：平台已拒绝的候选永久拉黑——本轮及后续轮
+            # 均不得再次提交（否则同一错 flag 反复 wrong 烧配额烧轮次）。
+            if nb in state.rejected_bodies:
+                log.info("[%s] skip %s (rejected by platform earlier)", code, flag[:32])
                 continue
             if sess.flag_from_probe_echo(flag):
                 log.info("[%s] hold %s (probe/self-echo)", code, flag[:32])
@@ -312,6 +383,7 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
                     log.info("[%s] CORRECT flag %s... (%d/%d) +%d分",
                              code, flag[:16], res.correct_flag_count, res.total_flag_count, res.awarded)
                     _board_win_fact(code, flag)
+                    _board_reject_fact(code, flag, accepted=True)  # P0-3：正确也落账（防后续误标 rejected）
                     # P1-⑩ 经验知识库：每个正确 flag → 固化解题卡片（供后续同题/同难度复用）
                     try:
                         _save_solve_card(code, ch, claim, flag, state)
@@ -323,7 +395,10 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
                         break
                 else:
                     wrong_this_visit += 1
-                    log.info("[%s] wrong flag %s...", code, flag[:16])
+                    # P0-3：平台 wrong → 写实例事实板 + 永久拉黑候选
+                    state.rejected_bodies.add(nb)
+                    _board_reject_fact(code, flag, accepted=False)
+                    log.info("[%s] wrong flag %s...（已拉黑，本实例不再重提交）", code, flag[:16])
             except DuplicateSubmit:
                 state.submitted.add(flag)
                 state.submitted_bodies.add(nb)
@@ -416,6 +491,30 @@ def main() -> int:
         log.info("待打 %d 题: %s | 轮次时间盒=%s", len(pending),
                  [c.unique_code for c in pending], timeboxes)
 
+        # 治理 2026-08-31：本窗口开工前把历史残留 FLAG/MEMORY/脚本归档，
+        # 避免旧战役的过期 flag/旧 IP/旧脚本污染 agent 首轮侦察
+        # （昨夜：agent 开场 ls 到 31 个 8/29 旧文件，B7 误提交旧 flag）。
+        try:
+            import shutil as _sh
+            from datetime import datetime as _dt
+            _arc = os.path.join(workdir_root, "_stale_archive")
+            os.makedirs(_arc, exist_ok=True)
+            for c in pending:
+                wd = os.path.join(workdir_root, c.unique_code.replace("/", "_"))
+                if not os.path.isdir(wd):
+                    continue
+                for _name in ("FLAG", "flag.txt", "FLAG.txt", "MEMORY.md", "memory.md"):
+                    _p = os.path.join(wd, _name)
+                    try:
+                        if os.path.isfile(_p) and os.path.getmtime(_p) < _WINDOW_START:
+                            _dst = os.path.join(_arc, f"{c.unique_code.replace('/', '_')}_{_name}")
+                            _sh.move(_p, _dst)
+                            log.info("[%s] 归档窗口前残留 %s → %s", c.unique_code, _name, _dst)
+                    except OSError:
+                        pass
+        except Exception:  # noqa: BLE001
+            log.warning("workdir 残留归档失败（不阻塞）", exc_info=True)
+
         states = {c.unique_code: ChallengeState(c.unique_code) for c in pending}
 
         try:
@@ -431,10 +530,14 @@ def main() -> int:
                 if not todo:
                     break
                 log.info("===== ROUND %d — %d 题待打, timebox=%ds =====", rnd + 1, len(todo), timebox)
-                # 单轮（无后续轮次）时禁用保活：保活的本意是"同进程多轮续打同 IP"，
-                # 单轮进程退出前不留续打意义，反而占掉平台 max_active 坑位，
-                # 让本轮的后续题目全部 max_active 等退避然后漏打（实战踩坑）。
-                keepalive = len(timeboxes) > 1
+                # 保活语义修复（治理 2026-08-31）：保活 = "同进程多轮续打**同一道题**
+                # 同一 IP"。并发 3 线时多轮 + 队列 >1 的场景如果对每道题都保活，
+                # 三条线各 Hold 一个容器 → 平台 max_active=3 占满 → 后续题全部
+                # max_active_retries_exhausted 漏打（昨夜 e1-06/e3-03 实锤）。
+                # 规则：只有当【这是最后一轮】且【本线只剩这一道题】时才保活；
+                # 队列多题或还有后续轮次都禁用——打完全部题后统一 close。
+                keepalive = (len(timeboxes) > 1 and rnd == len(timeboxes) - 1
+                             and len(todo) == 1)
                 for ch in todo:
                     st = states[ch.unique_code]
                     r = visit_challenge(client, ch, st, ai_config, verifier,

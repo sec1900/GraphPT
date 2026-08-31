@@ -104,10 +104,12 @@ _RANGE_SECTION = """
   </Handoff>
   纪律：只写本次真在命令输出里证实过的；一切地址用 $TARGET 占位，不写死旧 IP。
 
-### 靶场模式与图数据库
-本题是单靶机目标。图查询工具（graph_*）可用但非强制——侦察发现直接用于推进即可；
-确认的漏洞若有 save_vulnerability 工具可写图（与 SRC 挖洞同一状态机），没有就用 FLAG/MEMORY 文件。
-不要派发领域子代理——单靶机目标由你独立完成，聚焦深度而非广度。
+### 靶场模式（P0-4：最短闭环执行面）
+本题是单靶机目标，你的工具面只有八件（Bash/Read/Write/Edit/Grep/Glob/http_test/run_script）。
+没有图数据库工具、没有子代理、没有知识卡——侦察与利用全在八件套内完成：
+- 侦察结果直接用于推进（写文件/FLAG 自留）；
+- 拿到 flag 立刻 Write 到工作区 `FLAG` 文件（append）；
+- 不尝试调用不存在的工具；深度聚焦当前 Target 单靶机。
 """
 
 
@@ -135,6 +137,7 @@ class CTFTask:
     difficulty: str = "medium"
     hint: str | None = None
     workdir: str = ""
+    instance_id: str = ""      # P0-2：本次容器实例唯一 ID（黑板 project key 用）
     extra: dict = field(default_factory=dict)
 
     def target_str(self) -> str:
@@ -200,6 +203,11 @@ def build_task_prompt(
     # P1-⑧ 结构化工件交接：上轮 artifacts.json（凭据/token/flag 候选/已写文件）
     artifacts_block = _artifacts_block(task.workdir)
 
+    # P0-2（治理 2026-09-01）：recipe 分层——跨实例可复用**通用利用步骤**
+    # （data/ctf/recipes/<code>.md，约定不含 IP/flag/凭据）。旧实例的
+    # evidence（响应/凭据/flag）绝不跨实例注入；recipe 是唯一跨实例通道。
+    recipe_block = _recipe_block(task.unique_code)
+
     # P2-⑪ 题型专家分派：按题目描述推断题型，注入对应专家方法论
     expert_block = _expert_block(task.objective or task.description or "")
 
@@ -228,11 +236,15 @@ def build_task_prompt(
 Target: {task.target_str()}
 【注意】目标实例每次重建 IP 都会变——以上 Target 是本次唯一真实地址。MEMORY/接力块/旧脚本里出现的任何旧 IP
 一律当过期；把利用配方重放到本次 Target（脚本用 $TARGET 参数化，别写死 IP）。
+【第一动作强制】Target 是唯一目标，**第一件事就是直接请求它**（http_test/curl http://Target/）。
+Target 不可达时：检查一次代理语义（见环境事实），然后 **10 秒内停止网络侦察，直接进入
+Web 应用攻击面分析**（首页/登录/接口枚举），用已给的 ip:port 而不是扫网段——禁止 nmap 扫描
+不属于 Target 的其他网段（昨天有 agent 在乱扫 10.0.161.x/10.0.163.x 浪费 10 分钟，抓包可见）。
 题目: {task.unique_code}（难度 {task.difficulty}）
 Goal: 找到并取得所有 flag。{multi}{flag_line}
 描述: {task.objective or '（无描述，按侦察结果推进）'}
 提示: {task.hint or '（无额外提示）'}
-{board_block}{tried_block}{artifacts_block}{expert_block}{playbook_block}
+{board_block}{tried_block}{artifacts_block}{recipe_block}{expert_block}{playbook_block}
 现在开始。Target 的 ip:port 就是全部攻击面——先用 http_test/curl 拿首页响应指纹（Server/X-Powered-By/标题），
 形成第一个可证伪的漏洞假设，然后验证它。不要跑全端口扫描。
 """
@@ -317,6 +329,29 @@ def _playbook_block() -> str:
         return ""
 
 
+def _recipe_block(unique_code: str) -> str:
+    """P0-2：跨实例 recipe 注入（唯一跨实例通道）。
+
+    约定 data/ctf/recipes/<code>.md 只含**通用利用步骤**（不含 IP/flag/凭据，
+    地址一律 $TARGET 占位）。旧实例的 evidence（flag/IP/凭据/原始日志）绝不
+    跨实例注入——recipe 是解耦层，重建实例后只有步骤可复用。
+    """
+    try:
+        safe = str(unique_code).replace("/", "_").replace(":", "_")[:60]
+        p = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                         "data", "ctf", "recipes", f"{safe}.md")
+        if not os.path.isfile(p):
+            return ""
+        with open(p, encoding="utf-8", errors="replace") as f:
+            content = f.read()[:3000]
+        if not content.strip():
+            return ""
+        return ("\n【历史利用配方（跨实例通用步骤，非本实例证据）】"
+                "地址一律用 $TARGET 重放，勿信任何旧 IP：\n" + content.strip() + "\n")
+    except Exception:
+        return ""
+
+
 def _artifacts_block(workdir: str) -> str:
     """P1-⑧：读取上轮 artifacts.json，组装结构化交接块（凭据/flag 候选/文件清单）。"""
     try:
@@ -363,12 +398,20 @@ def write_memory_file(workdir: str, *, handoff: str = "", extra: str = "") -> st
     return path
 
 
-def read_flag_file(workdir: str) -> set[str]:
+def read_flag_file(workdir: str, min_mtime: float | None = None) -> set[str]:
     out: set[str] = set()
     for name in ("FLAG", "flag.txt", "FLAG.txt"):
         p = os.path.join(workdir, name)
         try:
             if os.path.isfile(p):
+                # 治理 2026-08-31：老窗口残留 FLAG（8/29 上次战役）不提交——
+                # B7 曾把过期 flag 自动提交白送 wrong 分（平台 22:09:48 实锤）
+                if min_mtime is not None:
+                    try:
+                        if os.path.getmtime(p) < min_mtime:
+                            continue
+                    except OSError:
+                        pass
                 with open(p, encoding="utf-8", errors="ignore") as f:
                     for line in f:
                         v = line.strip()
