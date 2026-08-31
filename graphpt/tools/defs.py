@@ -65,6 +65,54 @@ def _exec_db_write_adapter(
     return exec_db_write(arguments, db_file=db_file, task_id=task_id)
 
 
+def _norm_script(code: str) -> str:
+    """规范化脚本正文用于相似度比对（去注释/空白/大小写）。"""
+    lines = []
+    for raw in str(code or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", "//", "'", "<!--")):
+            continue
+        lines.append(line.lower().replace(" ", "").replace("\t", ""))
+    return "\n".join(lines)
+
+
+def _script_duplicate_hint(code: str, scripts_dir, ext: str) -> str:
+    """治理 K：与既有脚本的高相似度提示（昨夜 xss_test1→6 八分钟六版实锤）。
+
+    相似度 ≥85%（正文规范化后 difflib）即提示复用既有路径，避免脚本堆积
+    与同一攻击面重复重写。仅在 stdout 附加提示，不阻断执行（agent 可能
+    故意跑变体）。
+    """
+    if not code:
+        return ""
+    import difflib
+    norm = _norm_script(code)
+    if len(norm) < 40:
+        return ""
+    best_path = ""
+    best_ratio = 0.0
+    try:
+        for p in scripts_dir.glob(f"run_*{ext}"):
+            try:
+                if p.stat().st_size > 200_000:
+                    continue
+                other = _norm_script(p.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            if not other:
+                continue
+            ratio = difflib.SequenceMatcher(None, norm, other).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_path = str(p)
+    except OSError:
+        return ""
+    if best_ratio >= 0.85 and best_path:
+        return (f"\n[K-提示] 脚本与 {best_path} 正文相似度 {best_ratio:.0%}——"
+                "如需变体请直接编辑该文件，避免脚本堆积")
+    return ""
+
+
 def _exec_run_script(code: str, *, language: str = "python", timeout_s: int = 120, **_) -> dict[str, Any]:
     """run_script 执行器：写文件 → 子进程 → 完整输出。
 
@@ -103,10 +151,15 @@ def _exec_run_script(code: str, *, language: str = "python", timeout_s: int = 12
     out = (proc.stdout or "") + (("\n[stderr] " + proc.stderr) if proc.stderr.strip() else "")
     if len(out) > 20000:
         out = out[:20000] + f"\n...[输出截断 {len(out)} 字符]"
+    # 治理 K：高相似度脚本提示（只提示不阻断）
+    hint = _script_duplicate_hint(code, scripts_dir, ext)
+    if hint:
+        out += hint
     return {
         "stdout": out,
         "return_code": proc.returncode,
         "script_path": str(path),
+        "duplicate_hint": hint.strip() if hint else "",
         "success": proc.returncode == 0,
     }
 

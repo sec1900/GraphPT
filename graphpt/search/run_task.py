@@ -70,10 +70,29 @@ def _safe_close(client, target: str) -> None:
         pass
 
 
+def _flag_passes_dryrun(f: str, flag_format: str) -> bool:
+    """治理 M：提交前 dry-run 校验（格式 + body 非空/非占位）。
+
+    format_ok 的 `.*` 会放过 flag{}（空 body）——这里补上 body 语义检查。
+    """
+    from graphpt.ctf.extract import format_ok
+    if not format_ok(f, flag_format):
+        return False
+    if "{" in f and "}" in f:
+        body = f[f.index("{") + 1: f.rindex("}")].strip()
+        if not body or body in ("...", "…"):
+            return False
+    return True
+
+
 def _submit_flags(client, target: str, workdir: str, flag_format: str) -> dict:
-    """提交：FLAG 文件声明优先 + 输出提取；wrong 上限 3。"""
+    """提交：FLAG 文件声明优先 + 输出提取；wrong 上限 3。
+
+    治理 M：提交前 dry-run 校验——候选过 _flag_passes_dryrun（格式 + body 非空）；
+    不符直接跳过（不占 wrong 配额），日志留痕（治"0 提交却无原因"）。
+    """
     from graphpt.ctf.extract import extract_flags
-    out = {"submitted": 0, "correct": 0, "wrong": 0}
+    out = {"submitted": 0, "correct": 0, "wrong": 0, "rejected_by_format": 0}
     try:
         declared: set[str] = set()
         for name in ("FLAG", "flag.txt", "FLAG.txt"):
@@ -105,6 +124,11 @@ def _submit_flags(client, target: str, workdir: str, flag_format: str) -> dict:
             if out["wrong"] >= 3:
                 _log.warning("[run_task] 错误提交达上限，停止")
                 break
+            # 治理 M：提交前格式 dry-run——不符 flag_format 的候选不消耗配额
+            if not _flag_passes_dryrun(f, flag_format):
+                out["rejected_by_format"] += 1
+                _log.warning("[run_task] 提交前格式校验失败，跳过 flag=%r", f[:64])
+                continue
             try:
                 res = client.submit_flag(target, f)
             except Exception as e:  # noqa: BLE001

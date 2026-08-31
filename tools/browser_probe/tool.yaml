@@ -5,3 +5,5 @@ use_on:
     desc: "对 HTTPEndpoint 做浏览器渲染，发现隐藏的链接/表单/API"
     params:
       url: "{url}"
+# 治理 D：冷却窗（24h 内不重扫同一端点，防每 ~2h 重复探测）
+cooldown_hours: 24

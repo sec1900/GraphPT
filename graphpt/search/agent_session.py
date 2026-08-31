@@ -49,6 +49,25 @@ class _RollingBuf:
         return "".join(self._parts)
 
 
+class _CountingSink:
+    """治理 I：包装 _RollingBuf——始终计数工具输出（行动先行判据数据源）；
+    内容存储仅 kb_enabled 时开启。"""
+
+    def __init__(self, inner: _RollingBuf, store: bool):
+        self._inner = inner
+        self._store = store
+        self.hits = 0
+
+    def push(self, s: str):
+        self.hits += 1
+        if self._store:
+            return self._inner.push(s)
+        return 0
+
+    def text(self) -> str:
+        return self._inner.text()
+
+
 @dataclass
 class AgentTask:
     target: str
@@ -105,6 +124,70 @@ def _load_methodology() -> str:
         return str(parts.get("methodology", "") or "")
     except Exception:  # noqa: BLE001
         return ""
+
+
+# ── 治理 J：环境事实注入（会话首帧）────────────────────────────
+# 昨夜实锤：vsb9_scan.py 用 --noproxy 直连导致全部请求状态 0 + 把网络错误
+# 当 SQLi 证据（误报）；agent 手敲 nuclei -retry 与版本不兼容。本块把
+# 代理语义/工具版本/资产指纹档案作为事实注入，从源头杜绝同类误判。
+_gov_version_cache: tuple[float, str] = (0.0, "")
+
+
+def _nuclei_version_hint() -> str:
+    global _gov_version_cache
+    import time as _t
+    now = _t.time()
+    if now - _gov_version_cache[0] < 600:
+        return _gov_version_cache[1]
+    hint = ""
+    try:
+        import subprocess as _sp
+        for cand in (r"E:\GraphPT\tools\nuclei\nuclei.exe", "nuclei"):
+            try:
+                r = _sp.run([cand, "-version"], capture_output=True, text=True,
+                            timeout=10, check=False)
+                out = (r.stdout or "") + (r.stderr or "")
+                import re as _re
+                m = _re.search(r"nuclei\+?\s*([\d.]+)", out, _re.I)
+                if m:
+                    hint = f"nuclei {m.group(1)}（E:/GraphPT/tools/nuclei/；参数集以该版本为准，不要臆造未装参数，如 -retry 旧版不存在）"
+                    break
+            except Exception:
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    _gov_version_cache = (now, hint)
+    return hint
+
+
+def _gov_env_block(task: AgentTask) -> str:
+    """环境事实块：代理语义 + 资产指纹档案 + 工具版本。失败逐项降级。"""
+    import os as _os
+    parts: list[str] = []
+    # 1) 代理语义（vsb9 误报根治）
+    http_proxy = _os.getenv("http_proxy") or _os.getenv("HTTP_PROXY") or ""
+    proxy_note = "（env 未设 http_proxy）" if not http_proxy else f"http_proxy={http_proxy}"
+    parts.append(
+        "## 环境事实（权威，勿自行猜测）\n"
+        f"- 代理：{proxy_note}；**经代理访问目标是常态，直连（--noproxy/requests 无代理）"
+        "通常不可达**——连接超时/状态 0 先查代理，不要判定目标故障，更不要以"
+        "错误文本当漏洞证据（历史教训：curl 异常文本含 'error' 曾被误报为 SQLi）。\n"
+        f"- 工具版本：{_nuclei_version_hint() or 'nuclei 未探测到版本；用 E:/GraphPT/tools/nuclei/nuclei.exe 执行'}\n"
+    )
+    # 2) 资产指纹档案（治理 G 消费方：命中档案直接给攻击面提示）
+    try:
+        asset_key = task.project or task.target
+        if asset_key and not asset_key.lower().startswith(("testfire", "ctf")):
+            from graphpt.common.fingerprint_profiles import (
+                asset_fingerprint_summary, profile_hint_text,
+            )
+            summary = asset_fingerprint_summary(asset_key)
+            hint = profile_hint_text(summary.get("profiles") or [])
+            if hint:
+                parts.append(f"## 目标指纹档案（已识别产品 → 已知攻击面）\n{hint}\n")
+    except Exception:  # noqa: BLE001 — 指纹不可用不影响会话
+        pass
+    return "\n".join(parts)
 
 
 def build_unified_system(task: AgentTask) -> str:
@@ -200,8 +283,10 @@ def build_unified_system(task: AgentTask) -> str:
             )
     except Exception as e:  # noqa: BLE001
         _log.warning("build_unified_system graph_block failed: %s", e)
-    return (identity + "\n\n" + methodology + "\n" + common_methodology
-            + "\n" + spec_block + graph_block).strip()
+    # 治理 J：环境事实块（代理/工具版本/资产指纹档案）置于方法论之后
+    env_block = _gov_env_block(task)
+    return ("\n\n".join(x for x in (identity, methodology, common_methodology,
+                                     env_block, spec_block, graph_block) if x)).strip()
 
 
 def build_unified_user(task: AgentTask) -> str:
@@ -308,12 +393,17 @@ class AgentSession:
 
         # 组件经验注入准备（kb_inject 且 env 开启时）：滚动缓冲承接主循环
         # 工具输出的流式快照，steering 每轮识别组件 → 命中 earned 卡注入一次。
-        _recent_out = _RollingBuf(12000)
+        # 治理 I：用计数包装（始终计数工具输出；存储内容仅 kb_enabled 时）。
         _kb_injected: set[str] = set()
         _kb_enabled = (
             bool(task.kb_inject)
             and os.environ.get("GRAPHPT_KBCARD_INJECT", "1") != "0"
         )
+        # 治理 I：行动先行判据——工具输出计数（无论 kb 开否都计数；
+        # 昨夜 jwgl 轮次 1.5-2.1M token 仅对应 ~35 次工具调用 = 思维空转）
+        _action_state = {"steers": 0, "nudge_sent": False}
+        _sink_store = _kb_enabled
+        _recent_out = _CountingSink(_RollingBuf(12000), _sink_store)
 
         def _watchdog():
             while not stop_evt.is_set():
@@ -326,6 +416,18 @@ class AgentSession:
 
         def _steering() -> list[str]:
             messages: list[str] = []
+            # 治理 I：行动先行信号（每迭代注入一次判定）
+            _action_state["steers"] += 1
+            if not _action_state["nudge_sent"]:
+                n = _action_state["steers"]
+                hits = _recent_out.hits
+                if n >= 12 and hits < max(4, int(n * 0.4)):
+                    _action_state["nudge_sent"] = True
+                    messages.append(
+                        "【系统提醒-行动先行】已连续多轮几乎没有工具调用——停止空想，"
+                        "立刻执行最小可行动作（一个 curl/http_test/脚本查询），"
+                        "以真实输出推进；若无路可走就写结论收尾，不要空转。"
+                    )
             if steering_provider is not None:
                 try:
                     messages.extend(steering_provider() or [])
@@ -375,9 +477,8 @@ class AgentSession:
                 force_tool_use=True,
                 prior_messages=prior_messages,
                 steering_provider=_steering,
-                tool_output_sink=(
-                    _recent_out.push if _kb_enabled else None
-                ),
+                # 治理 I：计数 sink 无条件接入（内容存储仅 kb_enabled）
+                tool_output_sink=_recent_out.push,
             )
             res.final_text = loop_result.final_text or ""
             res.iterations = loop_result.iterations

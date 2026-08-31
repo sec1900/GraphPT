@@ -7,12 +7,12 @@ selectors:
       CALL (a, a) {
         WITH a
         MATCH (a)-[:HAS_DOMAIN]->(:Domain)-[:PARENT_OF*0..]->(:Domain)-[:RESOLVES_TO]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url AND ( $cooldown_hours <= 0 OR coalesce(sr.finished_at, '') < (datetime() - duration({hours: $cooldown_hours})) ) }
         RETURN ep
         UNION
         WITH a
         MATCH (a)-[:HAS_IP]->(:IP)-[:HAS_PORT]->(:Port)-[:EXPOSES]->(ep:HTTPEndpoint)
-        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+        WHERE NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url AND ( $cooldown_hours <= 0 OR coalesce(sr.finished_at, '') < (datetime() - duration({hours: $cooldown_hours})) ) }
         RETURN ep
       }
       WITH DISTINCT ep

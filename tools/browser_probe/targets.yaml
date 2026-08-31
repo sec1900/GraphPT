@@ -13,7 +13,7 @@ selectors:
       }
       WITH DISTINCT ep
       WHERE ep.status_code = 200
-        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url AND ( $cooldown_hours <= 0 OR coalesce(sr.finished_at, '') < (datetime() - duration({hours: $cooldown_hours})) ) }
       RETURN ep.url AS url
     mapping:
       url: "{url}"

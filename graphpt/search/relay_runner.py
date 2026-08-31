@@ -134,17 +134,26 @@ def run_relay(
     objective: str = "",
     rounds: tuple[int, ...] = DEFAULT_ROUNDS,
     max_dry: int = MAX_DRY_DEFAULT,
+    max_tokens: int = 1_200_000,   # 治理 H：域级 token 预算（昨夜 3.9M/域 0 产出）
     on_round: callable = None,
     submit_each_round: callable = None,   # CTF：每轮后提交一次（返回 {"correct": n}）
     platform_done: callable = None,       # CTF：平台是否已完成
 ) -> dict:
-    """多轮接力主流程。返回与 run_task 同构的结果 dict（pool 兼容）。"""
+    """多轮接力主流程。返回与 run_task 同构的结果 dict（pool 兼容）。
+
+    治理 H（预算硬约束）：
+      - max_tokens：累计 token 达预算即停（昨夜 gzky 3 轮 3.9M / jwgl 4 轮 6.8M
+        无界接力 → 记账停机），返回 stopped_by="token_budget"。
+      - 干跑判据收紧：无实质事实（board 计数）**且**本轮零工具调用 → 也算干跑
+        （思维空转轮不等同于探索）。
+    """
     from graphpt.search.agent_session import AgentSession, AgentTask
 
     project = project or target
     out = {"ok": False, "rounds": 0, "dry": 0, "iterations": 0,
            "tokens_used": 0, "facts_added": 0, "submitted": 0,
-           "correct": 0, "completed": False, "target": target, "err": ""}
+           "correct": 0, "completed": False, "target": target, "err": "",
+           "stopped_by": ""}
     tried: list[str] = []
     bg_facts = _board_quick_count(project, "facts")   # 轮前基线
     bg_flags = _board_quick_count(project, "flags")
@@ -173,6 +182,14 @@ def run_relay(
             out["iterations"] += r.iterations
             out["tokens_used"] += r.tokens_used
             out["facts_added"] += r.facts_added
+            # 治理 H：token 预算记账停机
+            if max_tokens and out["tokens_used"] >= max_tokens:
+                out["stopped_by"] = "token_budget"
+                _log.warning(
+                    "[relay] %s 已用 %d tokens（预算 %d），预算停机",
+                    target, out["tokens_used"], max_tokens,
+                )
+                break
             # 收集本轮命令足迹（防下轮重复探测；会话工具调用的 arguments 太杂，取 Bash/http_test 命令摘要）
             for tc in r.tool_calls or []:
                 name = str(tc.get("name") or tc.get("tool_name") or "")
@@ -204,13 +221,21 @@ def run_relay(
                 except Exception as e:  # noqa: BLE001
                     _log.warning("[relay] platform_done 失败: %s", e)
 
-            # 干跑止损：本轮无新增实质事实且无新 flag → dry+1；否则清零
+            # 干跑止损：本轮无新增实质事实（且无新 flag）或本轮零工具调用 → dry+1
             nf = _board_quick_count(project, "facts")
             nfl = _board_quick_count(project, "flags")
-            if nf >= 0 and nfl >= 0 and nf <= bg_facts and nfl <= bg_flags:
+            zero_tool_round = not bool(r.tool_calls)
+            is_dry = zero_tool_round or (
+                nf >= 0 and nfl >= 0 and nf <= bg_facts and nfl <= bg_flags)
+            if is_dry:
                 out["dry"] += 1
-                _log.warning("[relay] %s 第 %d 轮干跑（facts %d→%d）", target, i + 1, bg_facts, nf)
+                _log.warning(
+                    "[relay] %s 第 %d 轮干跑（facts %d→%d, tools=%d）",
+                    target, i + 1, bg_facts, nf,
+                    len(r.tool_calls or []),
+                )
                 if out["dry"] >= max_dry:
+                    out["stopped_by"] = "dry" if not out["stopped_by"] else out["stopped_by"]
                     _log.warning("[relay] %s 连续 %d 轮干跑，止损退出", target, max_dry)
                     break
             else:

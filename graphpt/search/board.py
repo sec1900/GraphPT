@@ -91,6 +91,35 @@ CREATE INDEX IF NOT EXISTS idx_board_intents_project ON board_intents(project, s
 _FACT_LIMIT = 2000
 _GROUNDING_LIMIT = 600
 
+# ── 治理 L：事实质量门 ──
+# 昨夜 41 条 facts 几乎全是零价值：conclude-anchor 的"会话总结 25 轮 / 411s"、
+# "base64.js 存在"类无锚琐事。只有两类事实进板：
+#   ① 资产属性型（含 URL/路径/状态码/接口——下游工具可消费）
+#   ② 假设型（可证伪、应带 grounding）
+# 以下噪音直接拒绝（降级日志，不落板）：
+#   - conclude-anchor 锚点与任何"会话总结 N 轮 / Ns"统计形态
+#   - 无 grounding 且描述过短的空洞断言（<14 字符且无 URL/路径特征）
+import re as _re_stat
+_SESSION_STAT_RE = _re_stat.compile(r"会话.*\d+\s*轮.*\d+s|^\d+\s*轮\s*/\s*\d+s|\d+ 轮 / \d+s")
+_ACTIONABLE_HINT = _re_stat.compile(
+    r"https?://|/\w[\w.-]{1,64}|/api/|/v\d/|(接口|路径|状态|URL|cookie|header)",
+    _re_stat.I)
+
+
+def _fact_passes_quality_gate(source: str, description: str, grounding: str) -> bool:
+    """质量门：只放行可消费事实。返回 True=写入。"""
+    desc = (description or "").strip()
+    if not desc:
+        return False
+    if source == "conclude-anchor":
+        return False
+    if _SESSION_STAT_RE.search(desc):
+        return False
+    if not (grounding or "").strip() and len(desc) < 14:
+        if not _ACTIONABLE_HINT.search(desc):
+            return False
+    return True
+
 # claimed 租约过期阈值：explore 时间盒上限 600s（可配置）+ 收尾/排空余量。
 # 无进程调用 heartbeat_intent（claimed_at 即静止心跳），进程被杀时无法 release，
 # 超过该阈值即视为 claim 失效 → 惰性复活回 open。
@@ -153,9 +182,18 @@ class Board:
 
     def add_fact(self, project: str, description: str, *, source: str = "conclude",
                  grounding: str = "", session_idx: int = 0, verified: int = 0) -> tuple[int, bool]:
-        """追加一条事实。UNIQUE(project, description) 去重。返回 (id, added)。"""
+        """追加一条事实。UNIQUE(project, description) 去重。返回 (id, added)。
+
+        治理 L：写入前过质量门——锚点/会话统计/空洞断言直接拒（降级日志）。
+        """
         description = (description or "").strip()
         if not description:
+            return 0, False
+        if not _fact_passes_quality_gate(source, description, grounding):
+            _log.info(
+                "board fact_rejected source=%s project=%s desc=%r",
+                source, project, (description or "")[:80],
+            )
             return 0, False
         if not self._ok:
             return 0, False

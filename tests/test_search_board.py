@@ -66,7 +66,8 @@ def test_board_local() -> None:
     check("dedup same description", not added2 and pid2 == 0)
     b.add_fact("p-1", "弱口令 admin/admin 有效", source="conclude", grounding="admin:admin")
     b.add_fact("p-1", "flag 候选：flag{abc123}", source="conclude", grounding="flag{abc123}")
-    b.add_fact("p-1", "已排除目录枚举", source="conclude", verified=0)
+    # 治理 L：无 grounding 的空洞断言被质量门拒绝——这里补线索保持可写入
+    b.add_fact("p-1", "已排除目录枚举（/robots.txt 404）", source="conclude", verified=0)
     b.add_fact("p-2", "另一题的独立事实", source="session")
 
     facts = b.recent_facts("p-1", limit=10)
@@ -279,14 +280,13 @@ def test_session_flow_without_model() -> None:
     check("no FLAG file written without grounding", not os.path.isfile(os.path.join(wdir, "FLAG")))
     log_body = open(os.path.join(wdir, "session_0.log"), encoding="utf-8").read()
     check("session log contains outputs", "flag{a1b2c3}" in log_body and "登录成功" in log_body)
-    # 无 AI env → board 只应有 1 条保底"会话锚点"事实（conclude 不可用时的最小产出）
+    # 治理 L（2026-08-31）：conclude-anchor 锚点与"会话结束 N 轮"统计事实
+    # 已移出 board（零价值噪音，昨夜 41 条 facts 实证）→ 无 AI env 时板子应为空
     from graphpt.search.board import Board
     b = Board()
     try:
         anchor = b.recent_facts("it-01")
-        check("anchor fact written without model", len(anchor) == 1)
-        check("anchor fact is unified-session summary",
-              "会话结束" in anchor[0]["description"])
+        check("no anchor fact without model (governance L)", len(anchor) == 0)
     finally:
         b.close()
 

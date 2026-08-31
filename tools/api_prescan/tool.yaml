@@ -6,3 +6,5 @@ use_on:
     command: "python {tool_dir}/run_api_prescan.py --target {url} --workspace data/api_scan"
     params:
       url: "{url}"
+# 治理 D：冷却窗（24h 内不重扫同一端点，防每 ~2h 重复探测）
+cooldown_hours: 24

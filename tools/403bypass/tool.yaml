@@ -8,3 +8,5 @@ use_on:
       url: "{url}"
       target_id: "{target_id}"
       tech: ""
+# 治理 D：冷却窗（24h 内不重扫同一端点，防每 ~2h 重复探测）
+cooldown_hours: 24

@@ -385,7 +385,11 @@ def main() -> int:
     ap.add_argument("--url", required=True, help="要绕过的 403 资源完整 URL")
     ap.add_argument("--target-id", default="", help="HTTPEndpoint 节点 id（回写用）")
     ap.add_argument("--timeout", type=float, default=_DEFAULT_TIMEOUT, help="单请求超时秒数")
-    ap.add_argument("--waf", default="", help="WAF/tech 类型 (逗号分隔)，用于选择专用绕过 payload")
+    # 治理 E：--waf 允许无值（tool.yaml 在 tech 为空时生成 `--waf ` 尾参，
+    # argparse 默认会报 expected one argument → 该批次直接失败。
+    # nargs='?' + const='' 使 `--waf` 无值时取空串（WAF 自适应降级为通用 payload）。
+    ap.add_argument("--waf", nargs="?", const="", default="",
+                    help="WAF/tech 类型 (逗号分隔)，用于选择专用绕过 payload")
     args = ap.parse_args()
 
     out = run(args.url, args.target_id, args.timeout, args.waf)

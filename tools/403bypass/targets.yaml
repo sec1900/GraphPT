@@ -20,7 +20,7 @@ selectors:
       }
       WITH DISTINCT ep
       WHERE (ep.status_code = 403 OR 'protected' IN coalesce(ep.roles, []))
-        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url }
+        AND NOT EXISTS { MATCH (sr:ScanRun) WHERE sr.tool = $tool AND sr.target = ep.url AND ( $cooldown_hours <= 0 OR coalesce(sr.finished_at, '') < (datetime() - duration({hours: $cooldown_hours})) ) }
       RETURN ep.id AS id, ep.url AS url, coalesce(ep.fingerprint, []) AS tech
     mapping:
       url: '{url}'

@@ -123,6 +123,22 @@ def _classify_url(url: str) -> str:
     return "page"
 
 
+def _browser_available() -> bool:
+    """Playwright chromium 可执行文件是否已安装（治理 E 自检）。
+
+    昨夜实锤：4 次调用全部 `p.chromium.launch` 崩溃拖满超时。浏览器内核
+    缺失时**立即**快速失败（exit 2），不再重试烧扫描时间。
+    """
+    try:
+        from pathlib import Path as _Path
+        from playwright.sync_api import sync_playwright as _sp
+        with _sp() as p:
+            exe = p.chromium.executable_path
+            return bool(exe) and _Path(exe).is_file()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def main():
     ap = argparse.ArgumentParser(description="Browser-driven endpoint discovery")
     ap.add_argument("--url", required=True, help="Target URL")
@@ -130,14 +146,21 @@ def main():
     ap.add_argument("--timeout", type=int, default=TIMEOUT, help="Page load timeout (ms)")
     args = ap.parse_args()
 
+    # 治理 E3：playwright 内核缺失 → 立即快速失败（不再拖满 600s 硬超时）
+    if not _browser_available():
+        sys.stderr.write("[E] browser_probe: Playwright chromium not installed — run "
+                         "'python -m playwright install chromium' (governance E)\n")
+        return 2
+
     target = args.url
     if "://" not in target:
         target = "http://" + target
 
     results = []
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             ignore_https_errors=True,
@@ -214,6 +237,12 @@ def main():
             })
         finally:
             browser.close()
+
+    except Exception as e:
+        # 治理 E3：启动级失败（内核损坏等）→ 可读错误写入 stderr，快速失败
+        sys.stderr.write("[E] browser_probe launch failed: {} {} (governance E: "
+                         "playwright environment)\n".format(type(e).__name__, str(e)[:300]))
+        return 2
 
     if args.json:
         for r in results:

@@ -235,7 +235,38 @@ def _find_tool(tool: str) -> str | None:
     return _tasks_find_tool(_base_tool(tool))
 
 
+def _sanitize_python_argv(cmd: list[str]) -> tuple[list[str], str]:
+    """治理 E：python 包装命令参数合法性防御（昨夜 MZ 错误实锤）。
+
+    症状：`C:\\Python314\\python.EXE` 被当作被解释的脚本文件 ->
+    `File "C:\\Python314\\python.EXE", line 1 MZ ... SyntaxError`（worker 侧
+    拼装链曾多次复现）。规则：
+      - argv[0] 是解释器时，argv[1] 必须存在且不得以 .exe 结尾
+        （python.exe 不能当脚本被 python 跑）。
+      - 校验失败返回 (原始 cmd, 错误消息)，调用方用消息拒绝执行并快速失败。
+    """
+    if not cmd:
+        return cmd, ""
+    head = os.path.basename(str(cmd[0])).lower()
+    if head.startswith("python") and len(cmd) >= 2:
+        second = str(cmd[1]).lower().replace("/", "\\")
+        if second.endswith(".exe") and not second.endswith(("python.exe", "pythonw.exe")):
+            return cmd, (
+                f"invalid python script argv: {cmd[0]!r} -> {cmd[1]!r} (interpreter can't run .exe)"
+            )
+        if second.endswith(".exe"):
+            return cmd, (
+                f"python invoked with python.exe as script: {cmd[1]!r} "
+                "(command assembly bug — see governance E)"
+            )
+    return cmd, ""
+
+
 def _split_command(command: str) -> list[str]:
+    """懒加载 tasks._split_command，避免 Celery app 注册时循环导入。"""
+    from graphpt.collector.tasks import _split_command as _tasks_split_command
+
+    return _tasks_split_command(command)
     """懒加载 tasks._split_command，避免 Celery app 注册时循环导入。"""
     from graphpt.collector.tasks import _split_command as _tasks_split_command
 
@@ -580,6 +611,25 @@ def _preselect_nuclei_templates(bin_path: str, cmd_str: str) -> str:
         return new_cmd + f" -t {tpl_list}"
     except Exception:
         return cmd_str
+
+
+def _load_tool_cooldown_hours(tool: str) -> float:
+    """读 tools/{tool}/tool.yaml 的 `cooldown_hours`（默认 0 = 不冷却）。
+
+    治理 D：探测冷却窗——403bypass/api_prescan/browser_probe 类高频重扫
+    工具在 ScanRun 去重之外再加时间冷却（昨夜实测每 ~2h 重跑同一批端点）。
+    """
+    try:
+        import yaml as _yaml
+        from pathlib import Path as _Path
+        tf = _Path(__file__).resolve().parent.parent.parent / "tools" / tool / "tool.yaml"
+        if tf.is_file():
+            cfg = _yaml.safe_load(tf.read_text(encoding="utf-8")) or {}
+            hours = float(cfg.get("cooldown_hours") or 0)
+            return max(0.0, hours)
+    except Exception:  # noqa: BLE001
+        pass
+    return 0.0
 
 
 def _load_target_selectors() -> dict[str, dict[str, Any]]:
@@ -934,6 +984,12 @@ class PipelineExecutor:
             w = get_graph_writer()
             with w._driver.session() as s:
                 qparams = {"asset_id": self.asset_id, "tool": tool}
+                # 治理 D：冷却窗参数注入（tool.yaml `cooldown_hours`）。
+                # targets.yaml 里的 ScanRun 去重条件可写
+                #   `AND ( $cooldown_hours <= 0 OR coalesce(sr.finished_at,'') <
+                #         (datetime() - duration({hours: $cooldown_hours})) )`
+                # 默认 0 = 不冷却，行为与旧版一致；>0 时冷却窗内不算待处理目标。
+                qparams["cooldown_hours"] = _load_tool_cooldown_hours(tool)
                 if config_sensitive:
                     qparams["config_hash"] = config_hash
                 for k, v in self.ctx.items():
@@ -1286,6 +1342,18 @@ class PipelineExecutor:
                 if not isinstance(url_list, list):
                     url_list = [url_list] if url_list else []
                 if url_list:
+                    # 治理 D：URL 归一化 + 去重后落盘。
+                    # 昨夜实证：同一 host 的变体（42.123.114.73/ vs :443 vs //path）
+                    # 逐个进入工具输入 → 同一目标重复扫描；垃圾 URL 33698 行/批次。
+                    # normalize_url 修 scheme/缺省端口/大小写/斜杠；空值剔除。
+                    from graphpt.common.asset_identity import normalize_url as _norm_url
+                    _canonical: list[str] = []
+                    _seen: set[str] = set()
+                    for u in url_list:
+                        cu = _norm_url(str(u or ""))
+                        if cu and cu not in _seen:
+                            _seen.add(cu)
+                            _canonical.append(cu)
                     (_PROJECT_ROOT / "data" / "tmp").mkdir(parents=True, exist_ok=True)
                     with tempfile.NamedTemporaryFile(
                         mode="w", suffix=".txt", delete=False,
@@ -1293,7 +1361,7 @@ class PipelineExecutor:
                         dir=str(_PROJECT_ROOT / "data" / "tmp"),
                         newline='\n'
                     ) as tmp:
-                        for u in url_list:
+                        for u in _canonical:
                             tmp.write(str(u) + "\n")
                         self.ctx["urls_file"] = tmp.name
 
@@ -1317,6 +1385,22 @@ class PipelineExecutor:
                 cmd_str = _preselect_nuclei_templates(str(self.ctx.get("bin", "")), cmd_str)
 
             cmd = _split_command(cmd_str)
+
+            # 治理 E：python 包装命令防御——解释器把 .exe 当脚本即拼装错误
+            # （昨夜 api_prescan 的 `File "C:\Python314\python.EXE", line 1 MZ`
+            #  实锤为该形态）。命中直接快速失败并留痕，不再空等超时才报错。
+            _cmd, _argv_err = _sanitize_python_argv(cmd)
+            if _argv_err:
+                errors.append({
+                    "tool": tool,
+                    "target": _target_label(tgt),
+                    "kind": "invalid_argv",
+                    "message": _argv_err,
+                    "command": cmd_str,
+                })
+                _cleanup_iteration_file()
+                continue
+            cmd = _cmd
 
             # 工具自产文件重定向：brutespray 的 checkpoint 默认写进程 cwd（项目根），
             # 注入 -checkpoint 到工具日志目录，避免污染项目根。
