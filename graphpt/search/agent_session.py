@@ -462,9 +462,14 @@ class AgentSession:
 
         try:
             effective_stop_event = stop_event or stop_evt
+            # M5：环境预检注入首帧（解释器/PATH/缺失能力替代/字典警示，幂等）
+            from graphpt.core.env_probe import inject_env_probe
+            _sys_prompt = inject_env_probe(
+                task.system_prompt_override or build_unified_system(task),
+                workdir=str(workdir))
             loop_result = run_agent_loop(
                 ai_config=self.ai_config,
-                system_prompt=task.system_prompt_override or build_unified_system(task),
+                system_prompt=_sys_prompt,
                 user_prompt=task.user_prompt_override or build_unified_user(task),
                 tools=self._tools(),
                 max_iterations=task.max_iterations,

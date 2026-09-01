@@ -159,14 +159,20 @@ def check_bash(cmd: str, task_id: int = 0, *, repeat_cap: int = 3, lenient: bool
 
 
 def check_http(args: dict, task_id: int = 0, *, repeat_cap: int = 3, lenient: bool | None = None) -> str | None:
-    """http_test 重复请求拦截：同 URL+方法+body+cookies 拦截。"""
+    """http_test 重复请求拦截（M5 结构化指纹）：方法+规范化URL+参数键+body hash+cookie hash。
+
+    同 URL 不同 payload（SQLi 变体/参数值枚举）→ 指纹不同 → 不误杀；
+    完全相同的请求 → 拦截。
+    """
     if not enabled():
         return None
     if lenient is None:
         lenient = _is_ctf_session()
     a = args or {}
-    key = (str(a.get("url", "")), str(a.get("method", "GET")),
-           str(a.get("data", "")), str(a.get("cookies", "")))
+    from graphpt.core.diff_batch import request_fingerprint
+    key = request_fingerprint(
+        str(a.get("method", "GET")), str(a.get("url", "")),
+        str(a.get("data", "")), str(a.get("cookies", "")))
     with _lock:
         st = _states[task_id]
         st.http_counts[key] += 1
