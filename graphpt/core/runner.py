@@ -607,6 +607,7 @@ def _call_ai_raw_single(
 
     Messages API 模式自动走流式请求再拼接，兼容只支持流式的代理服务。
     """
+    from graphpt.core.trace import emit  # M1 遥测
     _wire = (cfg.wire_api or "").strip().lower()
     if _wire in ("messages", "v1/messages", "anthropic"):
         return _call_ai_raw_via_stream(cfg, url, payload)
@@ -635,12 +636,19 @@ def _call_ai_raw_single(
     last_error: Exception | None = None
 
     for attempt in range(cfg.max_retries + 1):
+        emit("llm_request_start", model=cfg.model, attempt=attempt, wire=_wire)
+        _t0 = time.monotonic()
         try:
             _open_fn = _opener.open if _opener else urllib.request.urlopen
             with _open_fn(req, timeout=cfg.timeout_s) as resp:
+                _t_first = time.monotonic()
                 body = resp.read()
                 text = _safe_decode(body)
                 parsed = json.loads(text)
+                emit("llm_completion_end", model=cfg.model, attempt=attempt,
+                     duration_s=round(time.monotonic() - _t0, 4),
+                     first_token_s=round(_t_first - _t0, 4),
+                     ok=True)
                 return parsed
         except urllib.error.HTTPError as exc:
             detail = ""
@@ -657,7 +665,11 @@ def _call_ai_raw_single(
                 retryable=retryable_http_error,
                 meta={"status": exc.code, "phase": "request_open"},
             )
+            emit("llm_completion_end", model=cfg.model, attempt=attempt,
+                 duration_s=round(time.monotonic() - _t0, 4), ok=False,
+                 error=f"http_{exc.code}")
             if attempt < cfg.max_retries and retryable_http_error:
+                emit("llm_retry", model=cfg.model, attempt=attempt, code=exc.code)
                 if exc.code == 429:
                     retry_after = exc.headers.get("Retry-After") if exc.headers else None
                     if retry_after:
@@ -861,6 +873,17 @@ def _call_ai_raw_stream_single(
         nonlocal success_recorded
         success_recorded = True
 
+    # M1 遥测：流式首 token 与完成时刻（TTFT / 总时延 / 网关重试）
+    from graphpt.core.trace import emit
+    _t_req = time.monotonic()
+    _t_first: float | None = None
+    emit("llm_request_start", model=cfg.model, attempt=attempt, wire=_wire, stream=True)
+
+    def _mark_first() -> None:
+        nonlocal _t_first
+        if _t_first is None:
+            _t_first = time.monotonic()
+
     # 检查 Content-Type：若非 event-stream 则退回一次性读取
     ct = resp.headers.get("Content-Type", "")
     if "text/event-stream" not in ct:
@@ -869,6 +892,9 @@ def _call_ai_raw_stream_single(
             text = _safe_decode(body)
             parsed = json.loads(text)
             _mark_success()
+            emit("llm_completion_end", model=cfg.model, attempt=attempt,
+                 duration_s=round(time.monotonic() - _t_req, 4),
+                 first_token_s=round((_t_first or _t_req) - _t_req, 4), ok=True)
             yield parsed
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             err_text = str(exc)
@@ -880,6 +906,9 @@ def _call_ai_raw_stream_single(
                 retryable=not success_recorded,
                 meta={"phase": "stream_read"},
             )
+            emit("llm_completion_end", model=cfg.model, attempt=attempt,
+                 duration_s=round(time.monotonic() - _t_req, 4), ok=False,
+                 error="stream_read_failed")
             if not success_recorded:
                 pass
             raise read_error from exc
@@ -894,6 +923,7 @@ def _call_ai_raw_stream_single(
             if not raw_line:
                 break
             _mark_success()
+            _mark_first()
             line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
             if not line:
                 continue

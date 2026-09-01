@@ -231,6 +231,11 @@ def execute_tool(
     if sys.platform == "win32":
         _inject_tool_env(command, proc_env)
 
+    # M1 遥测：工具两段计时（tool_start/tool_end，含超时/退出码）
+    from graphpt.core.trace import emit
+    _tool_cmd = " ".join(str(x) for x in command)[:200]
+    emit("tool_start", cmd=_tool_cmd, cwd=str(cwd or ""))
+
     start = time.monotonic()
     try:
         proc = subprocess.Popen(
@@ -244,14 +249,20 @@ def execute_tool(
     except FileNotFoundError:
         result.error = f"command_not_found: {command[0]}"
         result.duration_s = time.monotonic() - start
+        emit("tool_end", cmd=_tool_cmd, duration_s=round(result.duration_s, 4),
+             exit_code=None, error=result.error)
         return result
     except PermissionError:
         result.error = f"permission_denied: {command[0]}"
         result.duration_s = time.monotonic() - start
+        emit("tool_end", cmd=_tool_cmd, duration_s=round(result.duration_s, 4),
+             exit_code=None, error=result.error)
         return result
     except OSError as exc:
         result.error = f"exec_error: {exc}"
         result.duration_s = time.monotonic() - start
+        emit("tool_end", cmd=_tool_cmd, duration_s=round(result.duration_s, 4),
+             exit_code=None, error=result.error)
         return result
 
     try:
@@ -322,6 +333,9 @@ def execute_tool(
                     result.duration_s = time.monotonic() - start
                     result.stdout = _decode_output(stdout_bytes)
                     result.stderr = _decode_output(stderr_bytes)
+                    emit("tool_end", cmd=_tool_cmd, duration_s=round(result.duration_s, 4),
+                         exit_code=result.return_code, timed_out=result.timed_out,
+                         error=result.error)
                     return result
                 try:
                     stdout_bytes, stderr_bytes = proc.communicate(timeout=min(0.2, remaining))
@@ -343,6 +357,8 @@ def execute_tool(
         result.stdout = _decode_output(stdout_bytes)
         result.stderr = _decode_output(stderr_bytes)
         result.truncated = False
+        emit("tool_end", cmd=_tool_cmd, duration_s=round(result.duration_s, 4),
+             exit_code=result.return_code, timed_out=result.timed_out, error=result.error)
         return result
 
     result.duration_s = time.monotonic() - start
@@ -350,6 +366,8 @@ def execute_tool(
     result.stdout = _decode_output(stdout_bytes)
     result.stderr = _decode_output(stderr_bytes)
     result.truncated = False
+    emit("tool_end", cmd=_tool_cmd, duration_s=round(result.duration_s, 4),
+         exit_code=result.return_code, timed_out=result.timed_out, error=result.error)
 
     # 输出格式验证回调
     if output_validator is not None and result.success:

@@ -153,6 +153,7 @@ class AgentLoopResult:
     total_cache_miss_tokens: int = 0  # KV cache 未命中的输入 token 累计
     messages: list[dict[str, Any]] = field(default_factory=list)  # 完整对话历史
     iterations: int = 0
+    duration_s: float = 0.0   # M1 遥测：会话墙钟耗时（由 run_agent_loop 结束写入）
 
 
 def _compact_old_tool_outputs(
@@ -1215,6 +1216,12 @@ def run_agent_loop(
     # wrap 一下（加 ↳ 前缀）传给子 run_agent_loop，让子代理状态可视。
     _status_token = _AGENT_ON_STATUS.set(on_status) if on_status is not None else None
 
+    # M1 遥测：会话 scope 绑定（contextvar）+ 结束落盘 trace.jsonl
+    from graphpt.core.trace import set_session as _trace_set, dump_session as _trace_dump
+    _trace_key = f"{task_id}:{session_role or 'anon'}:{step_id or 0}"
+    _trace_set(_trace_key)
+    _t_loop_start = time.monotonic()
+
     from graphpt.common.settings import is_debug as _is_debug
     _debug = _is_debug()
     _ctx_budget = {"n": 0}  # 上下文超限 429 启发式压缩次数预算（见 retryable 分支）
@@ -1764,6 +1771,15 @@ def run_agent_loop(
     _AGENT_RUN_CONTEXT.reset(_ctx_token)
     if _status_token is not None:
         _AGENT_ON_STATUS.reset(_status_token)
+    # M1 遥测：会话结束落盘 trace.jsonl（workdir），并解绑 scope
+    try:
+        result.duration_s = round(time.monotonic() - _t_loop_start, 2)
+        _trace_path = os.path.join(str(workspace_root), "trace.jsonl") \
+            if workspace_root else ""
+        if _trace_path:
+            _trace_dump(_trace_key, _trace_path)
+    except Exception:  # noqa: BLE001
+        pass
     return result
 
 
