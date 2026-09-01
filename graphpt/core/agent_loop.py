@@ -1304,6 +1304,35 @@ def run_agent_loop(
                     role=session_role, messages=messages,
                 )
 
+        # 内核信号机制（M2）：不依赖域 steering——本循环内直接喂工具输出进
+        # 信号板，产出主假设钉住/换面指令。任何域自动生效（CTF/SRC/测绘）。
+        # 前提：域/调用方已用 trace.set_session 绑定会话 key。
+        try:
+            from graphpt.core.signals import get_board, reset_board
+            from graphpt.core.trace import current_session as _trace_cur, emit as _trace_emit
+            _sb_key = _trace_cur() or f"{task_id}:{session_role}"
+            if iteration == 0:
+                reset_board(_sb_key)
+            _board = get_board(_sb_key)
+            # 上一轮工具输出 feed 进信号板（顺带注入差异摘要由域 steering 处理）
+            _last_tool_out = ""
+            if all_tool_records:
+                _rec = all_tool_records[-1]
+                _out = _rec.get("result") or {}
+                if isinstance(_out, dict):
+                    _last_tool_out = str(_out.get("stdout") or _out.get("output") or "")
+                else:
+                    _last_tool_out = str(_out)
+            if _last_tool_out:
+                _board.feed(_last_tool_out, emit_trace=_trace_emit)
+            _hyp_msg = _board.decide_hypothesis(iteration)
+            if _hyp_msg:
+                messages.append({"role": "user", "content": _hyp_msg})
+                _trace_emit("steering_injected", kind="signal_hypothesis",
+                            text=_hyp_msg[:120])
+        except Exception:  # noqa: BLE001 — 信号机制故障不中断主循环
+            pass
+
         # Hook: llm_call
         if hooks:
             hooks.emit("llm_call", HookEvent(
