@@ -1334,6 +1334,26 @@ def run_agent_loop(
         except Exception:  # noqa: BLE001 — 信号机制故障不中断主循环
             pass
 
+        # 内核批量编排纪律（M4）：同端点逐条请求 → 注入脚本批量差分探测。
+        # 用最近工具调用历史判定（域无关；降轮次=降 LLM 调度开销）。
+        try:
+            from graphpt.core.diff_batch import batch_payload_prompt
+            _hist = []
+            for _rec in list(all_tool_records or [])[-12:]:
+                _r = _rec.get("result") or {}
+                if isinstance(_r, dict):
+                    _u = str(_r.get("url") or _r.get("target") or "")
+                else:
+                    _u = ""
+                _hist.append({"method": "GET" if not _u else "PROBE", "url": _u})
+            _batch_msg = batch_payload_prompt(_hist, threshold=4)
+            if _batch_msg:
+                messages.append({"role": "user", "content": _batch_msg})
+                _trace_emit("steering_injected", kind="batch_discipline",
+                            text=_batch_msg[:100])
+        except Exception:  # noqa: BLE001
+            pass
+
         # Hook: llm_call
         if hooks:
             hooks.emit("llm_call", HookEvent(
