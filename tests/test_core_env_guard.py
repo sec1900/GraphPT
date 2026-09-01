@@ -60,7 +60,9 @@ def test_guard_identical_request_blocked():
             {"url": "http://t/login", "method": "POST", "data": "same"},
             task_id=777001,
         )
-    assert blocked is not None and "硬约束" in blocked
+    # B1 后：超阈值 → 锁定（锁定后文案为【模式锁定·强制切换】）
+    assert blocked is not None
+    assert ("硬约束" in blocked) or ("模式锁定" in blocked)
 
 
 def test_env_probe_respects_workdir_abs():
