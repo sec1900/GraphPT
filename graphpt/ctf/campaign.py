@@ -99,13 +99,22 @@ def _atomic_write_json(path: str, payload: dict) -> None:
             pass
 
 
-def _save_campaign_state(campaign_id: str, states: dict) -> None:
+def _save_campaign_state(campaign_id: str, states: dict, *, rounds=None,
+                         per_challenge_cap: int | None = None,
+                         max_dry_sessions: int | None = None) -> None:
     try:
-        _atomic_write_json(_state_path(campaign_id), {
+        payload = {
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "campaign": campaign_id,
+            # 任务⑥：配置 hash 入 state——崩溃后审计/恢复可精确对齐参数
+            "config": {
+                "rounds": list(rounds) if rounds else None,
+                "per_challenge_cap": per_challenge_cap,
+                "max_dry_sessions": max_dry_sessions,
+            },
             "challenges": {c: _state_to_dict(st) for c, st in states.items()},
-        })
+        }
+        _atomic_write_json(_state_path(campaign_id), payload)
     except Exception as e:  # noqa: BLE001
         log.warning("[campaign] save state failed: %s", e)
 
@@ -133,8 +142,12 @@ def _load_campaign_state(campaign_id: str) -> dict:
 
 def _run_one_challenge(client, ch, st, ai_config, verifier, *,
                        timeboxes, per_challenge_cap, max_dry_sessions,
-                       workdir_root, flag_format) -> dict:
-    """一道题的完整生命周期：多轮会话（同容器 hold/续打）直到 solve/预算耗尽。"""
+                       workdir_root, flag_format, checkpoint: callable | None = None) -> dict:
+    """一道题的完整生命周期：多轮会话（同容器 hold/续打）直到 solve/预算耗尽。
+
+    任务⑥：每轮 visit 结束后立即 checkpoint（中途崩溃不丢状态）——
+    checkpoint 回调由调度器注入（原子写 state 文件）。
+    """
     code = ch.unique_code
     for rnd, timebox in enumerate(timeboxes):
         if st.solved:
@@ -147,12 +160,34 @@ def _run_one_challenge(client, ch, st, ai_config, verifier, *,
             break
         # 单题单槽位：始终保活（同一容器多轮续打，IP 不漂）
         keepalive = True
-        r = visit_challenge(client, ch, st, ai_config, verifier,
-                            timebox=timebox, workdir_root=workdir_root,
-                            flag_format=flag_format, keepalive=keepalive)
+        try:
+            r = visit_challenge(client, ch, st, ai_config, verifier,
+                                timebox=timebox, workdir_root=workdir_root,
+                                flag_format=flag_format, keepalive=keepalive)
+        except Exception as e:  # noqa: BLE001
+            # 槽位回收：visit 崩溃也必须释放容器，防死坑占满 max_active
+            st.last_error = f"visit crashed: {e}"
+            log.exception("[%s] visit crashed", code)
+            try:
+                if st.held_addr:
+                    client.close_challenge(code)
+                    st.held_addr = None
+            except Exception:  # noqa: BLE001
+                pass
+            if checkpoint:
+                try:
+                    checkpoint()
+                except Exception:  # noqa: BLE001
+                    pass
+            break
         log.info("[%s] round%d => solved=%s correct=%d sub=%d err=%s (累计%.0fs)",
                  code, rnd + 1, r.get("solved"), r.get("correct"), r.get("submitted"),
                  r.get("error") or "-", st.total_seconds)
+        if checkpoint:
+            try:
+                checkpoint()   # 任务⑥：每轮落盘（含 submitted/rejected/容器）
+            except Exception:  # noqa: BLE001
+                pass
         if r.get("terminal_state"):
             st.last_error = str(r.get("error") or "")
             break
@@ -209,7 +244,9 @@ def run_campaign(*, campaign_id: str, only: list[str] | None = None,
                 st.solved = True
             states[c.unique_code] = st
         todo = [c for c in pending if not states[c.unique_code].solved]
-        _save_campaign_state(campaign_id, states)
+        _save_campaign_state(campaign_id, states, rounds=rounds,
+                             per_challenge_cap=per_challenge_cap,
+                             max_dry_sessions=max_dry_sessions)
         log.info("[campaign] 待打 %d 题（槽位 %d）: %s",
                  len(todo), slots, [c.unique_code for c in todo])
 
@@ -229,18 +266,36 @@ def run_campaign(*, campaign_id: str, only: list[str] | None = None,
                     return
                 st = states[ch.unique_code]
                 try:
+                    # 任务⑥：每轮 checkpoint（中途崩溃不丢 submitted/rejected/容器）
+                    def _checkpoint():
+                        with results_lock:
+                            _save_campaign_state(campaign_id, states, rounds=rounds,
+                                                 per_challenge_cap=per_challenge_cap,
+                                                 max_dry_sessions=max_dry_sessions)
+
                     r = _run_one_challenge(
                         client, ch, st, ai_config, verifier,
                         timeboxes=rounds, per_challenge_cap=per_challenge_cap,
                         max_dry_sessions=max_dry_sessions,
-                        workdir_root=workdir_root, flag_format=flag_format)
+                        workdir_root=workdir_root, flag_format=flag_format,
+                        checkpoint=_checkpoint)
                     with results_lock:
                         results[ch.unique_code] = r
-                        _save_campaign_state(campaign_id, states)  # 每完成一题即原子落盘
+                        # 每完成一题即原子落盘
+                        _save_campaign_state(campaign_id, states, rounds=rounds,
+                                             per_challenge_cap=per_challenge_cap,
+                                             max_dry_sessions=max_dry_sessions)
                 except Exception as e:  # noqa: BLE001
                     log.exception("[campaign] %s worker crashed", ch.unique_code)
                     st.last_error = str(e)[:300]
                 finally:
+                    # 任务⑥：worker 异常也不泄漏容器槽位
+                    try:
+                        if st.held_addr:
+                            client.close_challenge(ch.unique_code)
+                            st.held_addr = None
+                    except Exception:  # noqa: BLE001
+                        pass
                     q.task_done()
 
         threads = [threading.Thread(target=_worker, daemon=True) for _ in range(slots)]
@@ -253,7 +308,9 @@ def run_campaign(*, campaign_id: str, only: list[str] | None = None,
         out["solved"] = sum(1 for r in results.values() if r.get("solved"))
         out["correct"] = sum(int(r.get("correct") or 0) for r in results.values())
         out["ok"] = True
-        _save_campaign_state(campaign_id, states)
+        _save_campaign_state(campaign_id, states, rounds=rounds,
+                             per_challenge_cap=per_challenge_cap,
+                             max_dry_sessions=max_dry_sessions)
     return out
 
 

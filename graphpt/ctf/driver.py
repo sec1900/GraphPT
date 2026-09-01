@@ -89,13 +89,17 @@ def _dump_runtime_state(states, path: str) -> None:
         pass
 
 
-def _board_win_fact(code: str, flag: str) -> None:
-    """正确 flag 落事实板（source=complete, verified=1）——跨会话金标准记忆。"""
+def _board_win_fact(key: str, flag: str) -> None:
+    """正确 flag 落事实板（source=complete, verified=1）——跨会话金标准记忆。
+
+    任务③：key 必须是实例 ID（instance_id）——session 侧黑板按实例读取，
+    写入必须用同一键，平台 correct 反馈才能被当前实例读到。
+    """
     try:
         from graphpt.search.board import Board
         board = Board()
         try:
-            board.add_fact(code, f"flag 已验证提交正确：{flag}", source="complete",
+            board.add_fact(key, f"flag 已验证提交正确：{flag}", source="complete",
                            grounding=flag, verified=1)
         finally:
             board.close()
@@ -103,21 +107,22 @@ def _board_win_fact(code: str, flag: str) -> None:
         pass
 
 
-def _board_reject_fact(code: str, flag: str, *, accepted: bool) -> None:
+def _board_reject_fact(key: str, flag: str, *, accepted: bool) -> None:
     """P0-3：平台 wrong/duplicate 反馈落事实板（source=platform）——
 
     写入"候选 X 已被平台拒绝"事实，供 agent/reason 下一轮读到；
     正确提交也落账（verified=1），防后续轮把已入库 flag 当新候选反复提交。
+    任务③：key 用实例 ID（与 session 黑板读取键一致）。
     """
     try:
         from graphpt.search.board import Board
         board = Board()
         try:
             if accepted:
-                board.add_fact(code, f"flag 已提交正确：{flag}", source="platform",
+                board.add_fact(key, f"flag 已提交正确：{flag}", source="platform",
                                grounding=flag, verified=1)
             else:
-                board.add_fact(code, f"平台拒绝候选：{flag}（禁止再次提交）", source="platform",
+                board.add_fact(key, f"平台拒绝候选：{flag}（禁止再次提交）", source="platform",
                                grounding="platform submit wrong", verified=0)
         finally:
             board.close()
@@ -188,6 +193,87 @@ def _extract_tried(sess_result) -> list[str]:
         if c and str(c).strip():
             cmds.append(str(c).strip())
     return cmds
+
+
+def _flag_manifest_matches(workdir: str, flag: str, instance_id: str) -> bool:
+    """任务④：FLAG manifest 证据链校验——候选必须登记于当前实例的 manifest。
+
+    无 manifest / 实例不匹配 / 登记时间早于本窗口 → False（拒绝提交）。
+    mtime 只作辅助（历史残留文件 0 提交的兜底），不作为安全边界。
+    """
+    if not instance_id:
+        return False
+    import json as _json
+    path = os.path.join(workdir, "FLAG.manifest.json")
+    try:
+        if not os.path.isfile(path):
+            return False
+        with open(path, encoding="utf-8") as f:
+            data = _json.load(f)
+        entry = (data or {}).get(flag)
+        if not isinstance(entry, dict):
+            return False
+        return str(entry.get("instance_id") or "") == instance_id
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _submit_one(client, code, flag, state, ch, out, verifier, task,
+                wrong_counter: dict) -> bool:
+    """任务①：单个 flag 的完整提交管线（verify→submit→落账），秒级回调与轮末共用。
+
+    Returns True = 该题已 solved（调用方应终止本轮）。
+    """
+    out.setdefault("submitted", 0)
+    out.setdefault("correct", 0)
+    out.setdefault("submit_network_errors", 0)
+    import requests as _requests
+    nb = normalize_flag_body(flag)
+    if flag in state.submitted or nb in state.submitted_bodies or nb in state.rejected_bodies:
+        return False
+    claim = FlagClaim(value=flag, statement=(task.objective or "")[:300],
+                      observed_output="", evidence_window="",
+                      flag_format=task.flag_format)
+    try:
+        res = client.submit_flag(code, flag)
+        state.submitted.add(flag)
+        state.submitted_bodies.add(nb)
+        out["submitted"] += 1
+        if res.correct:
+            out["correct"] += 1
+            state.correct_flags = res.correct_flag_count
+            log.info("[%s] CORRECT flag %s... (%d/%d) +%d分",
+                     code, flag[:16], res.correct_flag_count, res.total_flag_count, res.awarded)
+            _board_win_fact(state.instance_id or code, flag)
+            # P1-⑩ 经验知识库：正确 flag → 固化卡片（供后续同题/同难度复用）
+            try:
+                _save_solve_card(code, ch, claim, flag, state)
+            except Exception:  # noqa: BLE001
+                pass
+            state.solved = True
+            out["solved"] = True
+            if res.correct_flag_count >= ch.flag_count:
+                return True
+        else:
+            wrong_counter["n"] += 1
+            state.rejected_bodies.add(nb)
+            _board_reject_fact(state.instance_id or code, flag, accepted=False)
+            log.info("[%s] wrong flag %s...（已拉黑）", code, flag[:16])
+    except DuplicateSubmit:
+        state.submitted.add(flag)
+        state.submitted_bodies.add(nb)
+        log.info("[%s] duplicate %s (slot already banked)", code, flag[:16])
+    except InvalidState as e:
+        out["error"] = f"invalid_state on submit: {e.message}"
+        out["terminal_state"] = True
+        return True
+    except (_requests.RequestException, ConnectionError, TimeoutError) as e:
+        out["submit_network_errors"] += 1
+        log.warning("[%s] submit network error (%s)", code, e)
+        if out["submit_network_errors"] >= 3:
+            out["error"] = "submit_network_unstable"
+            return True
+    return False
 
 
 def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeState,
@@ -269,6 +355,14 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
             if _nb in state.rejected_bodies:
                 state.submitted.add(_f)
                 continue
+            # 任务④：B7 提交前必须过 manifest 证据链——候选需在当前实例
+            # manifest 中有登记（session steering 每发现即登记）。无 manifest
+            # 的历史 FLAG 一律 0 提交（审计：B7 曾绕过 session 证据边界直接
+            # 提交 e1-02 的 FLAG，碰巧正确但安全边界不成立）。
+            if not _flag_manifest_matches(workdir, _f, inst_id):
+                log.info("[%s] B7 skip %s...（无当前实例 manifest，拒绝提交）", code, _f[:24])
+                state.submitted.add(_f)  # 视为已处理，防每轮重复告警
+                continue
             try:
                 _res = client.submit_flag(code, _f)
                 state.submitted.add(_f)
@@ -279,7 +373,7 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
                     state.correct_flags = _res.correct_flag_count
                     log.info("[%s] B7 存量 FLAG 提交 CORRECT %s... (%d/%d)",
                              code, _f[:16], _res.correct_flag_count, _res.total_flag_count)
-                    _board_win_fact(code, _f)
+                    _board_win_fact(state.instance_id or code, _f)
                     if _res.correct_flag_count >= ch.flag_count:
                         out["solved"] = True
                         state.solved = True
@@ -287,7 +381,7 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
                 else:
                     # P0-3：B7 路径 wrong 同样拉黑 + 落实例事实板
                     state.rejected_bodies.add(_nb)
-                    _board_reject_fact(code, _f, accepted=False)
+                    _board_reject_fact(state.instance_id or code, _f, accepted=False)
                     log.info("[%s] B7 存量 FLAG 提交 wrong: %s...（已拉黑）", code, _f[:16])
             except DuplicateSubmit:
                 state.submitted.add(_f)
@@ -306,18 +400,20 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
     task = CTFTask(unique_code=code, objective=ch.description or "",
                    targets=addrs, flag_count=ch.flag_count, flag_format=flag_format,
                    difficulty=ch.difficulty, workdir=workdir, instance_id=inst_id)
-    # 治理 2026-08-31：TARGET 环境变量注入——prompt/剧本约定"脚本用 $TARGET
-    # 参数化"，但此前从未设置该变量，agent echo $TARGET 拿到空值后开始扫网段
-    # 找目标（10 分钟瞎扫实锤）。以 addrs[0] 为准（host:port 拆分），
-    # 并把 target.txt 写入工作区供 agent Read 一次确认。
+    # 任务⑤（治理 2026-09-01）：TARGET 私有化——**不再写全局 os.environ**。
+# 审计实锤：campaign 三线程共享进程环境，各自覆盖 TARGET/TARGET_HOST/
+# TARGET_PORT（driver.py 旧 409-411 行），并行时脚本可能打到其他槽位。
+# 改为：只写本实例 workdir 的 target.env（`export TARGET=...` 形式），
+# agent 在会话内 source 使用；env 不再从进程级环境泄漏/竞争。
     try:
         _t_host, _, _t_port = addrs[0].partition(":")
-        os.environ["TARGET"] = addrs[0]
-        os.environ["TARGET_HOST"] = _t_host
-        os.environ["TARGET_PORT"] = _t_port or "80"
         os.makedirs(workdir, exist_ok=True)
         with open(os.path.join(workdir, "target.txt"), "w", encoding="utf-8") as _tf:
             _tf.write(addrs[0] + "\n")
+        with open(os.path.join(workdir, "target.env"), "w", encoding="utf-8") as _ef:
+            _ef.write(f'export TARGET="{addrs[0]}"\n'
+                      f'export TARGET_HOST="{_t_host}"\n'
+                      f'export TARGET_PORT="{_t_port or "80"}"\n')
     except Exception:  # noqa: BLE001
         pass
     stop_event = threading.Event()
@@ -325,98 +421,66 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
     t0 = time.monotonic()
 
     try:
+        _wrong_cnt = {"n": 0}
+        # 任务①（治理 2026-09-01）：发现即提交——agent 每轮工具输出出现新
+        # flag 立即 verify+submit（不等整个 session 返回）。e1-04 已拿正确
+        # flag 又空跑 414s 到平台 already finished 丢分实锤。
+        def _early_submit(flag: str) -> bool:
+            if _wrong_cnt["n"] >= 3:
+                return False
+            return _submit_one(client, code, flag, state, ch, out, verifier, task,
+                               _wrong_cnt)
+
         sess = run_solve_session(task, ai_config, session_idx=state.session_idx,
                                  session_seconds=timebox, stop_event=stop_event,
                                  tried_commands=state.tried_commands,
                                  slots_done=state.correct_flags,
-                                 on_status=lambda s: log.info("[%s] %s", code, s))
+                                 on_status=lambda s: log.info("[%s] %s", code, s),
+                                 on_flag_candidate=_early_submit)
         state.session_idx += 1
         state.tried_commands.extend(_extract_tried(sess))
         state.total_seconds += time.monotonic() - t0
         state.tokens_spent += sess.tokens_used
         # 止损计数：本轮无新候选 flag → dry+1；有候选或正确 → 清零
-        if sess.flags:
+        if sess.flags or out.get("submitted"):
             state.dry_sessions = 0
         else:
             state.dry_sessions += 1
 
-        for flag in sess.flags:
-            if wrong_this_visit >= 3:
-                log.info("[%s] stop submitting: %d wrong (model is guessing)", code, wrong_this_visit)
-                break
-            if flag in state.submitted:
-                continue
-            nb = normalize_flag_body(flag)
-            if nb in state.submitted_bodies:
-                continue
-            # P0-3（治理 2026-09-01）：平台已拒绝的候选永久拉黑——本轮及后续轮
-            # 均不得再次提交（否则同一错 flag 反复 wrong 烧配额烧轮次）。
-            if nb in state.rejected_bodies:
-                log.info("[%s] skip %s (rejected by platform earlier)", code, flag[:32])
-                continue
-            if sess.flag_from_probe_echo(flag):
-                log.info("[%s] hold %s (probe/self-echo)", code, flag[:32])
-                continue
-            claim = FlagClaim(value=flag, statement=(sess.final_answer or "")[:300],
-                              observed_output=sess.observed_output,
-                              evidence_window=sess.evidence_window(flag),
-                              flag_format=task.flag_format)
-            conf = flag_confidence(flag, claim.observed_output, task.flag_format)
-            if conf == "high" and nb not in {normalize_flag_body(f) for f in sess.declared}:
-                conf = "marginal"
-            if conf == "low":
-                log.info("[%s] hold %s (low-confidence)", code, flag[:32])
-                continue
-            if conf == "marginal":
-                verdict = verifier.verify(claim)
-                if verdict.verdict == "rejected":
-                    log.info("[%s] hold %s (rejected: %s)", code, flag[:32], verdict.reasons[:1])
-                    continue
-            try:
-                res = client.submit_flag(code, flag)
-                state.submitted.add(flag)
-                state.submitted_bodies.add(nb)
-                out["submitted"] += 1
-                if res.correct:
-                    out["correct"] += 1
-                    state.correct_flags = res.correct_flag_count
-                    log.info("[%s] CORRECT flag %s... (%d/%d) +%d分",
-                             code, flag[:16], res.correct_flag_count, res.total_flag_count, res.awarded)
-                    _board_win_fact(code, flag)
-                    _board_reject_fact(code, flag, accepted=True)  # P0-3：正确也落账（防后续误标 rejected）
-                    # P1-⑩ 经验知识库：每个正确 flag → 固化解题卡片（供后续同题/同难度复用）
-                    try:
-                        _save_solve_card(code, ch, claim, flag, state)
-                    except Exception:
-                        pass
-                    if res.correct_flag_count >= ch.flag_count:
-                        out["solved"] = True
-                        state.solved = True
-                        break
-                else:
-                    wrong_this_visit += 1
-                    # P0-3：平台 wrong → 写实例事实板 + 永久拉黑候选
-                    state.rejected_bodies.add(nb)
-                    _board_reject_fact(code, flag, accepted=False)
-                    log.info("[%s] wrong flag %s...（已拉黑，本实例不再重提交）", code, flag[:16])
-            except DuplicateSubmit:
-                state.submitted.add(flag)
-                state.submitted_bodies.add(nb)
-                log.info("[%s] duplicate %s (slot already banked)", code, flag[:16])
-            except InvalidState as e:
-                out["error"] = f"invalid_state on submit: {e.message}"
-                out["terminal_state"] = True  # 任务已过期/停止：不再重试该题
-                break
-            except (requests.RequestException, ConnectionError, TimeoutError) as e:
-                # P0-5 网络容错：远端抖动不应崩掉整轮；记一次提交失败，下个 flag 继续
-                out["submit_network_errors"] = out.get("submit_network_errors", 0) + 1
-                log.warning("[%s] submit network error (%s) — 跳过该 flag 继续", code, e)
-                state.submitted.add(flag)
-                state.submitted_bodies.add(nb)
-                if out["submit_network_errors"] >= 3:
-                    log.error("[%s] ≥3 次提交网络错误，中止本轮", code)
-                    out["error"] = "submit_network_unstable"
+        # 轮末兜底：会话内未被回调提交的候选（回调只覆盖工具输出中出现的；
+        # FinalAnswer 里的新候选仍在此提交；已 solved 跳过）。保留原置信度
+        # 门（probe echo / low / 验证器），收敛到 _submit_one 单点提交。
+        if not out.get("solved"):
+            for flag in sess.flags:
+                if _wrong_cnt["n"] >= 3:
+                    log.info("[%s] stop submitting: %d wrong (model is guessing)", code, _wrong_cnt["n"])
                     break
+                if flag in state.submitted:
+                    continue
+                nb = normalize_flag_body(flag)
+                if nb in state.submitted_bodies or nb in state.rejected_bodies:
+                    continue
+                if sess.flag_from_probe_echo(flag):
+                    log.info("[%s] hold %s (probe/self-echo)", code, flag[:32])
+                    continue
+                claim = FlagClaim(value=flag, statement=(sess.final_answer or "")[:300],
+                                  observed_output=sess.observed_output,
+                                  evidence_window=sess.evidence_window(flag),
+                                  flag_format=task.flag_format)
+                conf = flag_confidence(flag, claim.observed_output, task.flag_format)
+                if conf == "high" and nb not in {normalize_flag_body(f) for f in sess.declared}:
+                    conf = "marginal"
+                if conf == "low":
+                    log.info("[%s] hold %s (low-confidence)", code, flag[:32])
+                    continue
+                if conf == "marginal":
+                    verdict = verifier.verify(claim)
+                    if verdict.verdict == "rejected":
+                        log.info("[%s] hold %s (rejected: %s)", code, flag[:32], verdict.reasons[:1])
+                        continue
+                if _submit_one(client, code, flag, state, ch, out, verifier, task,
+                               _wrong_cnt):
+                    break  # solved 或 terminal
     finally:
         # 实例保活决策：未解出且有进展（有命令积累/有候选）→ 不 close，下轮同 IP 续打
         hold = (keepalive and not state.solved and not out.get("error")

@@ -100,3 +100,10 @@ enscan.gob
 # 治理 2026-08-31
 .pytest_tmp/
 data/backups/*gov_cleanup*
+
+# 治理 2026-09-01：CTF/凭据敏感目录
+.env.bak*
+*.ovpn
+data/ctf/runs/
+data/ctf/run_state/
+data/ctf/recipes/

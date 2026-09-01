@@ -99,6 +99,7 @@ class SessionResult:
     num_turns: int = 0
     tokens_used: int = 0
     error: str = ""
+    flag_callback_done: bool = False   # 任务①：秒级提交回调已命中（driver 免二次提交）
 
     def evidence_window(self, flag: str) -> str:
         outs = self.tool_outputs
@@ -164,6 +165,58 @@ def _tool_output_text(result_obj) -> str:
     return str(result_obj)
 
 
+def _flag_manifest_path(workdir: str) -> str:
+    return os.path.join(workdir, "FLAG.manifest.json")
+
+
+def _record_flag_manifest(workdir: str, flags, *, instance_id: str,
+                          target_addr: str, source_type: str) -> None:
+    """任务④：flag 候选登记 manifest（evidence 链）。
+
+    每次发现新候选（agent Write FLAG / 工具输出直接命中）立即登记：
+    {flag: {instance_id, target_addr, source_type, observed_at}}。
+    提交侧（driver B7）以此为准——无 manifest 或 instance 不匹配的候选
+    一律拒绝（旧目录放 flag 0 提交的硬边界）。
+    """
+    if not flags or not instance_id:
+        return
+    import json as _json
+    try:
+        path = _flag_manifest_path(workdir)
+        data: dict = {}
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    loaded = _json.load(f)
+                if isinstance(loaded, dict):
+                    data = loaded
+            except Exception:
+                data = {}
+        now = time.strftime("%Y-%m-%dT%H:%M:%S")
+        changed = False
+        for f in flags:
+            f = str(f or "").strip()
+            if not f:
+                continue
+            entry = data.get(f)
+            if entry and entry.get("instance_id") == instance_id:
+                continue
+            data[f] = {
+                "instance_id": instance_id,
+                "target_addr": target_addr,
+                "source_type": source_type,
+                "observed_at": now,
+            }
+            changed = True
+        if changed:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                _json.dump(data, fh, ensure_ascii=False, indent=1)
+            os.replace(tmp, path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_solve_session(
     task: CTFTask,
     ai_config,
@@ -175,6 +228,7 @@ def run_solve_session(
     slots_done: int = 0,
     stop_event: threading.Event | None = None,
     on_status=None,
+    on_flag_candidate: callable | None = None,
 ) -> SessionResult:
     """跑一次解题会话：统一 AgentSession 骨架的 CTF 适配器。
 
@@ -222,6 +276,18 @@ def run_solve_session(
             # 不再让 AgentSession 走全量工具（杜绝图工具/子代理/SRC 报告
             # 混入 CTF 会话；昨夜 agent 甚至读了 agent_pool.json/state.json）。
             tool_schemas=_ctf_tool_schemas(),
+            # 任务②（治理 2026-09-01）：CTF 短提示词接通生产路径。
+            # 审计实锤：build_task_prompt 此前只被测试调用——recipe/事实板/
+            # 首动作纪律/死路切换全部"写了没接上"；且通用系统提示还强制
+            # "派子代理"（与八件套矛盾）并注入"经代理是常态"（与 CTF
+            # 直连冲突）。override 后这些矛盾整体消失。
+            system_prompt_override=build_range_system_prompt(),
+            user_prompt_override=build_task_prompt(
+                task,
+                session_idx=session_idx,
+                tried_commands=tried_commands,
+                slots_done=slots_done,
+            ),
             # P0-4：关闭自动知识卡注入（kb 卡片已按盲测原则封存；earned
             # 组件卡同样不进 CTF 会话——最短闭环阶段只靠模型+当前实例证据）。
             kb_inject=False,
@@ -229,8 +295,87 @@ def run_solve_session(
             # （自身经验沉淀，非外部知识）在 CTF 域注入，同组件题可复用打法。
             # 2026-09-01 P0-4 收紧：最短闭环阶段全部关闭，恢复得分后再开。
         )
+        # 任务①（治理 2026-09-01）：发现即提交——steering 每轮扫描本会话
+        # 工具输出中的新 flag，命中立即回调 on_flag_candidate（driver 层
+        # 秒级 verify+submit）；回调返回 True（已 solved/已 wrong）→ 注入
+        # 收尾消息并置 stop_event 终止会话，避免"拿到 flag 又空跑 414s
+        # 直到平台 already finished"（e1-04 实锤丢分）。
+        _flag_seen: set[str] = set()
+        _stop_evt = stop_event or threading.Event()
+        _solved_early = {"done": False}
+
+        def _steering_ctf() -> list[str]:
+            msgs: list[str] = []
+            # 任务⑦：响应差异摘要——同 URL 已见相同响应则提示（防 e1-04
+            # 31 次抓同一登录页/48 次 HTTP 元数据的 token 黑洞）。
+            try:
+                _seen_url_hash: dict[str, str] = {}
+                _seen_url_count: dict[str, int] = {}
+                for _t, _a, _o in res.tool_outputs or []:
+                    if not isinstance(_a, dict):
+                        continue
+                    u = str(_a.get("url") or _a.get("command") or "")[:160]
+                    if not u:
+                        continue
+                    import hashlib as _hl
+                    h = _hl.md5(str(_o or "").encode("utf-8", "ignore")).hexdigest()[:10]
+                    if u in _seen_url_hash and _seen_url_hash[u] == h:
+                        _seen_url_count[u] = _seen_url_count.get(u, 0) + 1
+                    else:
+                        _seen_url_hash[u] = h
+                        _seen_url_count[u] = 1
+                # 同 URL 相同响应 ≥4 次 → 死路切换纪律注入（不重复爆破）
+                for u, c in list(_seen_url_count.items()):
+                    if c >= 4:
+                        msgs.append(
+                            f"【死路切换】{u} 已重复抓取 {c} 次且响应完全一致——"
+                            "停止重复请求，切技术类（枚举→越权→注入→逻辑），"
+                            "或换参数/换端点。"
+                        )
+                        _seen_url_count.pop(u, None)  # 只提示一次
+            except Exception:  # noqa: BLE001
+                pass
+            # 从本会话工具输出提取候选（evidence 已内建：只信工具输出）
+            hits: list[str] = []
+            for _t, _a, _o in res.tool_outputs or []:
+                for f in extract_flags(str(_o), task.flag_format):
+                    if f not in _flag_seen:
+                        hits.append(f)
+            # FLAG 文件（agent 每轮 Write）同样视为候选
+            try:
+                for _f in read_flag_file(task.workdir):
+                    if _f not in _flag_seen:
+                        hits.append(_f)
+            except Exception:
+                pass
+            for f in hits:
+                if f in _flag_seen:
+                    continue
+                _flag_seen.add(f)
+                # 任务④：新候选立即登记 manifest（instance/target 证据链，
+                # 供 driver B7 提交前校验；旧实例/无 manifest 候选 0 提交）
+                _record_flag_manifest(
+                    task.workdir, [f], instance_id=task.instance_id or task.unique_code,
+                    target_addr=_target_addr,
+                    source_type="tool_output" if f in str(res.tool_outputs) else "flag_file")
+                try:
+                    done = bool(on_flag_candidate(f))
+                except Exception:  # noqa: BLE001 — 回调异常不断会话
+                    done = False
+                if done:
+                    _solved_early["done"] = True
+                    msgs.append(
+                        "【系统】flag 已被主控校验提交（结果见上一条回调日志）。"
+                        "立即停止探索，输出 <FinalAnswer> 收尾。"
+                    )
+                    _stop_evt.set()
+            return msgs
+
         r = AgentSession(atask, ai_config=ai_config).run(
-            on_status=on_status, stop_event=stop_event)
+            on_status=on_status, stop_event=_stop_evt,
+            steering_provider=_steering_ctf)
+        # 秒级提交命中 → 标记会话结果已解决（供 driver 统计）
+        res.flag_callback_done = bool(_solved_early["done"])
 
         res.final_text = r.final_text or ""
         res.num_turns = r.iterations

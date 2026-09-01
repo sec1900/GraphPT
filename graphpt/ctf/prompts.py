@@ -160,13 +160,18 @@ def _board_block(task: CTFTask) -> str:
 
     替代 MEMORY.md 覆盖式重写的依靠——事实逐条追加、永不覆盖；
     每轮只注入最近 N 条，紧凑可控。
+    任务③（治理 2026-09-01）：project key 统一用 **instance_id**——
+    driver 的 correct/wrong 反馈按实例落账，此处必须读同一键，
+    否则平台反馈无法被当前实例的 AgentSession 读到（审计实锤：此前
+    driver 写题号、session 读实例 ID，反馈断链）。
     """
     try:
         from graphpt.search.board import Board
         board = Board()
+        key = task.instance_id or task.unique_code
         try:
-            facts = board.facts_text(task.unique_code, limit=15)
-            handoff = board.handoffs_text(task.unique_code, limit_chars=1500)
+            facts = board.facts_text(key, limit=15)
+            handoff = board.handoffs_text(key, limit_chars=1500)
         finally:
             board.close()
     except Exception:
@@ -235,7 +240,9 @@ def build_task_prompt(
     return f"""【用户任务】
 Target: {task.target_str()}
 【注意】目标实例每次重建 IP 都会变——以上 Target 是本次唯一真实地址。MEMORY/接力块/旧脚本里出现的任何旧 IP
-一律当过期；把利用配方重放到本次 Target（脚本用 $TARGET 参数化，别写死 IP）。
+一律当过期；把利用配方重放到本次 Target（脚本先 `source target.env` 或读
+cwd/target.txt 拿本次地址——**不要依赖全局 $TARGET 环境变量**，它是空的/可能
+被其他并行任务覆盖；一切脚本以 target.txt 为准，别写死 IP）。
 【第一动作强制】Target 是唯一目标，**第一件事就是直接请求它**（http_test/curl http://Target/）。
 Target 不可达时：检查一次代理语义（见环境事实），然后 **10 秒内停止网络侦察，直接进入
 Web 应用攻击面分析**（首页/登录/接口枚举），用已给的 ip:port 而不是扫网段——禁止 nmap 扫描

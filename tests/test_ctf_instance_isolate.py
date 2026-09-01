@@ -53,6 +53,32 @@ def test_board_project_is_instance_scoped():
         b.close()
 
 
+def test_board_real_call_chain_instance_key():
+    """任务③：driver 的 correct/wrong 反馈（按 instance_id 落账）必须能被
+    build_task_prompt 的 _board_block（按同一 instance_id 读取）读到——
+    走真实调用链，不手工写两个键。"""
+    import tempfile
+
+    from graphpt.ctf.driver import _board_reject_fact, _board_win_fact
+    from graphpt.ctf.prompts import CTFTask, build_task_prompt
+    from graphpt.search.board import Board
+
+    inst = "e1-07_1725_0"
+    # driver 侧按实例写反馈
+    _board_reject_fact(inst, "flag{bad_reject}", accepted=False)
+    _board_win_fact(inst, "flag{good_win}")
+    # session 侧按同一实例读（build_task_prompt → _board_block 用 instance_id）
+    task = CTFTask(unique_code="e1-07", objective="x", targets=["10.0.1.1:80"],
+                   workdir=tempfile.mkdtemp(), instance_id=inst)
+    prompt = build_task_prompt(task)
+    assert "flag{bad_reject}" in prompt          # wrong 反馈可见
+    assert "flag{good_win}" in prompt            # correct 反馈可见
+    # 反向：不带 instance_id 的题号键读不到
+    assert "flag{bad_reject}" not in build_task_prompt(
+        CTFTask(unique_code="e1-07", objective="x", targets=["10.0.1.1:80"],
+                workdir=tempfile.mkdtemp()))
+
+
 def test_ctf_task_instance_id_passthrough():
     """CTFTask 必须携带 instance_id，且 AgentTask.project 用它（非题号）。"""
     from graphpt.ctf.prompts import CTFTask
