@@ -39,6 +39,12 @@ _KINDS = {
     "signal_detected",
     "steering_injected",
     "session_scope",
+    # B2/A1/A2（治理 2026-09-01）：切换闭环与推进观测事件
+    "mode_locked",
+    "mode_locked_retry",
+    "diff_echo",
+    "route_stale",
+    "guard_blocked",
 }
 
 
@@ -97,6 +103,10 @@ def summarize(session_key: str) -> dict:
         "tool_calls": 0, "tool_seconds": 0.0,
         "retries": 0, "signals": 0,
         "first_token_seconds": [], "completion_seconds": [],
+        # B2/A1/A2（治理 2026-09-01）：切换闭环观测
+        "mode_locked": 0, "mode_locked_retry": 0,
+        "scanned_diffs": 0, "route_stale": 0,
+        "guard_blocks": 0,
     }
     for e in evs:
         k = e.get("kind")
@@ -115,4 +125,14 @@ def summarize(session_key: str) -> dict:
             out["tool_seconds"] += float(e.get("duration_s") or 0)
         elif k == "signal_detected":
             out["signals"] += 1
+        elif k == "mode_locked":
+            out["mode_locked"] += 1
+        elif k == "mode_locked_retry":
+            out["mode_locked_retry"] += 1
+        elif k == "diff_echo":
+            out["scanned_diffs"] += 1
+        elif k == "route_stale":
+            out["route_stale"] += 1
+        elif k == "guard_blocked":
+            out["guard_blocks"] += 1
     return out

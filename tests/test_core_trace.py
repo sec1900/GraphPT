@@ -106,3 +106,22 @@ def test_contextvar_inherited_across_thread():
         assert got2["s"] == "thread-ctx-1"
     finally:
         trace.set_session("")
+
+
+def test_b2_guard_lock_switch_observability():
+    """B2：guard 锁定/切换事件进入 trace，summarize 输出闭环观测。"""
+    trace.set_session("b2-guard")
+    try:
+        trace.emit("mode_locked", sig="curl|10.0.0.1|login|", n=7)
+        trace.emit("mode_locked_retry", sig="curl|10.0.0.1|login|", reason="x")
+        trace.emit("diff_echo", url="http://t/search")
+        trace.emit("route_stale", hyp="injection")
+        trace.emit("guard_blocked", sig="s")
+        s = trace.summarize("b2-guard")
+        assert s["mode_locked"] == 1
+        assert s["mode_locked_retry"] == 1
+        assert s["scanned_diffs"] == 1
+        assert s["route_stale"] == 1
+        assert s["guard_blocks"] == 1
+    finally:
+        trace.set_session("")

@@ -107,6 +107,16 @@ _lock = threading.Lock()
 _states: dict[int, _TaskGuardState] = defaultdict(_TaskGuardState)
 
 
+def _trace_guard(kind: str, **fields) -> None:
+    """B2: guard 锁定事件 -> 内核遥测 (会话结束 summarize 输出锁定/切换统计)。
+    失败静默 — 护栏事件不因遥测故障中断。"""
+    try:
+        from graphpt.core.trace import emit as _te
+        _te(kind, source="guard", **fields)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def enabled() -> bool:
     import os
     return os.environ.get("GRAPHPT_GUARD", "1").strip() not in ("0", "false", "no")
@@ -179,6 +189,7 @@ def check_bash(cmd: str, task_id: int = 0, *, repeat_cap: int = 3, lenient: bool
             # B1：先查锁定——同签名已被锁定则直接拒绝（控制面强制）
             if sig in st.locked_sigs:
                 reason = st.lock_reason.get(sig, "")
+                _trace_guard("mode_locked_retry", sig=sig, reason=reason)
                 return (f"【模式锁定·强制切换】签名 {sig} 已锁定（{reason}）——"
                         "本技术类暂停，切换至以下技术类之一继续："
                         f"{' / '.join(_TECH_SWITCH_ORDER)}")
@@ -188,6 +199,7 @@ def check_bash(cmd: str, task_id: int = 0, *, repeat_cap: int = 3, lenient: bool
             if n > effective_cap:
                 # B1：达到锁定阈值 → 记 lock（同签名的后续调用直接被拒）
                 st.lock_signature(sig, f"命令模式已执行 {n} 次无突破")
+                _trace_guard("mode_locked", sig=sig, n=n)
                 return (f"【硬约束】该命令模式已执行 {n} 次无突破——死路硬切换："
                         "立即换技术类（枚举 → 越权篡改 → 注入 → 逻辑/竞态 → 反序列化/模板/SSRF内网）。")
             if n == effective_cap:
@@ -215,6 +227,7 @@ def check_http(args: dict, task_id: int = 0, *, repeat_cap: int = 3, lenient: bo
         # B1：http 同签名先查锁定
         if key in st.locked_sigs:
             reason = st.lock_reason.get(key, "")
+            _trace_guard("mode_locked_retry", sig=key, reason=reason)
             return (f"【模式锁定·强制切换】该 URL+参数组合已锁定（{reason}）——"
                     "换端点/换参数/换技术类，禁止原地重试。")
         st.http_counts[key] += 1
@@ -222,6 +235,7 @@ def check_http(args: dict, task_id: int = 0, *, repeat_cap: int = 3, lenient: bo
         effective_cap = (repeat_cap * 2) if lenient else repeat_cap
         if n > effective_cap:
             st.lock_signature(key, f"同一 URL+参数已请求 {n} 次无变化")
+            _trace_guard("mode_locked", sig=key, n=n)
             return (f"【硬约束】同一 URL+参数已请求 {n} 次响应无变化——重复发包不产生新信息。"
                     "换参数/换端点/换技术类。")
         return None
