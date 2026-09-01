@@ -380,7 +380,16 @@ def _call_ai_with_tools(
             def _sync_call() -> None:
                 nonlocal _call_result, _call_error
                 try:
-                    _call_result = call_ai_raw(candidate, url, payload)
+                    # M1 修复（2026-09-01）：contextvar 不跨线程——LLM 子线程
+                    # 需继承主线程的遥测会话 scope，否则 trace 事件 session=""
+                    # 落盘时被过滤（signal 事件正常、llm/tool 事件丢失实锤）。
+                    import contextvars as _cv
+                    _ctx = _cv.copy_context()
+
+                    def _inner() -> None:
+                        _call_result = call_ai_raw(candidate, url, payload)
+
+                    _ctx.run(_inner)
                 except BaseException as e:  # noqa: BLE001
                     _call_error = e
 

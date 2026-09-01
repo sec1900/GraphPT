@@ -76,3 +76,33 @@ def test_agent_loop_result_has_duration():
     r = AgentLoopResult()
     r.duration_s = 12.34
     assert r.duration_s == 12.34
+
+def test_contextvar_inherited_across_thread():
+    """LLM 同步子线程必须继承遥测 session（M1 修复：copy_context 跨线程）。"""
+    import contextvars
+    import threading
+
+    trace.set_session("thread-ctx-1")
+    try:
+        got = {}
+
+        def worker():
+            got["s"] = trace.current_session()
+
+        # 未继承 → 空（旧 bug 形态）
+        t = threading.Thread(target=worker)
+        t.start(); t.join()
+        assert got["s"] == ""
+
+        # copy_context 继承 → 保留
+        got2 = {}
+        ctx = contextvars.copy_context()
+
+        def worker2():
+            got2["s"] = trace.current_session()
+
+        t2 = threading.Thread(target=lambda: ctx.run(worker2))
+        t2.start(); t2.join()
+        assert got2["s"] == "thread-ctx-1"
+    finally:
+        trace.set_session("")
