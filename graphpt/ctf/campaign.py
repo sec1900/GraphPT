@@ -37,6 +37,9 @@ from .driver import ChallengeState, visit_challenge, _build_ai_config  # noqa: E
 from .verify import FlagVerifier, _VerifierLLM  # noqa: E402
 
 _DEFAULT_SLOTS = 3  # 平台 max_active=3（实证）
+# 动态补题（任务⑩）：空槽轮询平台未完成清单的间隔与空窗口退出轮数
+_FILL_POLL_S = 20
+_FILL_IDLE_ROUNDS = 6   # 连续 6 次（约 2 分钟）查到无新题 → 窗口清空退出
 _STATE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "data", "ctf", "run_state")
 
@@ -258,12 +261,61 @@ def run_campaign(*, campaign_id: str, only: list[str] | None = None,
         results_lock = threading.Lock()
         slots = max(1, min(int(slots), 3))  # 平台硬上限 3
 
+        # 任务⑩（治理 2026-09-01）：动态补题——一题完成/失败后，空槽位
+        # 重新查询平台"未完成清单"，把新题补进队列，而不是启动时固定快照。
+        # 实锤：wave2 第一批 --only 3 题，a-04 答对后空槽闲等，15 题积压。
+        _missing: set[str] = set()   # 查询过的"平台已无"题（防死循环）
+        _no_new_rounds = {"n": 0}    # 连续取不到新题的轮数（空窗口退出判定）
+        _fill_lock = threading.Lock()
+
+        def _fill_from_platform() -> int:
+            """把平台未完成且未入队未在打的题补进队列。返回补齐数。"""
+            added = 0
+            try:
+                with _fill_lock:
+                    fresh = client.list_challenges()
+                    inflight = set()
+                    with results_lock:
+                        inflight = {c.unique_code for c in
+                                    [x for x in fresh if x.container_status != "stopped"]}
+                    for c in fresh:
+                        code = c.unique_code
+                        if c.is_completed or code in _missing:
+                            continue
+                        if code in states and states[code].solved:
+                            _missing.add(code)
+                            continue
+                        # 在跑 / 已入队 / 已结束的都跳过
+                        if code in inflight or code in _q_seen:
+                            continue
+                        st = states.get(code)
+                        if st is None:
+                            st = ChallengeState(code)
+                            states[code] = st
+                        _q_seen.add(code)
+                        q.put(c)
+                        added += 1
+            except Exception as e:  # noqa: BLE001
+                log.warning("[campaign] fill failed: %s", e)
+            return added
+
+        _q_seen: set[str] = set()
+
         def _worker():
             while True:
                 try:
                     ch = q.get_nowait()
                 except queue.Empty:
-                    return
+                    # 动态补题：先查平台，再无新题则短暂等待后重试；
+                    # 连续 _FILL_IDLE_ROUNDS 轮无新题 → 认为窗口已清空，退出。
+                    if _fill_from_platform() > 0:
+                        _no_new_rounds["n"] = 0
+                        continue
+                    _no_new_rounds["n"] += 1
+                    if _no_new_rounds["n"] >= _FILL_IDLE_ROUNDS:
+                        return
+                    time.sleep(_FILL_POLL_S)
+                    continue
                 st = states[ch.unique_code]
                 try:
                     # 任务⑥：每轮 checkpoint（中途崩溃不丢 submitted/rejected/容器）
