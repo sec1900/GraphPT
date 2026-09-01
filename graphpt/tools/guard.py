@@ -159,6 +159,11 @@ def check_bash(cmd: str, task_id: int = 0, *, repeat_cap: int = 3, lenient: bool
     with _lock:
         st = _states[task_id]
         if _WIDE_SCAN_RX.search(s):
+            try:
+                from graphpt.core.trace import emit as _gbe
+                _gbe("guard_blocked")
+            except Exception:
+                pass
             return ("【硬约束】全网段/全端口扫描越界且低效：只对目标主机做定向探测，"
                     "用 `nmap -sT --top-ports 100 <host>` 或单端口测试，别扫段。")
         if _ENCODING_RX.search(s) and not _ENCODING_OK_RX.search(s):
@@ -169,6 +174,11 @@ def check_bash(cmd: str, task_id: int = 0, *, repeat_cap: int = 3, lenient: bool
                 return None
             st.encoding_count += 1
             if st.encoding_count > 2:
+                try:
+                    from graphpt.core.trace import emit as _gbe
+                    _gbe("guard_blocked")
+                except Exception:
+                    pass
                 return ("【硬约束】编码调试已超 2 次——编码是工具问题不是漏洞，不产出结果。"
                         "改用：http_test 读正文（自动处理 GBK），或对响应 bytes 直接正则匹配"
                         "（re.findall(rb'<模式>', r.content)）。禁止再写转码脚本。")
@@ -182,6 +192,11 @@ def check_bash(cmd: str, task_id: int = 0, *, repeat_cap: int = 3, lenient: bool
                 st.sig_counts[sig] += 1
                 if st.sig_counts[sig] > (repeat_cap * 2 if lenient else repeat_cap):
                     st.lock_signature(sig, f"完全相同命令已执行 {st.exact_counts[exact]} 次")
+            try:
+                from graphpt.core.trace import emit as _gbe
+                _gbe("guard_blocked")
+            except Exception:
+                pass
             return (f"【硬约束】完全相同的命令已执行过（第 {st.exact_counts[exact]} 次），输出不会变。"
                     "换参数、换路径、或换技术类。")
         sig = _normalize_sig(s)
@@ -200,6 +215,11 @@ def check_bash(cmd: str, task_id: int = 0, *, repeat_cap: int = 3, lenient: bool
                 # B1：达到锁定阈值 → 记 lock（同签名的后续调用直接被拒）
                 st.lock_signature(sig, f"命令模式已执行 {n} 次无突破")
                 _trace_guard("mode_locked", sig=sig, n=n)
+                try:
+                    from graphpt.core.trace import emit as _gbe
+                    _gbe("guard_blocked")
+                except Exception:
+                    pass
                 return (f"【硬约束】该命令模式已执行 {n} 次无突破——死路硬切换："
                         "立即换技术类（枚举 → 越权篡改 → 注入 → 逻辑/竞态 → 反序列化/模板/SSRF内网）。")
             if n == effective_cap:
@@ -236,6 +256,11 @@ def check_http(args: dict, task_id: int = 0, *, repeat_cap: int = 3, lenient: bo
         if n > effective_cap:
             st.lock_signature(key, f"同一 URL+参数已请求 {n} 次无变化")
             _trace_guard("mode_locked", sig=key, n=n)
+            try:
+                from graphpt.core.trace import emit as _gbe
+                _gbe("guard_blocked")
+            except Exception:
+                pass
             return (f"【硬约束】同一 URL+参数已请求 {n} 次响应无变化——重复发包不产生新信息。"
                     "换参数/换端点/换技术类。")
         return None

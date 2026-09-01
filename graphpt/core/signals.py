@@ -97,6 +97,8 @@ class SignalBoard:
         self.no_increment_rounds = no_increment_rounds
         self.decay = decay
         self._round = 0
+        self._ever_hypothesized = False  # A2：是否曾建立过主假设（staleness 判定用）
+        self._stale_blocked: set[str] = set()  # A2：僵化后禁选类型（防同面复活）
 
     def feed(self, text: str, emit_trace=None, round_num: int | None = None) -> dict:
         """喂入工具输出，返回本轮新增信号 {sig_type: detail}。"""
@@ -152,11 +154,11 @@ class SignalBoard:
                         f"剩余预算 {self.hyp_budget_left} 轮。继续沿此信号深挖，"
                         "不要换面；除非看到反证或连续无增量。")
 
-            # 换面/新假设：取权重最高且最近有命中的信号；不考虑刚放弃的类型
+            # 换面/新假设：取权重最高且最近有命中的信号；不考虑刚放弃/僵化禁选的类型
             abandoned = self.hypothesis["sig_type"] if self.hypothesis else None
             best_type, best_sig = None, None
             for sig_type, sig in self.signals.items():
-                if sig_type == abandoned:
+                if sig_type == abandoned or sig_type in self._stale_blocked:
                     continue
                 if (round_num - sig.last_round) > 2:
                     continue  # 最近两轮无命中 → 失效信号不选
@@ -167,9 +169,32 @@ class SignalBoard:
                 self.hypothesis = {"sig_type": best_type, "detail": best_sig.detail}
                 self.hyp_budget_left = self.max_budget_rounds
                 self.hyp_no_increment = 0
+                self._ever_hypothesized = True
+                # 换到新类型 → 解除旧僵化禁选（允许未来重新考虑）
+                if abandoned in self._stale_blocked:
+                    self._stale_blocked.discard(abandoned)
                 return (f"【主假设换面】新信号：{best_type}（{best_sig.detail}）——"
                         f"放弃 {abandoned or '旧假设'}，转向此面，预算 {self.max_budget_rounds} 轮。")
+            # A2（治理 2026-09-01）：路线僵化——预算耗尽且无可换新信号时，
+            # 不再静默返回空，而是要求代理必须给出新技术路线+第一步动作。
+            stale = (
+                self._ever_hypothesized
+                and self.hyp_budget_left <= 0
+            )
+            if stale and abandoned:
+                # 僵化类型禁选（防同一面被反复重新确立循环）
+                self._stale_blocked.add(abandoned)
             self.hypothesis = None
+            if stale:
+                try:
+                    from graphpt.core.trace import emit as _te
+                    _te("route_stale", reason="budget_exhausted_no_new_signal")
+                except Exception:  # noqa: BLE001
+                    pass
+                return ("【路线僵化·强制换面】当前方向预算已耗尽且无新信号——"
+                        "禁止继续同面。必须提出一条新技术路线，并给出该路线"
+                        "的第一步可执行动作（具体命令/参数），本轮就执行。"
+                        "候选路线：越权篡改 → 注入 → 逻辑/竞态 → 反序列化/模板 → SSRF/内网。")
             return ""
 
     def should_stop(self) -> bool:

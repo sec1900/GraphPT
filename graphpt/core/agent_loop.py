@@ -1341,6 +1341,33 @@ def run_agent_loop(
                 messages.append({"role": "user", "content": _hyp_msg})
                 _trace_emit("steering_injected", kind="signal_hypothesis",
                             text=_hyp_msg[:120])
+
+            # A1（治理 2026-09-01）：差异回显强制推进——"可控回显/参数差异"
+            # 信号连续命中 K 次仍未转化为新假设/新路线时，注入强制推进指令。
+            # 实锤：a-07 拿到 WAF 拦截回显却不去升级绕过（6 次 success:false
+            # waf:true 原地打转）；a-18 在 JWT 面重复探测。
+            try:
+                _diff_sig = _board.signals.get("param_control") \
+                    or _board.signals.get("controlled_input")
+                _diff_hits = _diff_sig.hits if _diff_sig else 0
+                _push_key = ("diff_echo", _diff_sig.sig_type if _diff_sig else "")
+                if _diff_sig is not None and _diff_hits >= 4 and \
+                        not getattr(_board, "_a1_pushed", False):
+                    _board._a1_pushed = True
+                    _trace_emit("diff_echo", sig=_diff_sig.sig_type,
+                                hits=_diff_hits)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"【强制推进】“{_diff_sig.sig_type}”回显差异已确认 "
+                            f"{_diff_hits} 次——停止重复确认同一差异。现在必须选择："
+                            "① 若该差异可控制输出内容 → 立即执行输出利用（读文件/列库/"
+                            "渲染模板/触发命令），并拿真实结果；② 若确认不了 → 换技术类"
+                            "（枚举→越权→注入→逻辑→反序列化→SSRF）。给出下一步的具体命令。"
+                        ),
+                    })
+            except Exception:  # noqa: BLE001
+                pass
         except Exception:  # noqa: BLE001 — 信号机制故障不中断主循环
             pass
 
@@ -1687,16 +1714,26 @@ def run_agent_loop(
             max_workers = len(pending_parallel)
             try:
                 with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                    # 用 copy_context 传播 contextvars 到 worker 线程（dispatch_agent 等需要）
+                    # M1 修复 v3（2026-09-01）：_ctx 在主线程捕获（已有）——
+                    # 但仅 `_ctx.run(pool.submit, ...)` 只把【调度】包进 context，
+                    # _execute_tool_call 在 worker 线程执行时 contextvar 仍为空 →
+                    # executor 的 tool_start/tool_end 事件 session='' 被 dump 过滤
+                    # （实测 trace.jsonl 有 llm/signal 事件但工具事件为 0）。
+                    # 正确：把【执行函数本身】包进 _ctx.run —— worker 里
+                    # 调用 _ctx.run(_execute_tool_call, ...) 才能继承遥测 scope。
                     _ctx = contextvars.copy_context()
-                    future_map = {
-                        _ctx.run(
-                            pool.submit,
+
+                    def _exec_in_ctx(tc, tool_record, *, step_id, stop_event):
+                        return _ctx.run(
                             _execute_tool_call,
+                            tc, workspace_root, db_file, task_id, tool_record,
+                            step_id=step_id, stop_event=stop_event,
+                        )
+
+                    future_map = {
+                        pool.submit(
+                            _exec_in_ctx,
                             tc,
-                            workspace_root,
-                            db_file,
-                            task_id,
                             tool_record,
                             step_id=step_id,
                             stop_event=stop_event,
