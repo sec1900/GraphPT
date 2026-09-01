@@ -78,6 +78,29 @@ class _TaskGuardState:
         self.exact_counts: Counter = Counter()
         self.encoding_count = 0
         self.http_counts: Counter = Counter()
+        # B1（治理 2026-09-01）：模式锁定——同技术类语义签名累计命中超阈值后
+        # 记入 locked 集合，工具执行层见 lock 直接拒绝该签名（控制面强制切换，
+        # 不再依赖 agent 把"换技术类"提示当普通消息处理）。
+        self.locked_sigs: set[str] = set()
+        self.lock_reason: dict[str, str] = {}
+
+    def lock_signature(self, sig: str, reason: str) -> None:
+        if sig and sig not in self.locked_sigs:
+            self.locked_sigs.add(sig)
+            self.lock_reason[sig] = reason[:160]
+
+
+# 技术类切换顺序（B1：锁定后按此推进替代技术类）
+_TECH_SWITCH_ORDER = ("越权篡改", "注入", "逻辑/竞态", "反序列化/模板", "SSRF/内网")
+_LOCK_THRESHOLD = 6  # 同一签名命中 ≥6 次 → 锁定（实测 a-14 模式 5~11 次无突破全在 6+ 区间）
+
+
+def _next_tech_after(base: str) -> str:
+    """锁定后给出的替代技术类：从 base 往后推进一位（防原地重试）。"""
+    for i, t in enumerate(_TECH_SWITCH_ORDER):
+        if base and base in t:
+            return _TECH_SWITCH_ORDER[min(i + 1, len(_TECH_SWITCH_ORDER) - 1)]
+    return _TECH_SWITCH_ORDER[0]
 
 
 _lock = threading.Lock()
@@ -143,14 +166,28 @@ def check_bash(cmd: str, task_id: int = 0, *, repeat_cap: int = 3, lenient: bool
         st.exact_counts[exact] += 1
         exact_cap = 4 if lenient else 2
         if st.exact_counts[exact] >= exact_cap:
+            # B1：完全相同命令命中 exact_cap 时也计入签名计数（exact 会屏蔽
+            # sig 计数路径——否则同签名反复 exact 命中永远不触发模式锁定）
+            if sig := _normalize_sig(s):
+                st.sig_counts[sig] += 1
+                if st.sig_counts[sig] > (repeat_cap * 2 if lenient else repeat_cap):
+                    st.lock_signature(sig, f"完全相同命令已执行 {st.exact_counts[exact]} 次")
             return (f"【硬约束】完全相同的命令已执行过（第 {st.exact_counts[exact]} 次），输出不会变。"
                     "换参数、换路径、或换技术类。")
         sig = _normalize_sig(s)
         if sig:
+            # B1：先查锁定——同签名已被锁定则直接拒绝（控制面强制）
+            if sig in st.locked_sigs:
+                reason = st.lock_reason.get(sig, "")
+                return (f"【模式锁定·强制切换】签名 {sig} 已锁定（{reason}）——"
+                        "本技术类暂停，切换至以下技术类之一继续："
+                        f"{' / '.join(_TECH_SWITCH_ORDER)}")
             st.sig_counts[sig] += 1
             n = st.sig_counts[sig]
             effective_cap = (repeat_cap * 2) if lenient else repeat_cap
             if n > effective_cap:
+                # B1：达到锁定阈值 → 记 lock（同签名的后续调用直接被拒）
+                st.lock_signature(sig, f"命令模式已执行 {n} 次无突破")
                 return (f"【硬约束】该命令模式已执行 {n} 次无突破——死路硬切换："
                         "立即换技术类（枚举 → 越权篡改 → 注入 → 逻辑/竞态 → 反序列化/模板/SSRF内网）。")
             if n == effective_cap:
@@ -175,10 +212,16 @@ def check_http(args: dict, task_id: int = 0, *, repeat_cap: int = 3, lenient: bo
         str(a.get("data", "")), str(a.get("cookies", "")))
     with _lock:
         st = _states[task_id]
+        # B1：http 同签名先查锁定
+        if key in st.locked_sigs:
+            reason = st.lock_reason.get(key, "")
+            return (f"【模式锁定·强制切换】该 URL+参数组合已锁定（{reason}）——"
+                    "换端点/换参数/换技术类，禁止原地重试。")
         st.http_counts[key] += 1
         n = st.http_counts[key]
         effective_cap = (repeat_cap * 2) if lenient else repeat_cap
         if n > effective_cap:
+            st.lock_signature(key, f"同一 URL+参数已请求 {n} 次无变化")
             return (f"【硬约束】同一 URL+参数已请求 {n} 次响应无变化——重复发包不产生新信息。"
                     "换参数/换端点/换技术类。")
         return None
