@@ -377,23 +377,24 @@ def _call_ai_with_tools(
             _call_result: dict | None = None
             _call_error: BaseException | None = None
 
+            # M1 修复 v2（2026-09-01，用户审计）：两处必须同时满足——
+            # ① copy_context 必须在【主线程】捕获（函数体内复制=子线程空上下文，
+            #    trace session 仍丢失）；
+            # ② _ctx.run() 的返回值直接赋给 nonlocal 的 _call_result——
+            #    不能经内部闭包中转（缺 nonlocal 时子函数赋值写不回外层，
+            #    _call_result 恒 None → j.get() AttributeError → 同步路径每轮
+            #    白崩一次再 failover）。
+            import contextvars as _cv
+            import threading as _th
+            _ctx = _cv.copy_context()
+
             def _sync_call() -> None:
                 nonlocal _call_result, _call_error
                 try:
-                    # M1 修复（2026-09-01）：contextvar 不跨线程——LLM 子线程
-                    # 需继承主线程的遥测会话 scope，否则 trace 事件 session=""
-                    # 落盘时被过滤（signal 事件正常、llm/tool 事件丢失实锤）。
-                    import contextvars as _cv
-                    _ctx = _cv.copy_context()
-
-                    def _inner() -> None:
-                        _call_result = call_ai_raw(candidate, url, payload)
-
-                    _ctx.run(_inner)
+                    _call_result = _ctx.run(call_ai_raw, candidate, url, payload)
                 except BaseException as e:  # noqa: BLE001
                     _call_error = e
 
-            import threading as _th
             _worker = _th.Thread(target=_sync_call, daemon=True,
                                  name="llm-sync-call")
             _worker.start()
