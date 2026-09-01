@@ -100,6 +100,8 @@ class SessionResult:
     tokens_used: int = 0
     error: str = ""
     flag_callback_done: bool = False   # 任务①：秒级提交回调已命中（driver 免二次提交）
+    duration_s: float = 0.0            # M1 遥测透传（agent 会话墙钟）
+    signal_score: float = 0.0          # M3：内核信号板 score（止损判据，flag 只是信号一种）
 
     def evidence_window(self, flag: str) -> str:
         outs = self.tool_outputs
@@ -382,6 +384,8 @@ def run_solve_session(
         res.tokens_used = r.tokens_used
         res.tokens_used = r.tokens_used
         res.error = r.error or ""
+        res.duration_s = float(getattr(r, "duration_s", 0) or 0)
+        res.signal_score = float(getattr(r, "signal_score", 0) or 0)
 
         evidence_len = 0
         for rec in r.tool_calls or []:

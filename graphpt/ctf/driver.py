@@ -441,8 +441,10 @@ def visit_challenge(client: TSecBenchClient, ch: Challenge, state: ChallengeStat
         state.tried_commands.extend(_extract_tried(sess))
         state.total_seconds += time.monotonic() - t0
         state.tokens_spent += sess.tokens_used
-        # 止损计数：本轮无新候选 flag → dry+1；有候选或正确 → 清零
-        if sess.flags or out.get("submitted"):
+        # 止损计数（M3，治理 2026-09-01）：flag 只是信号一种——
+        # 本轮有新信号（内核信号板 score>0：版本/端点/可控输入/权限变化等）
+        # 同样不算 dry，避免"拿到 SQLite 回显却被判干跑"（a-11 实锤）。
+        if sess.flags or out.get("submitted") or float(getattr(sess, "signal_score", 0) or 0) > 0:
             state.dry_sessions = 0
         else:
             state.dry_sessions += 1

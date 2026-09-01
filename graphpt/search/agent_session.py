@@ -109,6 +109,8 @@ class AgentSessionResult:
     flags: list[str] = field(default_factory=list)
     candidate_flags: list[str] = field(default_factory=list)  # conclude 的 flag 候选
     conclude: dict | None = None
+    duration_s: float = 0.0       # M1 遥测透传
+    signal_score: float = 0.0     # M3 信号板 score 快照（域止损判据用）
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +487,8 @@ class AgentSession:
             res.tokens_used = (loop_result.total_prompt_tokens or 0) + \
                               (loop_result.total_completion_tokens or 0)
             res.tool_calls = list(loop_result.tool_calls or [])
+            res.duration_s = float(getattr(loop_result, "duration_s", 0) or 0)
+            res.signal_score = float(getattr(loop_result, "signal_score", 0) or 0)
             # observed_output 组装（conclude 用）
             from graphpt.ctf.session import _tool_output_text as _tot
             parts: list[str] = []

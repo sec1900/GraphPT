@@ -154,6 +154,7 @@ class AgentLoopResult:
     messages: list[dict[str, Any]] = field(default_factory=list)  # 完整对话历史
     iterations: int = 0
     duration_s: float = 0.0   # M1 遥测：会话墙钟耗时（由 run_agent_loop 结束写入）
+    signal_score: float = 0.0  # M3：本会话信号板 score 快照（止损判据用）
 
 
 def _compact_old_tool_outputs(
@@ -1807,6 +1808,9 @@ def run_agent_loop(
             if workspace_root else ""
         if _trace_path:
             _trace_dump(_trace_key, _trace_path)
+        # M3：信号板 score 快照（供域层止损判据——flag 只是信号一种）
+        from graphpt.core.signals import get_board as _sb_get
+        result.signal_score = _sb_get(_trace_key).score_snapshot()
     except Exception:  # noqa: BLE001
         pass
     return result
