@@ -6,6 +6,9 @@ init_builtin_tools() 负责批量注册到全局注册表。
 
 from __future__ import annotations
 
+import ast
+import os
+
 from pathlib import Path
 from typing import Any, Callable
 
@@ -131,6 +134,22 @@ def _exec_run_script(code: str, *, language: str = "python", timeout_s: int = 12
     scripts_dir = _Path(__file__).resolve().parent.parent.parent / "workspace" / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     path = scripts_dir / f"run_{_uuid.uuid4().hex[:8]}{ext}"
+
+    # C1（治理 2026-09-01）：落盘前静态检查——语法错误/明显结构问题提前报，
+    # 避免把"脚本写错"当"目标无响应"反复重试（a-05 MissingSchema / a-03
+    # ValueError traceback 实锤为脚本自身缺陷）。
+    if language == "python":
+        try:
+            ast.parse(str(code or ""))
+        except SyntaxError as exc:  # noqa: BLE001
+            return {
+                "stdout": f"语法错误（第 {exc.lineno} 行）: {exc.msg}——修正脚本语法再执行，"
+                          "这不是目标环境的响应问题\n",
+                "return_code": 1,
+                "script_path": "N/A (预检未落盘)",
+                "success": False,
+                "precheck": "syntax_error",
+            }
     try:
         path.write_text(str(code or ""), encoding="utf-8")
     except OSError as exc:
@@ -149,6 +168,22 @@ def _exec_run_script(code: str, *, language: str = "python", timeout_s: int = 12
     except Exception as exc:  # noqa: BLE001
         return {"error": str(exc), "success": False}
     out = (proc.stdout or "") + (("\n[stderr] " + proc.stderr) if proc.stderr.strip() else "")
+    # C3（治理 2026-09-01）：运行期异常分类提示——脚本自身数据处理问题
+    # （MissingSchema/ValueError/IndexError 等）≠ 目标问题，引导修脚本
+    # 而非重试同一脚本。按输出内容检测（脚本常 try/except 捕获后退码 0，
+    # 只看 returncode 会漏检）。
+    if language == "python" and out:
+        c3_markers = (
+            "MissingSchema", "Invalid URL", "too many values to unpack",
+            "ValueError", "KeyError", "IndexError", "TypeError",
+            "AttributeError", "NameError", "0: No such file",
+        )
+        if any(m in out for m in c3_markers):
+            out += (
+                "\n[C3-提示] 脚本运行期异常（疑似脚本自身数据处理/请求构造问题，"
+                "不是目标环境行为）：检查被访问 URL 是否带完整 scheme（http://）、"
+                "字段解包数量、key 是否存在。修正脚本后重跑，勿对同一目标重复试探。\n"
+            )
     if len(out) > 20000:
         out = out[:20000] + f"\n...[输出截断 {len(out)} 字符]"
     # 治理 K：高相似度脚本提示（只提示不阻断）
@@ -189,6 +224,25 @@ def _exec_http_test(
     url = str(arguments.get("url", "") or "").strip()
     if not url:
         return {"error": "url required", "success": False}
+    # C2（治理 2026-09-01）：URL 自动补全——相对路径（/contracts/x.php）自动
+    # 拼 $TARGET（env 或 target.txt），缺 scheme 补 http://。
+    # 实锤：a-05 代理 phase7.py 里 MissingSchema: Invalid URL '/contracts/approve.php'
+    # 是脚本构造缺陷，但 http_test 工具侧同样防御——避免 agent 传相对路径时
+    # 白白失败。
+    if not url.startswith(("http://", "https://", "/")):
+        url = "http://" + url
+    if url.startswith("/"):
+        _host = str(os.environ.get("TARGET_HOST") or "").strip()
+        if not _host:
+            try:
+                with open("target.txt", encoding="utf-8", errors="replace") as _tf:
+                    _host = _tf.read().strip()
+            except OSError:
+                _host = ""
+        if _host:
+            url = f"http://{_host}{url}"
+    arguments = dict(arguments)
+    arguments["url"] = url
 
     script = _Path(__file__).resolve().parent / "http_test.py"
     cmd = [_sys.executable, str(script), "--url", url]
