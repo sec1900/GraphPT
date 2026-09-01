@@ -211,7 +211,7 @@ def build_task_prompt(
     # P0-2（治理 2026-09-01）：recipe 分层——跨实例可复用**通用利用步骤**
     # （data/ctf/recipes/<code>.md，约定不含 IP/flag/凭据）。旧实例的
     # evidence（响应/凭据/flag）绝不跨实例注入；recipe 是唯一跨实例通道。
-    recipe_block = _recipe_block(task.unique_code)
+    recipe_block = _recipe_block(task.unique_code, objective=task.objective or "")
 
     # P2-⑪ 题型专家分派：按题目描述推断题型，注入对应专家方法论
     expert_block = _expert_block(task.objective or task.description or "")
@@ -336,25 +336,80 @@ def _playbook_block() -> str:
         return ""
 
 
-def _recipe_block(unique_code: str) -> str:
-    """P0-2：跨实例 recipe 注入（唯一跨实例通道）。
+def _recipe_block(unique_code: str, objective: str = "") -> str:
+    """配方注入（跨实例唯一通道，治理 2026-09-01）。
 
-    约定 data/ctf/recipes/<code>.md 只含**通用利用步骤**（不含 IP/flag/凭据，
-    地址一律 $TARGET 占位）。旧实例的 evidence（flag/IP/凭据/原始日志）绝不
-    跨实例注入——recipe 是解耦层，重建实例后只有步骤可复用。
+    - 同题精确匹配：recipes/<unique_code>.md（历史成功链同名沉淀）
+    - 跨题按面匹配：recipes/*.md 的 `tags:` 行含题面关键词（中英同义，
+      sql/搜索/upload/上传/越权/会话 等）→ 供难题复用
+    - 安全约定：配方只含通用利用步骤（无 IP/flag/凭据），地址 $TARGET 占位
     """
+    # 中英同义别名：tag 词 → 待查变体（objective 小写包含任一即命中）
+    _TAG_ALIASES = {
+        "sqli": ("sql", "注入", "sqli", "查询", "search"),
+        "search": ("search", "搜索", "查询", "query"),
+        "dashboard": ("dashboard", "后台", "工作台", "系统", "门户"),
+        "upload": ("upload", "上传", "文件", "webshell"),
+        "config": ("config", "配置", "密钥", "key"),
+        "越权": ("越权", "mass", "assign", "权限", "字段", "更新"),
+        "mass": ("mass", "越权", "assign", "票据", "ticket"),
+        "ticket": ("ticket", "票据", "订单", "工单"),
+        "session": ("session", "会话", "cookie", "登录", "role"),
+        "role": ("role", "角色", "权限", "越权"),
+        "伪造": ("伪造", "forge", "解密", "decode"),
+        "group_concat": ("group", "concat", "配置表", "全库"),
+        "vsb": ("vsb", "sitebuilder", "博达"),
+        "注入": ("注入", "sqli", "sql"),
+    }
     try:
+        recipes_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                                   "data", "ctf", "recipes")
+        hits: list[str] = []
+
+        # 1) 同题精确
         safe = str(unique_code).replace("/", "_").replace(":", "_")[:60]
-        p = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-                         "data", "ctf", "recipes", f"{safe}.md")
-        if not os.path.isfile(p):
+        exact = os.path.join(recipes_dir, f"{safe}.md")
+        if os.path.isfile(exact):
+            try:
+                hits.append(open(exact, encoding="utf-8", errors="replace").read()[:3000])
+            except OSError:
+                pass
+
+        # 2) 跨题 tags 匹配（中英同义，命中数最多的配方优先）
+        if not hits and objective:
+            obj_lower = str(objective).lower()
+            best_score = 0
+            best_path = ""
+            for f in sorted(os.listdir(recipes_dir)):
+                if not f.endswith(".md") or f == f"{safe}.md":
+                    continue
+                p = os.path.join(recipes_dir, f)
+                try:
+                    head = open(p, encoding="utf-8", errors="replace").read(200)
+                except OSError:
+                    continue
+                if not head.startswith("tags:"):
+                    continue
+                tag_line = head.splitlines()[0][5:].lower() if head.splitlines() else ""
+                score = 0
+                for tag_word in tag_line.replace(",", " ").split():
+                    variants = _TAG_ALIASES.get(tag_word, (tag_word,))
+                    if any(v in obj_lower for v in variants):
+                        score += 1
+                if score > best_score:
+                    best_score = score
+                    best_path = p
+            if best_path:
+                try:
+                    hits.append(open(best_path, encoding="utf-8", errors="replace").read()[:3000])
+                except OSError:
+                    pass
+
+        if not hits:
             return ""
-        with open(p, encoding="utf-8", errors="replace") as f:
-            content = f.read()[:3000]
-        if not content.strip():
-            return ""
+        body = "\n".join(hits).strip()
         return ("\n【历史利用配方（跨实例通用步骤，非本实例证据）】"
-                "地址一律用 $TARGET 重放，勿信任何旧 IP：\n" + content.strip() + "\n")
+                "地址一律用 $TARGET 重放，勿信任何旧 IP：\n" + body + "\n")
     except Exception:
         return ""
 
